@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use crate::font::GlyphAtlas;
 use crate::pty::PtyChild;
 use crate::terminal::Terminal;
 use anyhow::{Context, Result};
@@ -12,9 +13,6 @@ use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
-
-const CELL_WIDTH_PX: f64 = 9.0;
-const CELL_HEIGHT_PX: f64 = 20.0;
 
 pub fn run(config: AppConfig) -> Result<()> {
     let event_loop = EventLoop::new().context("failed to create event loop")?;
@@ -37,6 +35,7 @@ struct AppState {
     terminal: Terminal,
     pty: PtyChild,
     pty_buf: Vec<u8>,
+    atlas: GlyphAtlas,
 }
 
 impl HandtermApp {
@@ -47,9 +46,9 @@ impl HandtermApp {
         }
     }
 
-    fn create_window_attributes(&self) -> WindowAttributes {
-        let width = f64::from(self.config.window.columns) * CELL_WIDTH_PX;
-        let height = f64::from(self.config.window.rows) * CELL_HEIGHT_PX;
+    fn create_window_attributes(&self, atlas: &GlyphAtlas) -> WindowAttributes {
+        let width = self.config.window.columns as f64 * atlas.cell_width as f64;
+        let height = self.config.window.rows as f64 * atlas.cell_height as f64;
 
         Window::default_attributes()
             .with_title("handterm")
@@ -67,9 +66,13 @@ impl ApplicationHandler for HandtermApp {
         let cols = self.config.window.columns;
         let rows = self.config.window.rows;
 
+        let atlas = GlyphAtlas::with_family(&self.config.style.font_family, self.config.style.font_size)
+            .or_else(|_| GlyphAtlas::new(self.config.style.font_size))
+            .expect("failed to load font atlas");
+
         let window = Arc::new(
             event_loop
-                .create_window(self.create_window_attributes())
+                .create_window(self.create_window_attributes(&atlas))
                 .expect("window creation should succeed"),
         );
 
@@ -88,6 +91,7 @@ impl ApplicationHandler for HandtermApp {
             terminal,
             pty,
             pty_buf: vec![0u8; 64 * 1024],
+            atlas,
         });
 
         if let Some(s) = &self.state {
@@ -240,8 +244,7 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
     let base_fg = config.style.foreground.as_u32_rgb();
 
     let grid = &state.terminal.grid;
-    let cell_w = (buf_w as f64 / grid.cols.max(1) as f64).floor() as usize;
-    let cell_h = (buf_h as f64 / grid.rows.max(1) as f64).floor() as usize;
+    let atlas = &state.atlas;
 
     buffer.fill(base_bg);
 
@@ -256,7 +259,7 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
             } else {
                 color_to_rgb(cell.fg)
             };
-            let bg_color = if cell.bg == 0 {
+            let bg = if cell.bg == 0 {
                 base_bg
             } else {
                 color_to_rgb(cell.bg)
@@ -264,41 +267,19 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
 
             let is_cursor = row == cursor_row && col == cursor_col;
 
-            let px_x = col * cell_w;
-            let px_y = row * cell_h;
+            let actual_fg = if is_cursor { base_bg } else { fg };
+            let actual_bg = if is_cursor { base_fg } else { bg };
 
-            if bg_color != base_bg || is_cursor {
-                let fill = if is_cursor { base_fg } else { bg_color };
-                for dy in 0..cell_h {
-                    let y = px_y + dy;
-                    if y >= buf_h {
-                        break;
-                    }
-                    for dx in 0..cell_w {
-                        let x = px_x + dx;
-                        if x >= buf_w {
-                            break;
-                        }
-                        buffer[y * buf_w + x] = fill;
-                    }
-                }
-            }
-
-            let ch = cell.ch;
-            if ch > 0x20 && ch < 0x7f {
-                let draw_fg = if is_cursor { base_bg } else { fg };
-                draw_simple_char(
-                    &mut buffer,
-                    buf_w,
-                    buf_h,
-                    px_x,
-                    px_y,
-                    cell_w,
-                    cell_h,
-                    ch as u8,
-                    draw_fg,
-                );
-            }
+            atlas.draw_char(
+                &mut buffer,
+                buf_w,
+                buf_h,
+                col,
+                row,
+                cell.ch,
+                actual_fg,
+                actual_bg,
+            );
         }
     }
 
@@ -306,33 +287,4 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
         .present()
         .map_err(|e| anyhow::anyhow!("failed presenting frame: {e}"))?;
     Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_simple_char(
-    buffer: &mut [u32],
-    buf_w: usize,
-    buf_h: usize,
-    px_x: usize,
-    px_y: usize,
-    cell_w: usize,
-    cell_h: usize,
-    _ch: u8,
-    fg: u32,
-) {
-    let mid_y = px_y + cell_h / 2;
-    let start_x = px_x + 1;
-    let end_x = (px_x + cell_w).saturating_sub(1).min(buf_w);
-
-    if mid_y < buf_h {
-        for x in start_x..end_x {
-            buffer[mid_y * buf_w + x] = fg;
-        }
-    }
-    let above = mid_y.saturating_sub(1);
-    if above < buf_h && above >= px_y {
-        for x in start_x..end_x {
-            buffer[above * buf_w + x] = fg;
-        }
-    }
 }

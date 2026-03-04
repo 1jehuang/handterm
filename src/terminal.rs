@@ -16,6 +16,14 @@ pub struct Terminal {
     pub application_cursor_keys: bool,
     pub mouse_mode: MouseMode,
     pub mouse_encoding: MouseEncoding,
+    pub cursor_style: CursorStyle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorStyle {
+    Block,
+    Underline,
+    Bar,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +59,7 @@ impl Terminal {
             application_cursor_keys: false,
             mouse_mode: MouseMode::Off,
             mouse_encoding: MouseEncoding::X10,
+            cursor_style: CursorStyle::Block,
         }
     }
 
@@ -312,6 +321,14 @@ impl Terminal {
             // Cursor save/restore (ANSI.SYS style)
             (0, b's') => self.save_cursor(),
             (0, b'u') => self.restore_cursor(),
+            (b' ', b'q') => {
+                match self.parser.param(0, 0) {
+                    0 | 1 | 2 => self.cursor_style = CursorStyle::Block,
+                    3 | 4 => self.cursor_style = CursorStyle::Underline,
+                    5 | 6 => self.cursor_style = CursorStyle::Bar,
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }

@@ -567,6 +567,7 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
 
     let (cursor_col, cursor_row) = grid.cursor_pos();
     let show_cursor = state.terminal.cursor_visible;
+    let cursor_style = state.terminal.cursor_style;
 
     for row in 0..grid.rows {
         for col in 0..grid.cols {
@@ -575,24 +576,42 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
 
             let has_content = cell.ch > 0x20;
             let has_custom_bg = cell.bg != crate::grid::COLOR_DEFAULT;
+            let has_attrs = cell.attrs != 0;
 
             if !is_cursor && !has_content && !has_custom_bg {
                 continue;
             }
 
-            let fg = if cell.fg == crate::grid::COLOR_DEFAULT {
+            let mut fg = if cell.fg == crate::grid::COLOR_DEFAULT {
                 base_fg
             } else {
                 color_to_rgb(cell.fg)
             };
-            let bg = if cell.bg == crate::grid::COLOR_DEFAULT {
+            let mut bg = if cell.bg == crate::grid::COLOR_DEFAULT {
                 base_bg
             } else {
                 color_to_rgb(cell.bg)
             };
 
-            let actual_fg = if is_cursor { base_bg } else { fg };
-            let actual_bg = if is_cursor { base_fg } else { bg };
+            if has_attrs {
+                use crate::grid::*;
+                if cell.attrs & ATTR_BOLD != 0 && cell.fg != crate::grid::COLOR_DEFAULT && (cell.fg & crate::grid::COLOR_FLAG_RGB == 0) && (cell.fg as u8) < 8 {
+                    fg = color_to_rgb(cell.fg + 8);
+                }
+                if cell.attrs & ATTR_DIM != 0 {
+                    let r = ((fg >> 16) & 0xff) * 2 / 3;
+                    let g = ((fg >> 8) & 0xff) * 2 / 3;
+                    let b = (fg & 0xff) * 2 / 3;
+                    fg = (r << 16) | (g << 8) | b;
+                }
+                if cell.attrs & ATTR_INVERSE != 0 {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+            }
+
+            let is_block_cursor = is_cursor && cursor_style == crate::terminal::CursorStyle::Block;
+            let actual_fg = if is_block_cursor { base_bg } else { fg };
+            let actual_bg = if is_block_cursor { base_fg } else { bg };
 
             atlas.draw_char(
                 &mut buffer,
@@ -604,6 +623,60 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
                 actual_fg,
                 actual_bg,
             );
+
+            if has_attrs {
+                use crate::grid::*;
+                let px_x = col * atlas.cell_width;
+                let px_y = row * atlas.cell_height;
+                let cw = atlas.cell_width;
+                let ch_h = atlas.cell_height;
+                let draw_fg = actual_fg;
+
+                if cell.attrs & ATTR_UNDERLINE != 0 {
+                    let y = (px_y + ch_h).saturating_sub(1);
+                    if y < buf_h {
+                        for x in px_x..(px_x + cw).min(buf_w) {
+                            buffer[y * buf_w + x] = draw_fg;
+                        }
+                    }
+                }
+                if cell.attrs & ATTR_STRIKETHROUGH != 0 {
+                    let y = px_y + ch_h / 2;
+                    if y < buf_h {
+                        for x in px_x..(px_x + cw).min(buf_w) {
+                            buffer[y * buf_w + x] = draw_fg;
+                        }
+                    }
+                }
+            }
+
+            if is_cursor && cursor_style != crate::terminal::CursorStyle::Block {
+                let px_x = col * atlas.cell_width;
+                let px_y = row * atlas.cell_height;
+                let cw = atlas.cell_width;
+                let ch = atlas.cell_height;
+
+                match cursor_style {
+                    crate::terminal::CursorStyle::Bar => {
+                        let bar_w = 2.min(cw);
+                        for y in px_y..(px_y + ch).min(buf_h) {
+                            for x in px_x..(px_x + bar_w).min(buf_w) {
+                                buffer[y * buf_w + x] = base_fg;
+                            }
+                        }
+                    }
+                    crate::terminal::CursorStyle::Underline => {
+                        let ul_h = 2.min(ch);
+                        let y_start = (px_y + ch).saturating_sub(ul_h);
+                        for y in y_start..(px_y + ch).min(buf_h) {
+                            for x in px_x..(px_x + cw).min(buf_w) {
+                                buffer[y * buf_w + x] = base_fg;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 

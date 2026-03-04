@@ -8,6 +8,13 @@ pub struct Cell {
     pub flags: u8,
 }
 
+pub const ATTR_BOLD: u8 = 0x01;
+pub const ATTR_DIM: u8 = 0x02;
+pub const ATTR_ITALIC: u8 = 0x04;
+pub const ATTR_UNDERLINE: u8 = 0x08;
+pub const ATTR_INVERSE: u8 = 0x10;
+pub const ATTR_STRIKETHROUGH: u8 = 0x20;
+
 impl Cell {
     pub const BLANK: Self = Self {
         ch: b' ' as u32,
@@ -17,19 +24,24 @@ impl Cell {
         flags: 0,
     };
 
-    #[cfg(test)]
-    fn char_display(&self) -> char {
+    #[allow(dead_code)]
+    pub fn char_display(&self) -> char {
         char::from_u32(self.ch).unwrap_or(' ')
     }
 }
 
 pub struct Grid {
-    cols: usize,
-    rows: usize,
+    pub cols: usize,
+    pub rows: usize,
     cursor_col: usize,
     cursor_row: usize,
     cells: Vec<Cell>,
     top_row: usize,
+    current_fg: u8,
+    current_bg: u8,
+    current_attrs: u8,
+    scroll_top: usize,
+    scroll_bottom: usize,
 }
 
 impl Grid {
@@ -43,6 +55,11 @@ impl Grid {
             cursor_row: 0,
             cells: vec![Cell::BLANK; cols * rows],
             top_row: 0,
+            current_fg: 0,
+            current_bg: 0,
+            current_attrs: 0,
+            scroll_top: 0,
+            scroll_bottom: rows,
         }
     }
 
@@ -53,20 +70,13 @@ impl Grid {
         self.cursor_col = 0;
         self.cursor_row = 0;
         self.top_row = 0;
+        self.scroll_top = 0;
+        self.scroll_bottom = self.rows;
         self.cells = vec![Cell::BLANK; self.cols * self.rows];
     }
 
-    #[cfg(test)]
-    pub fn cursor(&self) -> (usize, usize) {
+    pub fn cursor_pos(&self) -> (usize, usize) {
         (self.cursor_col, self.cursor_row)
-    }
-
-    #[cfg(test)]
-    pub fn clear(&mut self) {
-        self.cells.fill(Cell::BLANK);
-        self.cursor_col = 0;
-        self.cursor_row = 0;
-        self.top_row = 0;
     }
 
     #[inline(always)]
@@ -74,9 +84,21 @@ impl Grid {
         (self.top_row + logical_row) % self.rows
     }
 
-    #[cfg(test)]
-    fn cell_index(&self, logical_row: usize, col: usize) -> usize {
+    fn cell_index_at(&self, logical_row: usize, col: usize) -> usize {
         self.physical_row(logical_row) * self.cols + col
+    }
+
+    pub fn cell_at(&self, row: usize, col: usize) -> &Cell {
+        let idx = self.cell_index_at(row, col);
+        &self.cells[idx]
+    }
+
+    #[allow(dead_code)]
+    pub fn cell_char(&self, row: usize, col: usize) -> char {
+        if row >= self.rows || col >= self.cols {
+            return ' ';
+        }
+        self.cell_at(row, col).char_display()
     }
 
     #[inline]
@@ -100,12 +122,9 @@ impl Grid {
                 self.write_ascii_run(&bytes[run_start..i]);
             } else {
                 match b {
-                    b'\n' => self.new_line(),
+                    b'\n' => self.line_feed(),
                     b'\r' => self.cursor_col = 0,
-                    b'\t' => {
-                        let next = ((self.cursor_col / 8) + 1) * 8;
-                        self.cursor_col = next.min(self.cols.saturating_sub(1));
-                    }
+                    b'\t' => self.tab(),
                     _ => {}
                 }
                 i += 1;
@@ -129,6 +148,9 @@ impl Grid {
             let chunk_len = remaining_in_row.min(run_len - ri);
 
             let dest_start = row_base + self.cursor_col;
+            let fg = self.current_fg;
+            let bg = self.current_bg;
+            let attrs = self.current_attrs;
 
             unsafe {
                 let base_ptr = self.cells.as_mut_ptr().add(dest_start);
@@ -136,6 +158,9 @@ impl Grid {
                 for j in 0..chunk_len {
                     let cell = &mut *base_ptr.add(j);
                     cell.ch = *src_ptr.add(j) as u32;
+                    cell.fg = fg;
+                    cell.bg = bg;
+                    cell.attrs = attrs;
                 }
             }
 
@@ -143,63 +168,328 @@ impl Grid {
             self.cursor_col += chunk_len;
 
             if self.cursor_col >= self.cols {
-                self.new_line();
+                self.cursor_col = 0;
+                if self.cursor_row + 1 >= self.scroll_bottom {
+                    self.scroll_up();
+                } else {
+                    self.cursor_row += 1;
+                }
             }
         }
     }
 
-    #[cfg(test)]
-    pub fn write_str(&mut self, text: &str) {
-        self.write_bytes(text.as_bytes());
-    }
-
-    #[cfg(test)]
-    pub fn get(&self, row: usize, col: usize) -> Option<&Cell> {
-        if row >= self.rows || col >= self.cols {
-            return None;
+    #[allow(dead_code)]
+    pub fn put_char(&mut self, ch: u32) {
+        if self.cursor_row >= self.rows || self.cursor_col >= self.cols {
+            return;
         }
-        let idx = self.cell_index(row, col);
-        self.cells.get(idx)
-    }
+        let idx = self.cell_index_at(self.cursor_row, self.cursor_col);
+        let cell = &mut self.cells[idx];
+        cell.ch = ch;
+        cell.fg = self.current_fg;
+        cell.bg = self.current_bg;
+        cell.attrs = self.current_attrs;
 
-    #[cfg(test)]
-    pub fn rows_as_strings(&self) -> Vec<String> {
-        let mut out = Vec::with_capacity(self.rows);
-        for row in 0..self.rows {
-            let phys = self.physical_row(row);
-            let start = phys * self.cols;
-            let end = start + self.cols;
-            let mut s = String::with_capacity(self.cols);
-            for cell in &self.cells[start..end] {
-                s.push(cell.char_display());
+        self.cursor_col += 1;
+        if self.cursor_col >= self.cols {
+            self.cursor_col = 0;
+            if self.cursor_row + 1 >= self.scroll_bottom {
+                self.scroll_up();
+            } else {
+                self.cursor_row += 1;
             }
-            out.push(s);
         }
-        out
     }
 
-    #[inline(always)]
-    fn new_line(&mut self) {
-        self.cursor_col = 0;
-        if self.cursor_row + 1 >= self.rows {
+    pub fn line_feed(&mut self) {
+        if self.cursor_row + 1 >= self.scroll_bottom {
             self.scroll_up();
         } else {
             self.cursor_row += 1;
         }
     }
 
-    #[inline(always)]
+    pub fn carriage_return(&mut self) {
+        self.cursor_col = 0;
+    }
+
+    pub fn tab(&mut self) {
+        let next = ((self.cursor_col / 8) + 1) * 8;
+        self.cursor_col = next.min(self.cols.saturating_sub(1));
+    }
+
+    pub fn backspace(&mut self) {
+        if self.cursor_col > 0 {
+            self.cursor_col -= 1;
+        }
+    }
+
+    pub fn reverse_index(&mut self) {
+        if self.cursor_row == self.scroll_top {
+            self.scroll_down();
+        } else if self.cursor_row > 0 {
+            self.cursor_row -= 1;
+        }
+    }
+
+    pub fn set_cursor(&mut self, row: usize, col: usize) {
+        self.cursor_row = row.min(self.rows.saturating_sub(1));
+        self.cursor_col = col.min(self.cols.saturating_sub(1));
+    }
+
+    pub fn set_cursor_row(&mut self, row: usize) {
+        self.cursor_row = row.min(self.rows.saturating_sub(1));
+    }
+
+    pub fn set_cursor_col(&mut self, col: usize) {
+        self.cursor_col = col.min(self.cols.saturating_sub(1));
+    }
+
+    pub fn move_cursor_up(&mut self, n: usize) {
+        self.cursor_row = self.cursor_row.saturating_sub(n);
+    }
+
+    pub fn move_cursor_down(&mut self, n: usize) {
+        self.cursor_row = (self.cursor_row + n).min(self.rows.saturating_sub(1));
+    }
+
+    pub fn move_cursor_right(&mut self, n: usize) {
+        self.cursor_col = (self.cursor_col + n).min(self.cols.saturating_sub(1));
+    }
+
+    pub fn move_cursor_left(&mut self, n: usize) {
+        self.cursor_col = self.cursor_col.saturating_sub(n);
+    }
+
+    pub fn erase_all(&mut self) {
+        for r in 0..self.rows {
+            self.erase_row(r);
+        }
+    }
+
+    pub fn erase_below(&mut self) {
+        self.erase_line_right();
+        for r in (self.cursor_row + 1)..self.rows {
+            self.erase_row(r);
+        }
+    }
+
+    pub fn erase_above(&mut self) {
+        self.erase_line_left();
+        for r in 0..self.cursor_row {
+            self.erase_row(r);
+        }
+    }
+
+    fn erase_row(&mut self, row: usize) {
+        let phys = self.physical_row(row);
+        let start = phys * self.cols;
+        let end = start + self.cols;
+        self.cells[start..end].fill(Cell::BLANK);
+    }
+
+    pub fn erase_line_right(&mut self) {
+        if self.cursor_row >= self.rows {
+            return;
+        }
+        let phys = self.physical_row(self.cursor_row);
+        let start = phys * self.cols + self.cursor_col;
+        let end = phys * self.cols + self.cols;
+        self.cells[start..end].fill(Cell::BLANK);
+    }
+
+    pub fn erase_line_left(&mut self) {
+        if self.cursor_row >= self.rows {
+            return;
+        }
+        let phys = self.physical_row(self.cursor_row);
+        let start = phys * self.cols;
+        let end = phys * self.cols + self.cursor_col + 1;
+        self.cells[start..end.min(start + self.cols)].fill(Cell::BLANK);
+    }
+
+    pub fn erase_line_all(&mut self) {
+        self.erase_row(self.cursor_row);
+    }
+
+    pub fn erase_chars(&mut self, n: usize) {
+        if self.cursor_row >= self.rows {
+            return;
+        }
+        let phys = self.physical_row(self.cursor_row);
+        let start = phys * self.cols + self.cursor_col;
+        let end = (start + n).min(phys * self.cols + self.cols);
+        self.cells[start..end].fill(Cell::BLANK);
+    }
+
+    pub fn insert_lines(&mut self, n: usize) {
+        for _ in 0..n {
+            self.scroll_down();
+        }
+    }
+
+    pub fn delete_lines(&mut self, n: usize) {
+        for _ in 0..n {
+            self.scroll_up();
+        }
+    }
+
+    pub fn insert_chars(&mut self, n: usize) {
+        if self.cursor_row >= self.rows {
+            return;
+        }
+        let phys = self.physical_row(self.cursor_row);
+        let row_start = phys * self.cols;
+        let col = self.cursor_col;
+        let n = n.min(self.cols - col);
+        let src = row_start + col;
+        let dest = row_start + col + n;
+        let move_count = self.cols - col - n;
+        if move_count > 0 {
+            self.cells.copy_within(src..src + move_count, dest);
+        }
+        self.cells[src..src + n].fill(Cell::BLANK);
+    }
+
+    pub fn delete_chars(&mut self, n: usize) {
+        if self.cursor_row >= self.rows {
+            return;
+        }
+        let phys = self.physical_row(self.cursor_row);
+        let row_start = phys * self.cols;
+        let col = self.cursor_col;
+        let n = n.min(self.cols - col);
+        let src = row_start + col + n;
+        let dest = row_start + col;
+        let move_count = self.cols - col - n;
+        if move_count > 0 {
+            self.cells.copy_within(src..src + move_count, dest);
+        }
+        let blank_start = row_start + self.cols - n;
+        self.cells[blank_start..row_start + self.cols].fill(Cell::BLANK);
+    }
+
+    pub fn set_scroll_region(&mut self, top: usize, bottom: usize) {
+        self.scroll_top = top.min(self.rows.saturating_sub(1));
+        self.scroll_bottom = bottom.min(self.rows).max(self.scroll_top + 1);
+        self.cursor_row = 0;
+        self.cursor_col = 0;
+    }
+
+    pub fn scroll_up_n(&mut self, n: usize) {
+        for _ in 0..n {
+            self.scroll_up();
+        }
+    }
+
+    pub fn scroll_down_n(&mut self, n: usize) {
+        for _ in 0..n {
+            self.scroll_down();
+        }
+    }
+
     fn scroll_up(&mut self) {
         if self.rows == 0 || self.cols == 0 {
             return;
         }
 
-        let old_top = self.physical_row(0);
-        let blank_start = old_top * self.cols;
-        let blank_end = blank_start + self.cols;
-        self.cells[blank_start..blank_end].fill(Cell::BLANK);
+        if self.scroll_top == 0 && self.scroll_bottom == self.rows {
+            let old_top = self.physical_row(0);
+            let blank_start = old_top * self.cols;
+            let blank_end = blank_start + self.cols;
+            self.cells[blank_start..blank_end].fill(Cell::BLANK);
+            self.top_row = (self.top_row + 1) % self.rows;
+        } else {
+            for r in self.scroll_top..self.scroll_bottom.saturating_sub(1) {
+                let src = self.physical_row(r + 1) * self.cols;
+                let dst = self.physical_row(r) * self.cols;
+                for c in 0..self.cols {
+                    self.cells[dst + c] = self.cells[src + c];
+                }
+            }
+            let last = self.physical_row(self.scroll_bottom.saturating_sub(1));
+            let start = last * self.cols;
+            self.cells[start..start + self.cols].fill(Cell::BLANK);
+        }
+    }
 
-        self.top_row = (self.top_row + 1) % self.rows;
+    fn scroll_down(&mut self) {
+        if self.rows == 0 || self.cols == 0 {
+            return;
+        }
+
+        for r in (self.scroll_top + 1..self.scroll_bottom).rev() {
+            let src = self.physical_row(r - 1) * self.cols;
+            let dst = self.physical_row(r) * self.cols;
+            for c in 0..self.cols {
+                self.cells[dst + c] = self.cells[src + c];
+            }
+        }
+        let first = self.physical_row(self.scroll_top);
+        let start = first * self.cols;
+        self.cells[start..start + self.cols].fill(Cell::BLANK);
+    }
+
+    pub fn reset_attrs(&mut self) {
+        self.current_fg = 0;
+        self.current_bg = 0;
+        self.current_attrs = 0;
+    }
+
+    pub fn set_bold(&mut self, on: bool) {
+        if on {
+            self.current_attrs |= ATTR_BOLD;
+        } else {
+            self.current_attrs &= !ATTR_BOLD;
+        }
+    }
+
+    pub fn set_dim(&mut self, on: bool) {
+        if on {
+            self.current_attrs |= ATTR_DIM;
+        } else {
+            self.current_attrs &= !ATTR_DIM;
+        }
+    }
+
+    pub fn set_italic(&mut self, on: bool) {
+        if on {
+            self.current_attrs |= ATTR_ITALIC;
+        } else {
+            self.current_attrs &= !ATTR_ITALIC;
+        }
+    }
+
+    pub fn set_underline(&mut self, on: bool) {
+        if on {
+            self.current_attrs |= ATTR_UNDERLINE;
+        } else {
+            self.current_attrs &= !ATTR_UNDERLINE;
+        }
+    }
+
+    pub fn set_inverse(&mut self, on: bool) {
+        if on {
+            self.current_attrs |= ATTR_INVERSE;
+        } else {
+            self.current_attrs &= !ATTR_INVERSE;
+        }
+    }
+
+    pub fn set_strikethrough(&mut self, on: bool) {
+        if on {
+            self.current_attrs |= ATTR_STRIKETHROUGH;
+        } else {
+            self.current_attrs &= !ATTR_STRIKETHROUGH;
+        }
+    }
+
+    pub fn set_fg(&mut self, color: u8) {
+        self.current_fg = color;
+    }
+
+    pub fn set_bg(&mut self, color: u8) {
+        self.current_bg = color;
     }
 }
 
@@ -210,30 +500,38 @@ mod tests {
     #[test]
     fn writes_simple_text() {
         let mut g = Grid::new(8, 2, [1, 2, 3], [0, 0, 0]);
-        g.write_str("abc");
-        assert_eq!(g.get(0, 0).expect("cell").ch, b'a' as u32);
-        assert_eq!(g.get(0, 1).expect("cell").ch, b'b' as u32);
-        assert_eq!(g.get(0, 2).expect("cell").ch, b'c' as u32);
+        g.write_bytes(b"abc");
+        assert_eq!(g.cell_char(0, 0), 'a');
+        assert_eq!(g.cell_char(0, 1), 'b');
+        assert_eq!(g.cell_char(0, 2), 'c');
     }
 
     #[test]
     fn wraps_and_scrolls() {
         let mut g = Grid::new(4, 2, [1, 2, 3], [0, 0, 0]);
-        g.write_str("abcdefghij");
-        let rows = g.rows_as_strings();
-        assert_eq!(rows[0], "efgh");
-        assert_eq!(rows[1], "ij  ");
+        g.write_bytes(b"abcdefghij");
+        assert_eq!(g.cell_char(0, 0), 'e');
+        assert_eq!(g.cell_char(1, 0), 'i');
     }
 
     #[test]
-    fn clears_grid() {
-        let mut g = Grid::new(4, 2, [1, 2, 3], [0, 0, 0]);
-        g.write_str("hi");
-        g.clear();
-        let rows = g.rows_as_strings();
-        assert_eq!(rows[0], "    ");
-        assert_eq!(rows[1], "    ");
-        assert_eq!(g.cursor(), (0, 0));
+    fn cursor_movement() {
+        let mut g = Grid::new(10, 5, [0, 0, 0], [0, 0, 0]);
+        g.set_cursor(2, 3);
+        g.put_char(b'X' as u32);
+        assert_eq!(g.cell_char(2, 3), 'X');
+    }
+
+    #[test]
+    fn erase_line() {
+        let mut g = Grid::new(10, 2, [0, 0, 0], [0, 0, 0]);
+        g.write_bytes(b"helloworld");
+        g.set_cursor(0, 3);
+        g.erase_line_right();
+        assert_eq!(g.cell_char(0, 0), 'h');
+        assert_eq!(g.cell_char(0, 2), 'l');
+        assert_eq!(g.cell_char(0, 3), ' ');
+        assert_eq!(g.cell_char(0, 9), ' ');
     }
 
     #[test]

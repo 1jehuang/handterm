@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::pty::{ForkptyResult, Winsize, forkpty};
 use nix::unistd::{Pid, execvp};
 use std::ffi::{CStr, CString};
@@ -23,25 +24,32 @@ impl PtyChild {
             ws_ypixel: 0,
         };
 
-        // SAFETY: This is called before any application threads are started.
-        // The child does an immediate execvp and does not return to Rust code.
         let result = unsafe { forkpty(Some(&ws), None) }.context("forkpty failed")?;
 
         match result {
-            ForkptyResult::Parent { child, master } => Ok(Self {
-                master_fd: master,
-                _child_pid: child,
-            }),
+            ForkptyResult::Parent { child, master } => {
+                let pty = Self {
+                    master_fd: master,
+                    _child_pid: child,
+                };
+                pty.set_nonblocking()?;
+                Ok(pty)
+            }
             ForkptyResult::Child => {
                 let shell = CString::new(shell_path)
                     .with_context(|| format!("invalid shell path: {shell_path}"))?;
                 let args: [&CStr; 1] = [shell.as_c_str()];
                 let _ = execvp(shell.as_c_str(), &args);
-
-                // Child must not unwind into parent runtime.
                 std::process::exit(127);
             }
         }
+    }
+
+    fn set_nonblocking(&self) -> Result<()> {
+        let flags = fcntl(&self.master_fd, FcntlArg::F_GETFL).context("F_GETFL failed")?;
+        let new_flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
+        fcntl(&self.master_fd, FcntlArg::F_SETFL(new_flags)).context("F_SETFL failed")?;
+        Ok(())
     }
 
     pub fn write_all(&self, data: &[u8]) -> Result<()> {
@@ -55,7 +63,11 @@ impl PtyChild {
     }
 
     pub fn try_read(&self, out: &mut [u8]) -> Result<usize> {
-        nix::unistd::read(&self.master_fd, out).context("pty read failed")
+        match nix::unistd::read(&self.master_fd, out) {
+            Ok(n) => Ok(n),
+            Err(nix::errno::Errno::EAGAIN) => Ok(0),
+            Err(e) => Err(e).context("pty read failed"),
+        }
     }
 }
 

@@ -6,6 +6,7 @@ mod grid;
 mod metrics;
 mod parser;
 mod pty;
+mod terminal;
 
 use anyhow::Result;
 use clap::Parser;

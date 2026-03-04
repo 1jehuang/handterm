@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum State {
@@ -12,10 +11,8 @@ pub enum State {
     DcsEntry,
 }
 
-#[allow(dead_code)]
 pub const MAX_PARAMS: usize = 16;
 
-#[allow(dead_code)]
 pub struct Parser {
     state: State,
     params: [u16; MAX_PARAMS],
@@ -24,7 +21,6 @@ pub struct Parser {
     intermediate: u8,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Print(u8),
@@ -42,7 +38,6 @@ pub enum Action {
     Nop,
 }
 
-#[allow(dead_code)]
 impl Parser {
     pub const fn new() -> Self {
         Self {

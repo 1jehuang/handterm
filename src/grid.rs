@@ -90,7 +90,9 @@ pub struct Grid {
     current_attrs: u8,
     scroll_top: usize,
     scroll_bottom: usize,
-    scrollback: std::collections::VecDeque<Vec<Cell>>,
+    scrollback: Vec<Cell>,
+    scrollback_len: usize,
+    scrollback_head: usize,
     scrollback_max: usize,
     pub scroll_offset: usize,
     pub selection: Option<Selection>,
@@ -108,6 +110,7 @@ impl Grid {
     pub fn new(cols: u16, rows: u16, _default_fg: [u8; 3], _default_bg: [u8; 3]) -> Self {
         let cols = cols as usize;
         let rows = rows as usize;
+        let scrollback_max = 10000;
         Self {
             cols,
             rows,
@@ -120,8 +123,10 @@ impl Grid {
             current_attrs: 0,
             scroll_top: 0,
             scroll_bottom: rows,
-            scrollback: std::collections::VecDeque::new(),
-            scrollback_max: 10000,
+            scrollback: Vec::new(),
+            scrollback_len: 0,
+            scrollback_head: 0,
+            scrollback_max,
             scroll_offset: 0,
             selection: None,
         }
@@ -220,23 +225,28 @@ impl Grid {
     }
 
     pub fn scrollback_len(&self) -> usize {
-        self.scrollback.len()
+        self.scrollback_len
     }
 
     pub fn cell_at_scroll(&self, row: usize, col: usize) -> &Cell {
         if self.scroll_offset == 0 {
             return self.cell_at(row, col);
         }
-        let sb_len = self.scrollback.len();
+        let sb_len = self.scrollback_len;
         if self.scroll_offset > sb_len {
             return &Cell::BLANK;
         }
         let sb_start = sb_len - self.scroll_offset;
         let line_in_sb = sb_start + row;
         if line_in_sb < sb_len {
-            let sb_row = &self.scrollback[line_in_sb];
-            if col < sb_row.len() {
-                &sb_row[col]
+            let ring_idx = if self.scrollback_len >= self.scrollback_max {
+                (self.scrollback_head + line_in_sb) % self.scrollback_max
+            } else {
+                line_in_sb
+            };
+            let offset = ring_idx * self.cols;
+            if col < self.cols && offset + col < self.scrollback.len() {
+                &self.scrollback[offset + col]
             } else {
                 &Cell::BLANK
             }
@@ -627,15 +637,25 @@ impl Grid {
         if self.scroll_top == 0 && self.scroll_bottom == self.rows {
             let old_top = self.physical_row(0);
             let blank_start = old_top * self.cols;
-            let blank_end = blank_start + self.cols;
+            let cols = self.cols;
 
-            let row = self.cells[blank_start..blank_end].to_vec();
-            self.scrollback.push_back(row);
-            if self.scrollback.len() > self.scrollback_max {
-                self.scrollback.pop_front();
+            if self.scrollback_len < self.scrollback_max {
+                let needed = (self.scrollback_len + 1) * cols;
+                if self.scrollback.len() < needed {
+                    self.scrollback.resize(needed, Cell::BLANK);
+                }
+                let dest = self.scrollback_len * cols;
+                self.scrollback[dest..dest + cols]
+                    .copy_from_slice(&self.cells[blank_start..blank_start + cols]);
+                self.scrollback_len += 1;
+            } else {
+                let dest = self.scrollback_head * cols;
+                self.scrollback[dest..dest + cols]
+                    .copy_from_slice(&self.cells[blank_start..blank_start + cols]);
+                self.scrollback_head = (self.scrollback_head + 1) % self.scrollback_max;
             }
 
-            self.cells[blank_start..blank_end].fill(Cell::BLANK);
+            self.cells[blank_start..blank_start + cols].fill(Cell::BLANK);
             self.top_row = (self.top_row + 1) % self.rows;
         } else {
             let cols = self.cols;

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, Size};
-use winit::event::{ElementState, Modifiers, WindowEvent};
+use winit::event::{ElementState, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
@@ -47,6 +47,8 @@ struct AppState {
     atlas: GlyphAtlas,
     pty_closed: bool,
     modifiers: Modifiers,
+    mouse_col: usize,
+    mouse_row: usize,
 }
 
 impl HandtermApp {
@@ -106,6 +108,8 @@ impl ApplicationHandler for HandtermApp {
             atlas,
             pty_closed: false,
             modifiers: Modifiers::default(),
+            mouse_col: 0,
+            mouse_row: 0,
         });
 
         if let Some(s) = &self.state {
@@ -200,6 +204,40 @@ impl ApplicationHandler for HandtermApp {
                         ctrl,
                     ) {
                         let _ = state.pty.write_all(&bytes);
+                    }
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let cw = state.atlas.cell_width.max(1);
+                let ch = state.atlas.cell_height.max(1);
+                state.mouse_col = position.x as usize / cw;
+                state.mouse_row = position.y as usize / ch;
+            }
+            WindowEvent::MouseInput { state: btn_state, button, .. } => {
+                let btn = match button {
+                    MouseButton::Left => 0u8,
+                    MouseButton::Middle => 1,
+                    MouseButton::Right => 2,
+                    _ => return,
+                };
+                let pressed = btn_state == ElementState::Pressed;
+                if let Some(bytes) = state.terminal.encode_mouse(btn, state.mouse_col, state.mouse_row, pressed) {
+                    let _ = state.pty.write_all(&bytes);
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (up, lines) = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => (y > 0.0, y.abs().max(1.0) as usize),
+                    MouseScrollDelta::PixelDelta(pos) => {
+                        let ch = state.atlas.cell_height.max(1) as f64;
+                        (pos.y > 0.0, (pos.y.abs() / ch).max(1.0) as usize)
+                    }
+                };
+                if state.terminal.mouse_mode != crate::terminal::MouseMode::Off {
+                    for _ in 0..lines {
+                        if let Some(bytes) = state.terminal.encode_mouse_scroll(up, state.mouse_col, state.mouse_row) {
+                            let _ = state.pty.write_all(&bytes);
+                        }
                     }
                 }
             }

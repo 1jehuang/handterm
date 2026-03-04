@@ -14,6 +14,24 @@ pub struct Terminal {
     mode_bracketed_paste: bool,
     mode_focus_events: bool,
     pub application_cursor_keys: bool,
+    pub mouse_mode: MouseMode,
+    pub mouse_encoding: MouseEncoding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseMode {
+    Off,
+    X10,
+    Normal,
+    ButtonEvent,
+    AnyEvent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseEncoding {
+    X10,
+    Utf8,
+    Sgr,
 }
 
 impl Terminal {
@@ -31,6 +49,8 @@ impl Terminal {
             mode_bracketed_paste: false,
             mode_focus_events: false,
             application_cursor_keys: false,
+            mouse_mode: MouseMode::Off,
+            mouse_encoding: MouseEncoding::X10,
         }
     }
 
@@ -57,6 +77,63 @@ impl Terminal {
 
     pub fn bracketed_paste_mode(&self) -> bool {
         self.mode_bracketed_paste
+    }
+
+    pub fn encode_mouse(&self, button: u8, col: usize, row: usize, pressed: bool) -> Option<Vec<u8>> {
+        if self.mouse_mode == MouseMode::Off {
+            return None;
+        }
+        let cx = col + 1;
+        let cy = row + 1;
+
+        match self.mouse_encoding {
+            MouseEncoding::Sgr => {
+                let ch = if pressed { 'M' } else { 'm' };
+                Some(format!("\x1b[<{};{};{}{}", button, cx, cy, ch).into_bytes())
+            }
+            MouseEncoding::X10 | MouseEncoding::Utf8 => {
+                if !pressed && self.mouse_mode != MouseMode::X10 {
+                    let cb = 3 + 32;
+                    if cx <= 223 && cy <= 223 {
+                        Some(vec![0x1b, b'[', b'M', cb, (cx as u8) + 32, (cy as u8) + 32])
+                    } else {
+                        None
+                    }
+                } else if pressed {
+                    let cb = button + 32;
+                    if cx <= 223 && cy <= 223 {
+                        Some(vec![0x1b, b'[', b'M', cb, (cx as u8) + 32, (cy as u8) + 32])
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    pub fn encode_mouse_scroll(&self, up: bool, col: usize, row: usize) -> Option<Vec<u8>> {
+        if self.mouse_mode == MouseMode::Off {
+            return None;
+        }
+        let button = if up { 64 } else { 65 };
+        let cx = col + 1;
+        let cy = row + 1;
+
+        match self.mouse_encoding {
+            MouseEncoding::Sgr => {
+                Some(format!("\x1b[<{};{};{}M", button, cx, cy).into_bytes())
+            }
+            MouseEncoding::X10 | MouseEncoding::Utf8 => {
+                let cb = button + 32;
+                if cx <= 223 && cy <= 223 {
+                    Some(vec![0x1b, b'[', b'M', cb, (cx as u8) + 32, (cy as u8) + 32])
+                } else {
+                    None
+                }
+            }
+        }
     }
 
     pub fn process(&mut self, data: &[u8]) {
@@ -200,6 +277,12 @@ impl Terminal {
                         }
                         2004 => self.mode_bracketed_paste = true,
                         1004 => self.mode_focus_events = true,
+                        9 => self.mouse_mode = MouseMode::X10,
+                        1000 => self.mouse_mode = MouseMode::Normal,
+                        1002 => self.mouse_mode = MouseMode::ButtonEvent,
+                        1003 => self.mouse_mode = MouseMode::AnyEvent,
+                        1005 => self.mouse_encoding = MouseEncoding::Utf8,
+                        1006 => self.mouse_encoding = MouseEncoding::Sgr,
                         _ => {}
                     }
                 }
@@ -220,6 +303,8 @@ impl Terminal {
                         }
                         2004 => self.mode_bracketed_paste = false,
                         1004 => self.mode_focus_events = false,
+                        9 | 1000 | 1002 | 1003 => self.mouse_mode = MouseMode::Off,
+                        1005 | 1006 => self.mouse_encoding = MouseEncoding::X10,
                         _ => {}
                     }
                 }

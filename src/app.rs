@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, Size};
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{ElementState, Modifiers, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
@@ -46,6 +46,7 @@ struct AppState {
     pty_buf: Vec<u8>,
     atlas: GlyphAtlas,
     pty_closed: bool,
+    modifiers: Modifiers,
 }
 
 impl HandtermApp {
@@ -104,6 +105,7 @@ impl ApplicationHandler for HandtermApp {
             pty_buf: vec![0u8; 64 * 1024],
             atlas,
             pty_closed: false,
+            modifiers: Modifiers::default(),
         });
 
         if let Some(s) = &self.state {
@@ -145,11 +147,60 @@ impl ApplicationHandler for HandtermApp {
                     state.window.request_redraw();
                 }
             }
+            WindowEvent::ModifiersChanged(new_modifiers) => {
+                state.modifiers = new_modifiers;
+            }
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed
-                    && let Some(bytes) = key_to_bytes(&event.logical_key, &event.physical_key, state.terminal.application_cursor_keys)
-                {
-                    let _ = state.pty.write_all(&bytes);
+                if event.state == ElementState::Pressed {
+                    let ctrl = state.modifiers.state().control_key();
+                    let shift = state.modifiers.state().shift_key();
+
+                    if ctrl && shift {
+                        if let Key::Character(s) = &event.logical_key {
+                            let ch = s.chars().next().unwrap_or('\0').to_ascii_lowercase();
+                            if ch == 'v' {
+                                if let Ok(output) = std::process::Command::new("wl-paste")
+                                    .arg("--no-newline")
+                                    .output()
+                                {
+                                    let text = output.stdout;
+                                    if !text.is_empty() {
+                                        if state.terminal.bracketed_paste_mode() {
+                                            let _ = state.pty.write_all(b"\x1b[200~");
+                                            let _ = state.pty.write_all(&text);
+                                            let _ = state.pty.write_all(b"\x1b[201~");
+                                        } else {
+                                            let _ = state.pty.write_all(&text);
+                                        }
+                                    }
+                                }
+                                return;
+                            } else if ch == 'c' {
+                                let text = state.terminal.grid.get_selection_text();
+                                if !text.is_empty() {
+                                    let mut child = std::process::Command::new("wl-copy")
+                                        .stdin(std::process::Stdio::piped())
+                                        .spawn()
+                                        .ok();
+                                    if let Some(ref mut c) = child {
+                                        if let Some(ref mut stdin) = c.stdin {
+                                            let _ = std::io::Write::write_all(stdin, text.as_bytes());
+                                        }
+                                    }
+                                }
+                                return;
+                            }
+                        }
+                    }
+
+                    if let Some(bytes) = key_to_bytes(
+                        &event.logical_key,
+                        &event.physical_key,
+                        state.terminal.application_cursor_keys,
+                        ctrl,
+                    ) {
+                        let _ = state.pty.write_all(&bytes);
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -340,7 +391,24 @@ fn drain_pty(state: &mut AppState) -> usize {
     total
 }
 
-fn key_to_bytes(key: &Key, _physical: &PhysicalKey, app_cursor: bool) -> Option<Vec<u8>> {
+fn key_to_bytes(key: &Key, _physical: &PhysicalKey, app_cursor: bool, ctrl: bool) -> Option<Vec<u8>> {
+    if ctrl {
+        if let Key::Character(s) = key {
+            let ch = s.chars().next()?;
+            if ch.is_ascii_alphabetic() {
+                return Some(vec![ch.to_ascii_lowercase() as u8 - b'a' + 1]);
+            }
+            match ch {
+                '@' | ' ' | '`' => return Some(vec![0]),
+                '[' | '\x1b' => return Some(vec![0x1b]),
+                '\\' => return Some(vec![0x1c]),
+                ']' => return Some(vec![0x1d]),
+                '^' | '~' => return Some(vec![0x1e]),
+                '_' | '/' => return Some(vec![0x1f]),
+                _ => {}
+            }
+        }
+    }
     match key {
         Key::Character(s) => Some(s.as_bytes().to_vec()),
         Key::Named(named) => match named {
@@ -363,7 +431,26 @@ fn key_to_bytes(key: &Key, _physical: &PhysicalKey, app_cursor: bool) -> Option<
             NamedKey::Delete => Some(b"\x1b[3~".to_vec()),
             NamedKey::PageUp => Some(b"\x1b[5~".to_vec()),
             NamedKey::PageDown => Some(b"\x1b[6~".to_vec()),
-            NamedKey::Space => Some(b" ".to_vec()),
+            NamedKey::Space => {
+                if ctrl {
+                    Some(vec![0])
+                } else {
+                    Some(b" ".to_vec())
+                }
+            }
+            NamedKey::Insert => Some(b"\x1b[2~".to_vec()),
+            NamedKey::F1 => Some(b"\x1bOP".to_vec()),
+            NamedKey::F2 => Some(b"\x1bOQ".to_vec()),
+            NamedKey::F3 => Some(b"\x1bOR".to_vec()),
+            NamedKey::F4 => Some(b"\x1bOS".to_vec()),
+            NamedKey::F5 => Some(b"\x1b[15~".to_vec()),
+            NamedKey::F6 => Some(b"\x1b[17~".to_vec()),
+            NamedKey::F7 => Some(b"\x1b[18~".to_vec()),
+            NamedKey::F8 => Some(b"\x1b[19~".to_vec()),
+            NamedKey::F9 => Some(b"\x1b[20~".to_vec()),
+            NamedKey::F10 => Some(b"\x1b[21~".to_vec()),
+            NamedKey::F11 => Some(b"\x1b[23~".to_vec()),
+            NamedKey::F12 => Some(b"\x1b[24~".to_vec()),
             _ => None,
         },
         _ => None,

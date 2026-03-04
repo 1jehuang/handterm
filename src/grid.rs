@@ -137,6 +137,10 @@ impl Grid {
         &self.cells[idx]
     }
 
+    pub fn get_selection_text(&self) -> String {
+        String::new()
+    }
+
     #[allow(dead_code)]
     pub fn cell_char(&self, row: usize, col: usize) -> char {
         if row >= self.rows || col >= self.cols {

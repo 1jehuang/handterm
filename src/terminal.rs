@@ -55,6 +55,10 @@ impl Terminal {
         self.title.take()
     }
 
+    pub fn bracketed_paste_mode(&self) -> bool {
+        self.mode_bracketed_paste
+    }
+
     pub fn process(&mut self, data: &[u8]) {
         let mut ascii_start: Option<usize> = None;
 

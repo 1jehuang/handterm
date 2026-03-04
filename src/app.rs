@@ -49,6 +49,7 @@ struct AppState {
     modifiers: Modifiers,
     mouse_col: usize,
     mouse_row: usize,
+    selecting: bool,
 }
 
 impl HandtermApp {
@@ -110,6 +111,7 @@ impl ApplicationHandler for HandtermApp {
             modifiers: Modifiers::default(),
             mouse_col: 0,
             mouse_row: 0,
+            selecting: false,
         });
 
         if let Some(s) = &self.state {
@@ -221,6 +223,7 @@ impl ApplicationHandler for HandtermApp {
                     ) {
                         let _ = state.pty.write_all(&bytes);
                         state.terminal.grid.scroll_offset = 0;
+                        state.terminal.grid.selection = None;
                     }
                 }
             }
@@ -229,6 +232,14 @@ impl ApplicationHandler for HandtermApp {
                 let ch = state.atlas.cell_height.max(1);
                 state.mouse_col = position.x as usize / cw;
                 state.mouse_row = position.y as usize / ch;
+
+                if state.selecting {
+                    if let Some(ref mut sel) = state.terminal.grid.selection {
+                        sel.end_col = state.mouse_col;
+                        sel.end_row = state.mouse_row;
+                    }
+                    state.window.request_redraw();
+                }
             }
             WindowEvent::MouseInput { state: btn_state, button, .. } => {
                 let btn = match button {
@@ -238,8 +249,26 @@ impl ApplicationHandler for HandtermApp {
                     _ => return,
                 };
                 let pressed = btn_state == ElementState::Pressed;
-                if let Some(bytes) = state.terminal.encode_mouse(btn, state.mouse_col, state.mouse_row, pressed) {
-                    let _ = state.pty.write_all(&bytes);
+
+                if btn == 0 {
+                    if pressed {
+                        state.terminal.grid.selection = Some(crate::grid::Selection {
+                            start_col: state.mouse_col,
+                            start_row: state.mouse_row,
+                            end_col: state.mouse_col,
+                            end_row: state.mouse_row,
+                        });
+                        state.selecting = true;
+                        state.window.request_redraw();
+                    } else {
+                        state.selecting = false;
+                    }
+                }
+
+                if state.terminal.mouse_mode != crate::terminal::MouseMode::Off {
+                    if let Some(bytes) = state.terminal.encode_mouse(btn, state.mouse_col, state.mouse_row, pressed) {
+                        let _ = state.pty.write_all(&bytes);
+                    }
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -699,8 +728,29 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
             }
 
             let is_block_cursor = is_cursor && cursor_style == crate::terminal::CursorStyle::Block;
-            let actual_fg = if is_block_cursor { base_bg } else { fg };
-            let actual_bg = if is_block_cursor { base_fg } else { bg };
+            let is_selected = grid.selection.map_or(false, |sel| {
+                let (sr, sc, er, ec) = if sel.start_row < sel.end_row
+                    || (sel.start_row == sel.end_row && sel.start_col <= sel.end_col)
+                {
+                    (sel.start_row, sel.start_col, sel.end_row, sel.end_col)
+                } else {
+                    (sel.end_row, sel.end_col, sel.start_row, sel.start_col)
+                };
+                if row < sr || row > er {
+                    false
+                } else if row == sr && row == er {
+                    col >= sc && col <= ec
+                } else if row == sr {
+                    col >= sc
+                } else if row == er {
+                    col <= ec
+                } else {
+                    true
+                }
+            });
+            let invert = is_block_cursor || is_selected;
+            let actual_fg = if invert { bg } else { fg };
+            let actual_bg = if invert { fg } else { bg };
 
             atlas.draw_char(
                 &mut buffer,

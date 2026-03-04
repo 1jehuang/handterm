@@ -93,6 +93,15 @@ pub struct Grid {
     scrollback: Vec<Vec<Cell>>,
     scrollback_max: usize,
     pub scroll_offset: usize,
+    pub selection: Option<Selection>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Selection {
+    pub start_col: usize,
+    pub start_row: usize,
+    pub end_col: usize,
+    pub end_row: usize,
 }
 
 impl Grid {
@@ -114,6 +123,7 @@ impl Grid {
             scrollback: Vec::new(),
             scrollback_max: 10000,
             scroll_offset: 0,
+            selection: None,
         }
     }
 
@@ -170,7 +180,43 @@ impl Grid {
     }
 
     pub fn get_selection_text(&self) -> String {
-        String::new()
+        let Some(sel) = &self.selection else {
+            return String::new();
+        };
+
+        let (sr, sc, er, ec) = if sel.start_row < sel.end_row
+            || (sel.start_row == sel.end_row && sel.start_col <= sel.end_col)
+        {
+            (sel.start_row, sel.start_col, sel.end_row, sel.end_col)
+        } else {
+            (sel.end_row, sel.end_col, sel.start_row, sel.start_col)
+        };
+
+        let mut text = String::new();
+        for row in sr..=er {
+            let col_start = if row == sr { sc } else { 0 };
+            let col_end = if row == er { ec + 1 } else { self.cols };
+
+            for col in col_start..col_end.min(self.cols) {
+                let cell = self.cell_at_scroll(row, col);
+                if cell.flags & FLAG_WIDE_CONT != 0 {
+                    continue;
+                }
+                if let Some(c) = char::from_u32(cell.ch) {
+                    if c > ' ' {
+                        text.push(c);
+                    } else {
+                        text.push(' ');
+                    }
+                }
+            }
+            if row < er {
+                let trimmed = text.trim_end();
+                text = trimmed.to_string();
+                text.push('\n');
+            }
+        }
+        text.trim_end().to_string()
     }
 
     pub fn scrollback_len(&self) -> usize {

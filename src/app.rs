@@ -450,6 +450,16 @@ fn drain_pty(state: &mut AppState) -> usize {
         if let Some(title) = state.terminal.take_title() {
             state.window.set_title(&title);
         }
+        if let Some(b64_data) = state.terminal.take_osc52_clipboard() {
+            use std::process::{Command, Stdio};
+            if let Ok(decoded) = base64_decode(&b64_data) {
+                if let Ok(mut child) = Command::new("wl-copy").stdin(Stdio::piped()).spawn() {
+                    if let Some(ref mut stdin) = child.stdin {
+                        let _ = std::io::Write::write_all(stdin, &decoded);
+                    }
+                }
+            }
+        }
         state.terminal.grid.scroll_offset = 0;
     }
     total
@@ -539,6 +549,46 @@ const PALETTE: [u32; 16] = [
     0x34e2e2, // 14 bright cyan
     0xeeeeec, // 15 bright white
 ];
+
+fn base64_decode(input: &[u8]) -> Result<Vec<u8>, ()> {
+    const TABLE: [u8; 256] = {
+        let mut t = [0xffu8; 256];
+        let mut i = 0u8;
+        while i < 26 {
+            t[(b'A' + i) as usize] = i;
+            t[(b'a' + i) as usize] = i + 26;
+            i += 1;
+        }
+        let mut d = 0u8;
+        while d < 10 {
+            t[(b'0' + d) as usize] = d + 52;
+            d += 1;
+        }
+        t[b'+' as usize] = 62;
+        t[b'/' as usize] = 63;
+        t
+    };
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for &b in input {
+        if b == b'=' || b == b'\n' || b == b'\r' {
+            continue;
+        }
+        let val = TABLE[b as usize];
+        if val == 0xff {
+            return Err(());
+        }
+        buf = (buf << 6) | val as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    Ok(out)
+}
 
 fn color_to_rgb(c: u32) -> u32 {
     use crate::grid::COLOR_FLAG_RGB;

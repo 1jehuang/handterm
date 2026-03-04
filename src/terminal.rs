@@ -17,6 +17,7 @@ pub struct Terminal {
     pub mouse_mode: MouseMode,
     pub mouse_encoding: MouseEncoding,
     pub cursor_style: CursorStyle,
+    osc52_clipboard: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +61,7 @@ impl Terminal {
             mouse_mode: MouseMode::Off,
             mouse_encoding: MouseEncoding::X10,
             cursor_style: CursorStyle::Block,
+            osc52_clipboard: None,
         }
     }
 
@@ -86,6 +88,10 @@ impl Terminal {
 
     pub fn bracketed_paste_mode(&self) -> bool {
         self.mode_bracketed_paste
+    }
+
+    pub fn take_osc52_clipboard(&mut self) -> Option<Vec<u8>> {
+        self.osc52_clipboard.take()
     }
 
     pub fn encode_mouse(&self, button: u8, col: usize, row: usize, pressed: bool) -> Option<Vec<u8>> {
@@ -206,6 +212,16 @@ impl Terminal {
             (0, b'B') => self.grid.move_cursor_down(p.param(0, 1) as usize),
             (0, b'C') => self.grid.move_cursor_right(p.param(0, 1) as usize),
             (0, b'D') => self.grid.move_cursor_left(p.param(0, 1) as usize),
+            (0, b'E') => {
+                let n = p.param(0, 1) as usize;
+                self.grid.move_cursor_down(n);
+                self.grid.carriage_return();
+            }
+            (0, b'F') => {
+                let n = p.param(0, 1) as usize;
+                self.grid.move_cursor_up(n);
+                self.grid.carriage_return();
+            }
             (0, b'H') | (0, b'f') => {
                 let row = p.param(0, 1).saturating_sub(1) as usize;
                 let col = p.param(1, 1).saturating_sub(1) as usize;
@@ -239,6 +255,22 @@ impl Terminal {
             }
             (0, b'S') => self.grid.scroll_up_n(p.param(0, 1) as usize),
             (0, b'T') => self.grid.scroll_down_n(p.param(0, 1) as usize),
+            (0, b't') => {
+                match p.param(0, 0) {
+                    8 => {
+                        let rows = p.param(1, 0);
+                        let cols = p.param(2, 0);
+                        if rows > 0 && cols > 0 {
+                            // Window resize request - report current size
+                        }
+                    }
+                    18 => {
+                        let resp = format!("\x1b[8;{};{}t", self.rows, self.cols);
+                        self.response_buf.extend_from_slice(resp.as_bytes());
+                    }
+                    _ => {}
+                }
+            }
             (0, b'r') => {
                 let top = p.param(0, 1).saturating_sub(1) as usize;
                 let bottom = p.param(1, self.rows) as usize;
@@ -425,8 +457,14 @@ impl Terminal {
                         self.title = Some(title.to_string());
                     }
                 }
-                b"1" => {
-                    // Icon name - ignore
+                b"1" => {}
+                b"52" => {
+                    if let Some(semi2) = payload.iter().position(|&b| b == b';') {
+                        let b64_data = &payload[semi2 + 1..];
+                        if b64_data != b"?" {
+                            self.osc52_clipboard = Some(b64_data.to_vec());
+                        }
+                    }
                 }
                 _ => {}
             }

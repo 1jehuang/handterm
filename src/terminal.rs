@@ -3,18 +3,32 @@ use crate::parser::{Action, Parser};
 
 pub struct Terminal {
     pub grid: Grid,
+    alt_grid: Option<Grid>,
     parser: Parser,
     pub cols: u16,
     pub rows: u16,
+    pub cursor_visible: bool,
+    pub title: Option<String>,
+    response_buf: Vec<u8>,
+    saved_cursor: Option<(usize, usize)>,
+    mode_bracketed_paste: bool,
+    mode_focus_events: bool,
 }
 
 impl Terminal {
     pub fn new(cols: u16, rows: u16) -> Self {
         Self {
             grid: Grid::new(cols, rows, [0xcd, 0xd6, 0xf4], [0x00, 0x00, 0x00]),
+            alt_grid: None,
             parser: Parser::new(),
             cols,
             rows,
+            cursor_visible: true,
+            title: None,
+            response_buf: Vec::new(),
+            saved_cursor: None,
+            mode_bracketed_paste: false,
+            mode_focus_events: false,
         }
     }
 
@@ -22,6 +36,21 @@ impl Terminal {
         self.cols = cols;
         self.rows = rows;
         self.grid.resize(cols, rows);
+        if let Some(ref mut alt) = self.alt_grid {
+            alt.resize(cols, rows);
+        }
+    }
+
+    pub fn drain_responses(&mut self) -> Option<Vec<u8>> {
+        if self.response_buf.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.response_buf))
+        }
+    }
+
+    pub fn take_title(&mut self) -> Option<String> {
+        self.title.take()
     }
 
     pub fn process(&mut self, data: &[u8]) {
@@ -62,7 +91,8 @@ impl Terminal {
                 intermediate,
                 final_byte,
             } => self.esc_dispatch(intermediate, final_byte),
-            Action::Print(_) | Action::OscEnd | Action::Nop => {}
+            Action::OscDispatch(data) => self.osc_dispatch(&data),
+            Action::Print(_) | Action::Nop => {}
         }
     }
 
@@ -72,7 +102,7 @@ impl Terminal {
             b'\r' => self.grid.carriage_return(),
             b'\t' => self.grid.tab(),
             0x08 => self.grid.backspace(),
-            0x07 => {} // bell - ignore
+            0x07 => {}
             _ => {}
         }
     }
@@ -117,14 +147,80 @@ impl Terminal {
             }
             (0, b'S') => self.grid.scroll_up_n(p.param(0, 1) as usize),
             (0, b'T') => self.grid.scroll_down_n(p.param(0, 1) as usize),
-            (b'?', b'h') | (b'?', b'l') => {
-                // Private mode set/reset - stub for now
-            }
             (0, b'r') => {
                 let top = p.param(0, 1).saturating_sub(1) as usize;
                 let bottom = p.param(1, self.rows) as usize;
                 self.grid.set_scroll_region(top, bottom);
             }
+            // DA1 - Device Attributes
+            (0, b'c') | (b'>', b'c') => {
+                if intermediate == b'>' {
+                    // DA2: report VT220
+                    self.response_buf.extend_from_slice(b"\x1b[>1;1;0c");
+                } else {
+                    // DA1: report VT220 with ANSI color
+                    self.response_buf.extend_from_slice(b"\x1b[?62;22c");
+                }
+            }
+            // DSR - Device Status Report
+            (0, b'n') => {
+                match p.param(0, 0) {
+                    5 => {
+                        // Status report: OK
+                        self.response_buf.extend_from_slice(b"\x1b[0n");
+                    }
+                    6 => {
+                        // Cursor position report
+                        let (col, row) = self.grid.cursor_pos();
+                        let resp = format!("\x1b[{};{}R", row + 1, col + 1);
+                        self.response_buf.extend_from_slice(resp.as_bytes());
+                    }
+                    _ => {}
+                }
+            }
+            // Private mode set
+            (b'?', b'h') => {
+                let params: Vec<u16> = self.parser.params().to_vec();
+                for param in &params {
+                    match param {
+                        1 => {}    // DECCKM - application cursor keys (TODO)
+                        7 => {}    // DECAWM - auto wrap (TODO)
+                        12 => {}   // Cursor blink
+                        25 => self.cursor_visible = true,   // DECTCEM show cursor
+                        47 | 1047 => self.enter_alt_screen(),
+                        1049 => {
+                            self.save_cursor();
+                            self.enter_alt_screen();
+                        }
+                        2004 => self.mode_bracketed_paste = true,
+                        1004 => self.mode_focus_events = true,
+                        _ => {}
+                    }
+                }
+            }
+            // Private mode reset
+            (b'?', b'l') => {
+                let params: Vec<u16> = self.parser.params().to_vec();
+                for param in &params {
+                    match param {
+                        1 => {}
+                        7 => {}
+                        12 => {}
+                        25 => self.cursor_visible = false,  // DECTCEM hide cursor
+                        47 | 1047 => self.leave_alt_screen(),
+                        1049 => {
+                            self.leave_alt_screen();
+                            self.restore_cursor();
+                        }
+                        2004 => self.mode_bracketed_paste = false,
+                        1004 => self.mode_focus_events = false,
+                        _ => {}
+                    }
+                }
+            }
+            // Cursor save/restore (ANSI.SYS style)
+            (0, b's') => self.save_cursor(),
+            (0, b'u') => self.restore_cursor(),
             _ => {}
         }
     }
@@ -178,19 +274,65 @@ impl Terminal {
         }
     }
 
-    fn esc_dispatch(&mut self, _intermediate: u8, final_byte: u8) {
-        match final_byte {
-            b'M' => self.grid.reverse_index(),
-            b'D' => self.grid.line_feed(),
-            b'E' => {
+    fn esc_dispatch(&mut self, intermediate: u8, final_byte: u8) {
+        match (intermediate, final_byte) {
+            (0, b'M') => self.grid.reverse_index(),
+            (0, b'D') => self.grid.line_feed(),
+            (0, b'E') => {
                 self.grid.carriage_return();
                 self.grid.line_feed();
             }
-            b'c' => {
-                self.grid = Grid::new(self.cols, self.rows, [0xcd, 0xd6, 0xf4], [0x00, 0x00, 0x00]);
-                self.parser = Parser::new();
+            (0, b'c') => {
+                *self = Self::new(self.cols, self.rows);
             }
+            (0, b'7') => self.save_cursor(),
+            (0, b'8') => self.restore_cursor(),
             _ => {}
+        }
+    }
+
+    fn osc_dispatch(&mut self, data: &[u8]) {
+        if let Some(semi) = data.iter().position(|&b| b == b';') {
+            let cmd = &data[..semi];
+            let payload = &data[semi + 1..];
+            match cmd {
+                b"0" | b"2" => {
+                    if let Ok(title) = std::str::from_utf8(payload) {
+                        self.title = Some(title.to_string());
+                    }
+                }
+                b"1" => {
+                    // Icon name - ignore
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn save_cursor(&mut self) {
+        self.saved_cursor = Some(self.grid.cursor_pos());
+    }
+
+    fn restore_cursor(&mut self) {
+        if let Some((col, row)) = self.saved_cursor {
+            self.grid.set_cursor(row, col);
+        }
+    }
+
+    fn enter_alt_screen(&mut self) {
+        if self.alt_grid.is_some() {
+            return;
+        }
+        let main = std::mem::replace(
+            &mut self.grid,
+            Grid::new(self.cols, self.rows, [0xcd, 0xd6, 0xf4], [0x00, 0x00, 0x00]),
+        );
+        self.alt_grid = Some(main);
+    }
+
+    fn leave_alt_screen(&mut self) {
+        if let Some(main) = self.alt_grid.take() {
+            self.grid = main;
         }
     }
 }
@@ -229,5 +371,73 @@ mod tests {
         t.process(b"abcdefghij");
         t.process(b"\x1b[2J");
         assert_eq!(t.grid.cell_char(0, 0), ' ');
+    }
+
+    #[test]
+    fn da1_response() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[c");
+        let resp = t.drain_responses().unwrap();
+        assert_eq!(resp, b"\x1b[?62;22c");
+    }
+
+    #[test]
+    fn da2_response() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[>c");
+        let resp = t.drain_responses().unwrap();
+        assert_eq!(resp, b"\x1b[>1;1;0c");
+    }
+
+    #[test]
+    fn dsr_cursor_position() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[5;10H");
+        t.process(b"\x1b[6n");
+        let resp = t.drain_responses().unwrap();
+        assert_eq!(resp, b"\x1b[5;10R");
+    }
+
+    #[test]
+    fn cursor_visibility() {
+        let mut t = Terminal::new(80, 24);
+        assert!(t.cursor_visible);
+        t.process(b"\x1b[?25l");
+        assert!(!t.cursor_visible);
+        t.process(b"\x1b[?25h");
+        assert!(t.cursor_visible);
+    }
+
+    #[test]
+    fn alt_screen() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"main");
+        assert_eq!(t.grid.cell_char(0, 0), 'm');
+
+        t.process(b"\x1b[?1049h");
+        assert_eq!(t.grid.cell_char(0, 0), ' ');
+        t.process(b"alt");
+        assert_eq!(t.grid.cell_char(0, 0), 'a');
+
+        t.process(b"\x1b[?1049l");
+        assert_eq!(t.grid.cell_char(0, 0), 'm');
+    }
+
+    #[test]
+    fn osc_title() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b]0;My Title\x07");
+        assert_eq!(t.take_title().unwrap(), "My Title");
+    }
+
+    #[test]
+    fn cursor_save_restore() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[5;10H");
+        t.process(b"\x1b7");
+        t.process(b"\x1b[1;1H");
+        assert_eq!(t.grid.cursor_pos(), (0, 0));
+        t.process(b"\x1b8");
+        assert_eq!(t.grid.cursor_pos(), (9, 4));
     }
 }

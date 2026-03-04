@@ -19,9 +19,10 @@ pub struct Parser {
     param_count: usize,
     current_param: u16,
     intermediate: u8,
+    osc_buf: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Print(u8),
     Execute(u8),
@@ -34,7 +35,7 @@ pub enum Action {
         intermediate: u8,
         final_byte: u8,
     },
-    OscEnd,
+    OscDispatch(Vec<u8>),
     Nop,
 }
 
@@ -46,6 +47,7 @@ impl Parser {
             param_count: 0,
             current_param: 0,
             intermediate: 0,
+            osc_buf: Vec::new(),
         }
     }
 
@@ -242,13 +244,20 @@ impl Parser {
         match byte {
             0x07 => {
                 self.state = State::Ground;
-                Action::OscEnd
+                let data = std::mem::take(&mut self.osc_buf);
+                Action::OscDispatch(data)
             }
             0x1b => {
                 self.state = State::Escape;
-                Action::OscEnd
+                let data = std::mem::take(&mut self.osc_buf);
+                Action::OscDispatch(data)
             }
-            _ => Action::Nop,
+            _ => {
+                if self.osc_buf.len() < 256 {
+                    self.osc_buf.push(byte);
+                }
+                Action::Nop
+            }
         }
     }
 
@@ -355,7 +364,7 @@ mod tests {
         assert_eq!(p.advance(b'0'), Action::Nop);
         assert_eq!(p.advance(b';'), Action::Nop);
         assert_eq!(p.advance(b'x'), Action::Nop);
-        assert_eq!(p.advance(0x07), Action::OscEnd);
+        assert_eq!(p.advance(0x07), Action::OscDispatch(b"0;x".to_vec()));
         assert_eq!(p.advance(b'A'), Action::Print(b'A'));
     }
 

@@ -329,6 +329,14 @@ fn drain_pty(state: &mut AppState) -> usize {
             }
         }
     }
+    if total > 0 {
+        if let Some(resp) = state.terminal.drain_responses() {
+            let _ = state.pty.write_all(&resp);
+        }
+        if let Some(title) = state.terminal.take_title() {
+            state.window.set_title(&title);
+        }
+    }
     total
 }
 
@@ -421,11 +429,12 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
     buffer.fill(base_bg);
 
     let (cursor_col, cursor_row) = grid.cursor_pos();
+    let show_cursor = state.terminal.cursor_visible;
 
     for row in 0..grid.rows {
         for col in 0..grid.cols {
             let cell = grid.cell_at(row, col);
-            let is_cursor = row == cursor_row && col == cursor_col;
+            let is_cursor = show_cursor && row == cursor_row && col == cursor_col;
 
             let has_content = cell.ch > 0x20 && cell.ch < 0x7f;
             let has_custom_bg = cell.bg != 0;

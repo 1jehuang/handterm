@@ -100,6 +100,27 @@ impl Grid {
         self.cell_at(row, col).char_display()
     }
 
+    pub fn get_text(&self, start_row: usize, end_row: usize) -> String {
+        let end = end_row.min(self.rows);
+        let mut out = String::with_capacity(self.cols * (end - start_row) + end - start_row);
+        for row in start_row..end {
+            for col in 0..self.cols {
+                out.push(self.cell_at(row, col).char_display());
+            }
+            let trimmed = out.trim_end_matches(' ');
+            let trimmed_len = trimmed.len();
+            out.truncate(trimmed_len);
+            if row + 1 < end {
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    pub fn get_all_text(&self) -> String {
+        self.get_text(0, self.rows)
+    }
+
     #[inline]
     pub fn write_bytes(&mut self, bytes: &[u8]) {
         let mut i = 0;

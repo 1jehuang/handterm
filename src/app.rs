@@ -1,5 +1,6 @@
 use crate::config::AppConfig;
 use crate::font::GlyphAtlas;
+use crate::ipc::{IpcAction, IpcServer, Request, Response};
 use crate::pty::PtyChild;
 use crate::terminal::Terminal;
 use anyhow::{Context, Result};
@@ -17,7 +18,14 @@ use winit::window::{Window, WindowAttributes, WindowId};
 pub fn run(config: AppConfig) -> Result<()> {
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     event_loop.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(8)));
-    let mut app = HandtermApp::new(config);
+
+    let socket_path = crate::ipc::default_socket_path();
+    let ipc = IpcServer::bind(&socket_path).ok();
+    if let Some(ref ipc) = ipc {
+        eprintln!("handterm: listening on {}", ipc.path().display());
+    }
+
+    let mut app = HandtermApp::new(config, ipc);
     event_loop
         .run_app(&mut app)
         .context("failed while running app")
@@ -26,6 +34,7 @@ pub fn run(config: AppConfig) -> Result<()> {
 struct HandtermApp {
     config: AppConfig,
     state: Option<AppState>,
+    ipc: Option<IpcServer>,
 }
 
 struct AppState {
@@ -40,10 +49,11 @@ struct AppState {
 }
 
 impl HandtermApp {
-    fn new(config: AppConfig) -> Self {
+    fn new(config: AppConfig, ipc: Option<IpcServer>) -> Self {
         Self {
             config,
             state: None,
+            ipc,
         }
     }
 
@@ -160,6 +170,144 @@ impl ApplicationHandler for HandtermApp {
                 event_loop.exit();
             }
         }
+
+        if let (Some(ipc), Some(state)) = (&mut self.ipc, &mut self.state) {
+            let actions = ipc.poll(&mut |req| handle_ipc_request(req, state));
+            for action in actions {
+                match action {
+                    IpcAction::SendText(bytes) => {
+                        let _ = state.pty.write_all(&bytes);
+                    }
+                    IpcAction::SetTitle(title) => {
+                        state.window.set_title(&title);
+                    }
+                    IpcAction::Close => {
+                        event_loop.exit();
+                    }
+                    IpcAction::None => {}
+                }
+            }
+        }
+    }
+}
+
+fn handle_ipc_request(req: &Request, state: &mut AppState) -> (Response, IpcAction) {
+    match req.cmd.as_str() {
+        "get-text" => {
+            let text = if let Some(obj) = req.args.as_object() {
+                let start = obj
+                    .get("start_row")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                let end = obj
+                    .get("end_row")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(state.terminal.grid.rows as u64)
+                    as usize;
+                state.terminal.grid.get_text(start, end)
+            } else {
+                state.terminal.grid.get_all_text()
+            };
+            (
+                Response::ok(serde_json::json!({ "text": text })),
+                IpcAction::None,
+            )
+        }
+        "send-text" => {
+            let text = req
+                .args
+                .as_object()
+                .and_then(|o| o.get("text"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if text.is_empty() {
+                (Response::err("missing 'text' argument"), IpcAction::None)
+            } else {
+                (
+                    Response::ok_empty(),
+                    IpcAction::SendText(text.as_bytes().to_vec()),
+                )
+            }
+        }
+        "send-key" => {
+            let key = req
+                .args
+                .as_object()
+                .and_then(|o| o.get("key"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let bytes = match key {
+                "enter" | "return" => Some(b"\r".to_vec()),
+                "tab" => Some(b"\t".to_vec()),
+                "escape" | "esc" => Some(b"\x1b".to_vec()),
+                "backspace" => Some(b"\x7f".to_vec()),
+                "up" => Some(b"\x1b[A".to_vec()),
+                "down" => Some(b"\x1b[B".to_vec()),
+                "right" => Some(b"\x1b[C".to_vec()),
+                "left" => Some(b"\x1b[D".to_vec()),
+                "home" => Some(b"\x1b[H".to_vec()),
+                "end" => Some(b"\x1b[F".to_vec()),
+                "delete" => Some(b"\x1b[3~".to_vec()),
+                "page_up" => Some(b"\x1b[5~".to_vec()),
+                "page_down" => Some(b"\x1b[6~".to_vec()),
+                "space" => Some(b" ".to_vec()),
+                k if k.starts_with("ctrl+") && k.len() == 6 => {
+                    let ch = k.as_bytes()[5];
+                    if ch.is_ascii_alphabetic() {
+                        Some(vec![ch.to_ascii_lowercase() - b'a' + 1])
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            match bytes {
+                Some(b) => (Response::ok_empty(), IpcAction::SendText(b)),
+                None => (
+                    Response::err(format!("unknown key: {key}")),
+                    IpcAction::None,
+                ),
+            }
+        }
+        "get-cursor" => {
+            let (col, row) = state.terminal.grid.cursor_pos();
+            (
+                Response::ok(serde_json::json!({ "row": row, "col": col })),
+                IpcAction::None,
+            )
+        }
+        "get-size" => (
+            Response::ok(serde_json::json!({
+                "cols": state.terminal.cols,
+                "rows": state.terminal.rows,
+            })),
+            IpcAction::None,
+        ),
+        "set-title" => {
+            let title = req
+                .args
+                .as_object()
+                .and_then(|o| o.get("title"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("handterm")
+                .to_string();
+            (Response::ok_empty(), IpcAction::SetTitle(title))
+        }
+        "close" => (Response::ok_empty(), IpcAction::Close),
+        "ls" => (
+            Response::ok(serde_json::json!({
+                "commands": [
+                    "get-text", "send-text", "send-key",
+                    "get-cursor", "get-size", "set-title",
+                    "close", "ls"
+                ]
+            })),
+            IpcAction::None,
+        ),
+        _ => (
+            Response::err(format!("unknown command: {}", req.cmd)),
+            IpcAction::None,
+        ),
     }
 }
 

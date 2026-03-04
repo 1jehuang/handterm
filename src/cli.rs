@@ -20,4 +20,18 @@ pub enum Command {
     InitConfig,
     /// Run quick local performance benchmarks
     Bench,
+    /// Send a command to a running handterm instance
+    #[command(name = "@")]
+    Remote {
+        /// Socket path (auto-detected if omitted)
+        #[arg(long)]
+        to: Option<PathBuf>,
+
+        /// Command to send
+        cmd: String,
+
+        /// JSON arguments (e.g. '{"text":"hello"}')
+        #[arg(default_value = "{}")]
+        args: String,
+    },
 }

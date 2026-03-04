@@ -682,6 +682,7 @@ dependencies = [
  "nix",
  "predicates",
  "serde",
+ "serde_json",
  "softbuffer",
  "tempfile",
  "toml",

@@ -333,19 +333,21 @@ impl Grid {
         let mut ri = 0;
         let run_len = run.len();
         let cols = self.cols;
+        let rows = self.rows;
         let fg = self.current_fg;
         let bg = self.current_bg;
         let attrs = self.current_attrs;
+        let is_full_scroll = self.scroll_top == 0 && self.scroll_bottom == rows;
 
         while ri < run_len {
-            if self.cursor_row >= self.rows {
+            if self.cursor_row >= rows {
                 return;
             }
 
             let remaining_in_row = cols - self.cursor_col;
             let chunk_len = remaining_in_row.min(run_len - ri);
 
-            let phys_row = (self.top_row + self.cursor_row) % self.rows;
+            let phys_row = (self.top_row + self.cursor_row) % rows;
             let dest_start = phys_row * cols + self.cursor_col;
 
             unsafe {
@@ -380,12 +382,42 @@ impl Grid {
             if self.cursor_col >= cols {
                 self.cursor_col = 0;
                 if self.cursor_row + 1 >= self.scroll_bottom {
-                    self.scroll_up();
+                    if is_full_scroll {
+                        self.scroll_up_ring();
+                    } else {
+                        self.scroll_up();
+                    }
                 } else {
                     self.cursor_row += 1;
                 }
             }
         }
+    }
+
+    #[inline(always)]
+    fn scroll_up_ring(&mut self) {
+        let cols = self.cols;
+        let old_top = self.top_row;
+        let blank_start = old_top * cols;
+
+        if self.scrollback_len < self.scrollback_max {
+            let needed = (self.scrollback_len + 1) * cols;
+            if self.scrollback.len() < needed {
+                self.scrollback.resize(needed, Cell::BLANK);
+            }
+            let dest = self.scrollback_len * cols;
+            self.scrollback[dest..dest + cols]
+                .copy_from_slice(&self.cells[blank_start..blank_start + cols]);
+            self.scrollback_len += 1;
+        } else {
+            let dest = self.scrollback_head * cols;
+            self.scrollback[dest..dest + cols]
+                .copy_from_slice(&self.cells[blank_start..blank_start + cols]);
+            self.scrollback_head = (self.scrollback_head + 1) % self.scrollback_max;
+        }
+
+        self.cells[blank_start..blank_start + cols].fill(Cell::BLANK);
+        self.top_row = (old_top + 1) % self.rows;
     }
 
     pub fn put_char(&mut self, ch: u32) {

@@ -436,7 +436,7 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
     let base_fg = config.style.foreground.as_u32_rgb();
 
     let grid = &state.terminal.grid;
-    let atlas = &state.atlas;
+    let atlas = &mut state.atlas;
 
     buffer.fill(base_bg);
 
@@ -448,7 +448,7 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
             let cell = grid.cell_at(row, col);
             let is_cursor = show_cursor && row == cursor_row && col == cursor_col;
 
-            let has_content = cell.ch > 0x20 && cell.ch < 0x7f;
+            let has_content = cell.ch > 0x20;
             let has_custom_bg = cell.bg != crate::grid::COLOR_DEFAULT;
 
             if !is_cursor && !has_content && !has_custom_bg {

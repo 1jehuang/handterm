@@ -18,6 +18,48 @@ pub const ATTR_UNDERLINE: u8 = 0x08;
 pub const ATTR_INVERSE: u8 = 0x10;
 pub const ATTR_STRIKETHROUGH: u8 = 0x20;
 
+#[inline]
+fn decode_utf8(bytes: &[u8]) -> (u32, usize) {
+    let b0 = bytes[0];
+    if b0 < 0x80 {
+        (b0 as u32, 1)
+    } else if b0 < 0xc0 {
+        (0xFFFD, 1)
+    } else if b0 < 0xe0 {
+        if bytes.len() >= 2 && (bytes[1] & 0xc0) == 0x80 {
+            let cp = ((b0 as u32 & 0x1f) << 6) | (bytes[1] as u32 & 0x3f);
+            (cp, 2)
+        } else {
+            (0xFFFD, 1)
+        }
+    } else if b0 < 0xf0 {
+        if bytes.len() >= 3 && (bytes[1] & 0xc0) == 0x80 && (bytes[2] & 0xc0) == 0x80 {
+            let cp = ((b0 as u32 & 0x0f) << 12)
+                | ((bytes[1] as u32 & 0x3f) << 6)
+                | (bytes[2] as u32 & 0x3f);
+            (cp, 3)
+        } else {
+            (0xFFFD, 1)
+        }
+    } else if b0 < 0xf8 {
+        if bytes.len() >= 4
+            && (bytes[1] & 0xc0) == 0x80
+            && (bytes[2] & 0xc0) == 0x80
+            && (bytes[3] & 0xc0) == 0x80
+        {
+            let cp = ((b0 as u32 & 0x07) << 18)
+                | ((bytes[1] as u32 & 0x3f) << 12)
+                | ((bytes[2] as u32 & 0x3f) << 6)
+                | (bytes[3] as u32 & 0x3f);
+            (cp, 4)
+        } else {
+            (0xFFFD, 1)
+        }
+    } else {
+        (0xFFFD, 1)
+    }
+}
+
 impl Cell {
     pub const BLANK: Self = Self {
         ch: b' ' as u32,
@@ -143,6 +185,14 @@ impl Grid {
                     i += 1;
                 }
                 self.write_ascii_run(&bytes[run_start..i]);
+            } else if b >= 0xc0 {
+                let (cp, consumed) = decode_utf8(&bytes[i..]);
+                if cp != 0 {
+                    self.put_char(cp);
+                }
+                i += consumed;
+            } else if b >= 0x80 {
+                i += 1;
             } else {
                 match b {
                     b'\n' => self.line_feed(),
@@ -201,7 +251,6 @@ impl Grid {
         }
     }
 
-    #[allow(dead_code)]
     pub fn put_char(&mut self, ch: u32) {
         if self.cursor_row >= self.rows || self.cursor_col >= self.cols {
             return;
@@ -568,5 +617,33 @@ mod tests {
     #[test]
     fn cell_is_16_bytes() {
         assert_eq!(std::mem::size_of::<super::Cell>(), 16);
+    }
+
+    #[test]
+    fn writes_utf8_codepoints() {
+        let mut g = super::Grid::new(80, 24, [0xff; 3], [0; 3]);
+        g.write_bytes("héllo".as_bytes());
+        assert_eq!(g.cell_char(0, 0), 'h');
+        assert_eq!(g.cell_at(0, 1).ch, 0xe9);
+        assert_eq!(g.cell_char(0, 2), 'l');
+        assert_eq!(g.cell_char(0, 3), 'l');
+        assert_eq!(g.cell_char(0, 4), 'o');
+    }
+
+    #[test]
+    fn writes_3byte_utf8() {
+        let mut g = super::Grid::new(80, 24, [0xff; 3], [0; 3]);
+        let input = b"A\xe2\x80\x93B";
+        g.write_bytes(input);
+        assert_eq!(g.cell_char(0, 0), 'A');
+        assert_eq!(g.cell_at(0, 1).ch, 0x2013);
+        assert_eq!(g.cell_char(0, 2), 'B');
+    }
+
+    #[test]
+    fn writes_4byte_utf8_emoji() {
+        let mut g = super::Grid::new(80, 24, [0xff; 3], [0; 3]);
+        g.write_bytes("😀".as_bytes());
+        assert_eq!(g.cell_at(0, 0).ch, 0x1F600);
     }
 }

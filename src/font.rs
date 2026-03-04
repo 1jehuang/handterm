@@ -5,6 +5,9 @@ use std::collections::HashMap;
 
 pub struct GlyphAtlas {
     glyphs: HashMap<u32, RasterizedGlyph>,
+    lib: Library,
+    font_path: String,
+    font_size_pt: f64,
     pub cell_width: usize,
     pub cell_height: usize,
     pub baseline: usize,
@@ -51,53 +54,46 @@ impl GlyphAtlas {
         let mut glyphs = HashMap::with_capacity(128);
 
         for ch in 0x20u32..=0x7e {
-            if face
-                .load_char(ch as usize, LoadFlag::RENDER)
-                .is_err()
-            {
-                continue;
+            if let Some(g) = rasterize_one(&face, ch) {
+                glyphs.insert(ch, g);
             }
-            let glyph = face.glyph();
-            let bmp = glyph.bitmap();
-            let width = bmp.width() as usize;
-            let height = bmp.rows() as usize;
-            let pitch = bmp.pitch().unsigned_abs() as usize;
-            let buffer = bmp.buffer();
-
-            let mut bitmap = vec![0u8; width * height];
-            for y in 0..height {
-                for x in 0..width {
-                    bitmap[y * width + x] = buffer[y * pitch + x];
-                }
-            }
-
-            glyphs.insert(
-                ch,
-                RasterizedGlyph {
-                    bitmap,
-                    width,
-                    height,
-                    bearing_x: glyph.bitmap_left(),
-                    bearing_y: glyph.bitmap_top(),
-                    advance: (glyph.advance().x >> 6) as i32,
-                },
-            );
         }
-
-        let _ = cell_width.max(1);
-        let _ = cell_height.max(1);
 
         Ok(Self {
             glyphs,
+            lib,
+            font_path: path.to_string(),
+            font_size_pt,
             cell_width: cell_width.max(1),
             cell_height: cell_height.max(1),
             baseline,
         })
     }
 
+    fn ensure_glyph(&mut self, ch: u32) -> bool {
+        if self.glyphs.contains_key(&ch) {
+            return true;
+        }
+        let Ok(face) = self.lib.new_face(&self.font_path, 0) else {
+            return false;
+        };
+        if face
+            .set_char_size((self.font_size_pt * 64.0) as isize, 0, 96, 0)
+            .is_err()
+        {
+            return false;
+        }
+        if let Some(g) = rasterize_one(&face, ch) {
+            self.glyphs.insert(ch, g);
+            true
+        } else {
+            false
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn draw_char(
-        &self,
+        &mut self,
         buffer: &mut [u32],
         buf_w: usize,
         buf_h: usize,
@@ -120,6 +116,8 @@ impl GlyphAtlas {
             let row_end = y * buf_w + x_end;
             buffer[row_start..row_end].fill(bg);
         }
+
+        self.ensure_glyph(ch);
 
         let Some(glyph) = self.glyphs.get(&ch) else {
             return;
@@ -184,6 +182,32 @@ impl GlyphAtlas {
     }
 }
 
+fn rasterize_one(face: &freetype::Face, ch: u32) -> Option<RasterizedGlyph> {
+    face.load_char(ch as usize, LoadFlag::RENDER).ok()?;
+    let glyph = face.glyph();
+    let bmp = glyph.bitmap();
+    let width = bmp.width() as usize;
+    let height = bmp.rows() as usize;
+    let pitch = bmp.pitch().unsigned_abs() as usize;
+    let buffer = bmp.buffer();
+
+    let mut bitmap = vec![0u8; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            bitmap[y * width + x] = buffer[y * pitch + x];
+        }
+    }
+
+    Some(RasterizedGlyph {
+        bitmap,
+        width,
+        height,
+        bearing_x: glyph.bitmap_left(),
+        bearing_y: glyph.bitmap_top(),
+        advance: (glyph.advance().x >> 6) as i32,
+    })
+}
+
 fn find_monospace_font(preferred_family: Option<&str>) -> Result<String> {
     let fc = fontconfig::Fontconfig::new().context("failed to init fontconfig")?;
 
@@ -229,7 +253,7 @@ mod tests {
 
     #[test]
     fn renders_glyph_to_buffer() {
-        let atlas = GlyphAtlas::new(14.0).unwrap();
+        let mut atlas = GlyphAtlas::new(14.0).unwrap();
         let w = atlas.cell_width * 2;
         let h = atlas.cell_height * 2;
         let mut buf = vec![0u32; w * h];

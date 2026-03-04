@@ -84,7 +84,7 @@ impl Parser {
                 self.state = State::Escape;
                 Action::Nop
             }
-            0x20..=0x7e => Action::Print(byte),
+            0x20..=0x7e | 0x80..=0xff => Action::Print(byte),
             0x00..=0x1a | 0x1c..=0x1f => Action::Execute(byte),
             _ => Action::Nop,
         }

@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -57,12 +58,13 @@ pub struct IpcServer {
     listener: UnixListener,
     clients: Vec<IpcClient>,
     path: PathBuf,
+    read_buf: Vec<u8>,
+    write_buf: Vec<u8>,
 }
 
 struct IpcClient {
-    reader: BufReader<UnixStream>,
-    write_stream: UnixStream,
-    buf: String,
+    stream: UnixStream,
+    recv_buf: Vec<u8>,
 }
 
 impl IpcServer {
@@ -85,6 +87,8 @@ impl IpcServer {
             listener,
             clients: Vec::new(),
             path: path.to_path_buf(),
+            read_buf: vec![0u8; 8192],
+            write_buf: Vec::with_capacity(4096),
         })
     }
 
@@ -92,28 +96,66 @@ impl IpcServer {
         &self.path
     }
 
-    pub fn poll(&mut self, handler: &mut dyn FnMut(&Request) -> (Response, IpcAction)) -> Vec<IpcAction> {
+    #[allow(dead_code)]
+    pub fn listener_fd(&self) -> BorrowedFd<'_> {
+        self.listener.as_fd()
+    }
+
+    #[allow(dead_code)]
+    pub fn has_clients(&self) -> bool {
+        !self.clients.is_empty()
+    }
+
+    pub fn poll(
+        &mut self,
+        handler: &mut dyn FnMut(&Request) -> (Response, IpcAction),
+    ) -> Vec<IpcAction> {
         self.accept_new();
+
+        if self.clients.is_empty() {
+            return Vec::new();
+        }
 
         let mut actions = Vec::new();
         let mut to_remove = Vec::new();
 
         for (i, client) in self.clients.iter_mut().enumerate() {
-            match client.try_read_request() {
-                Ok(Some(req)) => {
+            let n = match nix::unistd::read(&client.stream, &mut self.read_buf) {
+                Ok(0) => {
+                    to_remove.push(i);
+                    continue;
+                }
+                Ok(n) => n,
+                Err(nix::errno::Errno::EAGAIN) => continue,
+                Err(_) => {
+                    to_remove.push(i);
+                    continue;
+                }
+            };
+
+            client.recv_buf.extend_from_slice(&self.read_buf[..n]);
+
+            while let Some(newline_pos) = memchr_newline(&client.recv_buf) {
+                let line = &client.recv_buf[..newline_pos];
+
+                if let Ok(req) = serde_json::from_slice::<Request>(line) {
                     let (resp, action) = handler(&req);
-                    if client.send_response(&resp).is_err() {
-                        to_remove.push(i);
+
+                    self.write_buf.clear();
+                    if serde_json::to_writer(&mut self.write_buf, &resp).is_ok() {
+                        self.write_buf.push(b'\n');
+                        if client.stream.write_all(&self.write_buf).is_err() {
+                            to_remove.push(i);
+                        }
                     }
+
                     match action {
                         IpcAction::None => {}
                         other => actions.push(other),
                     }
                 }
-                Ok(None) => {}
-                Err(_) => {
-                    to_remove.push(i);
-                }
+
+                client.recv_buf.drain(..=newline_pos);
             }
         }
 
@@ -129,11 +171,9 @@ impl IpcServer {
             match self.listener.accept() {
                 Ok((stream, _addr)) => {
                     stream.set_nonblocking(true).ok();
-                    let write_stream = stream.try_clone().unwrap();
                     self.clients.push(IpcClient {
-                        reader: BufReader::new(stream),
-                        write_stream,
-                        buf: String::with_capacity(4096),
+                        stream,
+                        recv_buf: Vec::with_capacity(512),
                     });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -149,29 +189,9 @@ impl Drop for IpcServer {
     }
 }
 
-impl IpcClient {
-    fn try_read_request(&mut self) -> Result<Option<Request>> {
-        self.buf.clear();
-        match self.reader.read_line(&mut self.buf) {
-            Ok(0) => anyhow::bail!("client disconnected"),
-            Ok(_) => {
-                let req: Request = serde_json::from_str(self.buf.trim())
-                    .context("invalid JSON request")?;
-                Ok(Some(req))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    fn send_response(&mut self, resp: &Response) -> Result<()> {
-        let mut data = serde_json::to_vec(resp).context("failed to serialize response")?;
-        data.push(b'\n');
-        self.write_stream
-            .write_all(&data)
-            .context("failed to write response")?;
-        Ok(())
-    }
+#[inline]
+fn memchr_newline(buf: &[u8]) -> Option<usize> {
+    buf.iter().position(|&b| b == b'\n')
 }
 
 pub fn default_socket_path() -> PathBuf {
@@ -201,25 +221,35 @@ pub fn find_socket() -> Option<PathBuf> {
 }
 
 pub fn send_command(socket_path: &Path, req: &Request) -> Result<Response> {
-    let stream = UnixStream::connect(socket_path)
+    let mut stream = UnixStream::connect(socket_path)
         .with_context(|| format!("failed to connect to {}", socket_path.display()))?;
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(5)))
         .ok();
 
-    let mut writer = stream.try_clone().context("failed to clone stream")?;
     let mut data = serde_json::to_vec(req).context("failed to serialize request")?;
     data.push(b'\n');
-    writer
+    stream
         .write_all(&data)
         .context("failed to send request")?;
 
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .context("failed to read response")?;
+    let mut resp_buf = vec![0u8; 65536];
+    let mut total = 0;
+    loop {
+        match nix::unistd::read(&stream, &mut resp_buf[total..]) {
+            Ok(0) => break,
+            Ok(n) => {
+                total += n;
+                if resp_buf[..total].contains(&b'\n') {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    let line = &resp_buf[..total];
     let resp: Response =
-        serde_json::from_str(line.trim()).context("failed to parse response")?;
+        serde_json::from_slice(line.trim_ascii()).context("failed to parse response")?;
     Ok(resp)
 }

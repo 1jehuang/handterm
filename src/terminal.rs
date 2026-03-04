@@ -1,6 +1,25 @@
 use crate::grid::Grid;
 use crate::parser::{Action, Parser};
 
+fn dec_special_to_unicode(b: u8) -> u32 {
+    match b {
+        b'j' => 0x2518, // ┘
+        b'k' => 0x2510, // ┐
+        b'l' => 0x250C, // ┌
+        b'm' => 0x2514, // └
+        b'n' => 0x253C, // ┼
+        b'q' => 0x2500, // ─
+        b't' => 0x251C, // ├
+        b'u' => 0x2524, // ┤
+        b'v' => 0x2534, // ┴
+        b'w' => 0x252C, // ┬
+        b'x' => 0x2502, // │
+        b'a' => 0x2592, // ▒
+        b'`' => 0x25C6, // ◆
+        _ => b as u32,
+    }
+}
+
 pub struct Terminal {
     pub grid: Grid,
     alt_grid: Option<Grid>,
@@ -18,6 +37,16 @@ pub struct Terminal {
     pub mouse_encoding: MouseEncoding,
     pub cursor_style: CursorStyle,
     osc52_clipboard: Option<Vec<u8>>,
+    pub bell: bool,
+    charset_g0: Charset,
+    charset_g1: Charset,
+    active_charset: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Charset {
+    Ascii,
+    DecSpecialGraphics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +91,10 @@ impl Terminal {
             mouse_encoding: MouseEncoding::X10,
             cursor_style: CursorStyle::Block,
             osc52_clipboard: None,
+            bell: false,
+            charset_g0: Charset::Ascii,
+            charset_g1: Charset::Ascii,
+            active_charset: 0,
         }
     }
 
@@ -157,6 +190,7 @@ impl Terminal {
 
     pub fn process(&mut self, data: &[u8]) {
         let mut ascii_start: Option<usize> = None;
+        let use_line_drawing = self.active_charset_is_dec_special();
 
         for (i, &byte) in data.iter().enumerate() {
             let action = self.parser.advance(byte);
@@ -169,7 +203,11 @@ impl Terminal {
                 }
                 _ => {
                     if let Some(start) = ascii_start.take() {
-                        self.grid.write_bytes(&data[start..i]);
+                        if use_line_drawing {
+                            self.write_bytes_translated(&data[start..i]);
+                        } else {
+                            self.grid.write_bytes(&data[start..i]);
+                        }
                     }
                     self.handle_action(action);
                 }
@@ -177,7 +215,31 @@ impl Terminal {
         }
 
         if let Some(start) = ascii_start {
-            self.grid.write_bytes(&data[start..]);
+            if use_line_drawing {
+                self.write_bytes_translated(&data[start..]);
+            } else {
+                self.grid.write_bytes(&data[start..]);
+            }
+        }
+    }
+
+    fn active_charset_is_dec_special(&self) -> bool {
+        let cs = if self.active_charset == 0 {
+            self.charset_g0
+        } else {
+            self.charset_g1
+        };
+        cs == Charset::DecSpecialGraphics
+    }
+
+    fn write_bytes_translated(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            let ch = dec_special_to_unicode(b);
+            if ch >= 0x80 {
+                self.grid.put_char(ch);
+            } else {
+                self.grid.write_bytes(&[b]);
+            }
         }
     }
 
@@ -204,7 +266,9 @@ impl Terminal {
             b'\r' => self.grid.carriage_return(),
             b'\t' => self.grid.tab(),
             0x08 => self.grid.backspace(),
-            0x07 => {}
+            0x07 => self.bell = true,
+            0x0e => self.active_charset = 1,
+            0x0f => self.active_charset = 0,
             _ => {}
         }
     }
@@ -447,6 +511,10 @@ impl Terminal {
             }
             (0, b'7') => self.save_cursor(),
             (0, b'8') => self.restore_cursor(),
+            (b'(', b'0') => self.charset_g0 = Charset::DecSpecialGraphics,
+            (b'(', b'B') => self.charset_g0 = Charset::Ascii,
+            (b')', b'0') => self.charset_g1 = Charset::DecSpecialGraphics,
+            (b')', b'B') => self.charset_g1 = Charset::Ascii,
             _ => {}
         }
     }

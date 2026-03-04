@@ -40,10 +40,11 @@ fn bench_command_prints_metrics() {
     cmd.arg("bench")
         .assert()
         .success()
-        .stdout(predicate::str::contains("pty_spawn_us="))
-        .stdout(predicate::str::contains("shell_ready_us="))
-        .stdout(predicate::str::contains("grid_alloc_us="))
-        .stdout(predicate::str::contains("ascii_grid_80x24_mb_per_sec="))
-        .stdout(predicate::str::contains("ascii_grid_200x500_mb_per_sec="))
-        .stdout(predicate::str::contains("byte_scan_mb_per_sec="));
+        .stdout(predicate::str::contains("handterm benchmark results"))
+        .stdout(predicate::str::contains("Theoretical Floors"))
+        .stdout(predicate::str::contains("Parser"))
+        .stdout(predicate::str::contains("Grid Write"))
+        .stdout(predicate::str::contains("Full Terminal Pipeline"))
+        .stdout(predicate::str::contains("Per-Cell Metrics"))
+        .stdout(predicate::str::contains("Startup"));
 }

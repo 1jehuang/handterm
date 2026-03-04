@@ -189,36 +189,60 @@ impl Terminal {
     }
 
     pub fn process(&mut self, data: &[u8]) {
-        let mut ascii_start: Option<usize> = None;
         let use_line_drawing = self.active_charset_is_dec_special();
+        let len = data.len();
+        let mut i = 0;
 
-        for (i, &byte) in data.iter().enumerate() {
+        while i < len {
+            if self.parser.is_ground() && !use_line_drawing {
+                let run_start = i;
+                while i < len {
+                    let b = data[i];
+                    if b.wrapping_sub(0x20) < 0x5f {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if i > run_start {
+                    self.grid.write_bytes(&data[run_start..i]);
+                    continue;
+                }
+            }
+
+            let byte = data[i];
+            i += 1;
             let action = self.parser.advance(byte);
 
             match action {
-                Action::Print(_b) => {
-                    if ascii_start.is_none() {
-                        ascii_start = Some(i);
+                Action::Print(_) => {
+                    let run_start = i - 1;
+                    while i < len {
+                        let next_action = self.parser.advance(data[i]);
+                        match next_action {
+                            Action::Print(_) => { i += 1; }
+                            _ => {
+                                if use_line_drawing {
+                                    self.write_bytes_translated(&data[run_start..i]);
+                                } else {
+                                    self.grid.write_bytes(&data[run_start..i]);
+                                }
+                                self.handle_action(next_action);
+                                break;
+                            }
+                        }
+                    }
+                    if i >= len {
+                        if use_line_drawing {
+                            self.write_bytes_translated(&data[run_start..i]);
+                        } else {
+                            self.grid.write_bytes(&data[run_start..i]);
+                        }
                     }
                 }
                 _ => {
-                    if let Some(start) = ascii_start.take() {
-                        if use_line_drawing {
-                            self.write_bytes_translated(&data[start..i]);
-                        } else {
-                            self.grid.write_bytes(&data[start..i]);
-                        }
-                    }
                     self.handle_action(action);
                 }
-            }
-        }
-
-        if let Some(start) = ascii_start {
-            if use_line_drawing {
-                self.write_bytes_translated(&data[start..]);
-            } else {
-                self.grid.write_bytes(&data[start..]);
             }
         }
     }

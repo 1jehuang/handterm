@@ -64,6 +64,11 @@ impl Parser {
     }
 
     #[inline(always)]
+    pub fn is_ground(&self) -> bool {
+        matches!(self.state, State::Ground)
+    }
+
+    #[inline(always)]
     pub fn advance(&mut self, byte: u8) -> Action {
         match self.state {
             State::Ground => self.ground(byte),

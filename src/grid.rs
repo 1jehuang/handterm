@@ -90,7 +90,7 @@ pub struct Grid {
     current_attrs: u8,
     scroll_top: usize,
     scroll_bottom: usize,
-    scrollback: Vec<Vec<Cell>>,
+    scrollback: std::collections::VecDeque<Vec<Cell>>,
     scrollback_max: usize,
     pub scroll_offset: usize,
     pub selection: Option<Selection>,
@@ -120,7 +120,7 @@ impl Grid {
             current_attrs: 0,
             scroll_top: 0,
             scroll_bottom: rows,
-            scrollback: Vec::new(),
+            scrollback: std::collections::VecDeque::new(),
             scrollback_max: 10000,
             scroll_offset: 0,
             selection: None,
@@ -287,12 +287,12 @@ impl Grid {
         while i < len {
             let b = unsafe { *bytes.get_unchecked(i) };
 
-            if (0x20..=0x7e).contains(&b) {
+            if b.wrapping_sub(0x20) < 0x5f {
                 let run_start = i;
                 i += 1;
                 while i < len {
                     let next = unsafe { *bytes.get_unchecked(i) };
-                    if !(0x20..=0x7e).contains(&next) {
+                    if next.wrapping_sub(0x20) >= 0x5f {
                         break;
                     }
                     i += 1;
@@ -322,38 +322,52 @@ impl Grid {
     fn write_ascii_run(&mut self, run: &[u8]) {
         let mut ri = 0;
         let run_len = run.len();
+        let cols = self.cols;
+        let fg = self.current_fg;
+        let bg = self.current_bg;
+        let attrs = self.current_attrs;
 
         while ri < run_len {
             if self.cursor_row >= self.rows {
                 return;
             }
 
-            let phys_row = self.physical_row(self.cursor_row);
-            let row_base = phys_row * self.cols;
-            let remaining_in_row = self.cols - self.cursor_col;
+            let remaining_in_row = cols - self.cursor_col;
             let chunk_len = remaining_in_row.min(run_len - ri);
 
-            let dest_start = row_base + self.cursor_col;
-            let fg = self.current_fg;
-            let bg = self.current_bg;
-            let attrs = self.current_attrs;
+            let phys_row = (self.top_row + self.cursor_row) % self.rows;
+            let dest_start = phys_row * cols + self.cursor_col;
 
             unsafe {
                 let base_ptr = self.cells.as_mut_ptr().add(dest_start);
                 let src_ptr = run.as_ptr().add(ri);
-                for j in 0..chunk_len {
+                let mut j = 0;
+                while j + 4 <= chunk_len {
+                    for k in 0..4 {
+                        let cell = &mut *base_ptr.add(j + k);
+                        cell.ch = *src_ptr.add(j + k) as u32;
+                        cell.fg = fg;
+                        cell.bg = bg;
+                        cell.attrs = attrs;
+                        cell.flags = 0;
+                    }
+                    j += 4;
+                }
+                while j < chunk_len {
                     let cell = &mut *base_ptr.add(j);
                     cell.ch = *src_ptr.add(j) as u32;
                     cell.fg = fg;
                     cell.bg = bg;
                     cell.attrs = attrs;
+                    cell.flags = 0;
+                    j += 1;
                 }
             }
 
             ri += chunk_len;
             self.cursor_col += chunk_len;
 
-            if self.cursor_col >= self.cols {
+            if self.cursor_col >= cols {
                 self.cursor_col = 0;
                 if self.cursor_row + 1 >= self.scroll_bottom {
                     self.scroll_up();
@@ -604,6 +618,7 @@ impl Grid {
         }
     }
 
+    #[inline]
     fn scroll_up(&mut self) {
         if self.rows == 0 || self.cols == 0 {
             return;
@@ -615,20 +630,19 @@ impl Grid {
             let blank_end = blank_start + self.cols;
 
             let row = self.cells[blank_start..blank_end].to_vec();
-            self.scrollback.push(row);
+            self.scrollback.push_back(row);
             if self.scrollback.len() > self.scrollback_max {
-                self.scrollback.remove(0);
+                self.scrollback.pop_front();
             }
 
             self.cells[blank_start..blank_end].fill(Cell::BLANK);
             self.top_row = (self.top_row + 1) % self.rows;
         } else {
+            let cols = self.cols;
             for r in self.scroll_top..self.scroll_bottom.saturating_sub(1) {
-                let src = self.physical_row(r + 1) * self.cols;
-                let dst = self.physical_row(r) * self.cols;
-                for c in 0..self.cols {
-                    self.cells[dst + c] = self.cells[src + c];
-                }
+                let src = self.physical_row(r + 1) * cols;
+                let dst = self.physical_row(r) * cols;
+                self.cells.copy_within(src..src + cols, dst);
             }
             let last = self.physical_row(self.scroll_bottom.saturating_sub(1));
             let start = last * self.cols;
@@ -641,12 +655,11 @@ impl Grid {
             return;
         }
 
+        let cols = self.cols;
         for r in (self.scroll_top + 1..self.scroll_bottom).rev() {
-            let src = self.physical_row(r - 1) * self.cols;
-            let dst = self.physical_row(r) * self.cols;
-            for c in 0..self.cols {
-                self.cells[dst + c] = self.cells[src + c];
-            }
+            let src = self.physical_row(r - 1) * cols;
+            let dst = self.physical_row(r) * cols;
+            self.cells.copy_within(src..src + cols, dst);
         }
         let first = self.physical_row(self.scroll_top);
         let start = first * self.cols;

@@ -18,4 +18,6 @@ pub enum Command {
     PrintConfig,
     /// Generate the default config file if missing
     InitConfig,
+    /// Run quick local performance benchmarks
+    Bench,
 }

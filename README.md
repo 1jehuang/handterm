@@ -16,6 +16,7 @@ The name is a nod to `foot`: lean, practical, and fast.
 - CLI commands:
   - `handterm print-config`
   - `handterm init-config`
+  - `handterm bench`
 - Unit + integration tests for config and CLI behavior
 
 ## Default style baseline (mirrors kitty config)
@@ -37,6 +38,7 @@ cargo fmt
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 cargo run -- print-config
+cargo run -- bench
 ```
 
 Run the app (Wayland):
@@ -53,6 +55,17 @@ cargo run
 4. Input stack (keyboard, mouse, bracketed paste)
 5. Daemon mode for ultra-fast window spawning
 6. Extended compatibility (kitty keyboard/graphics, OSC 8/52)
+
+## Measurable performance baseline
+
+`handterm bench` currently reports:
+
+- `pty_spawn_us`: PTY + shell process spawn latency (microseconds)
+- `shell_ready_us`: time until a marker command is observed from shell output (microseconds)
+- `grid_alloc_us`: grid allocation time (microseconds)
+- `ascii_grid_mb_per_sec`: in-memory ASCII grid write throughput
+
+These metrics are intentionally simple and deterministic so we can track regressions while iterating toward theoretical limits.
 
 ## License
 

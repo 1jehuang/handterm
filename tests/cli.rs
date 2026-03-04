@@ -33,3 +33,15 @@ fn init_config_writes_file() {
     assert!(content.contains("JetBrainsMono Nerd Font Light"));
     assert!(content.contains("background_opacity = 0.9"));
 }
+
+#[test]
+fn bench_command_prints_metrics() {
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("handterm");
+    cmd.arg("bench")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pty_spawn_us="))
+        .stdout(predicate::str::contains("shell_ready_us="))
+        .stdout(predicate::str::contains("grid_alloc_us="))
+        .stdout(predicate::str::contains("ascii_grid_mb_per_sec="));
+}

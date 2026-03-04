@@ -32,7 +32,15 @@ fn main() -> Result<()> {
             println!("pty_spawn_us={}", out.spawn_us);
             println!("shell_ready_us={}", out.shell_ready_us);
             println!("grid_alloc_us={}", out.grid_alloc_us);
-            println!("ascii_grid_mb_per_sec={:.2}", out.ascii_grid_mb_per_sec);
+            println!(
+                "ascii_grid_80x24_mb_per_sec={:.2}",
+                out.ascii_grid_mb_per_sec
+            );
+            println!(
+                "ascii_grid_200x500_mb_per_sec={:.2}",
+                out.throughput_large_grid_mb_per_sec
+            );
+            println!("byte_scan_mb_per_sec={:.2}", out.scan_mb_per_sec);
             Ok(())
         }
         None => app::run(config),

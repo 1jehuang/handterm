@@ -8,6 +8,8 @@ pub struct BenchResult {
     pub spawn_us: u128,
     pub shell_ready_us: u128,
     pub ascii_grid_mb_per_sec: f64,
+    pub throughput_large_grid_mb_per_sec: f64,
+    pub scan_mb_per_sec: f64,
     pub grid_alloc_us: u128,
 }
 
@@ -47,15 +49,38 @@ pub fn run_quick_bench(columns: u16, rows: u16) -> Result<BenchResult> {
     let grid_alloc_us = grid_start.elapsed().as_micros();
 
     let payload = vec![b'x'; 8 * 1024 * 1024];
+
     let parse_start = Instant::now();
     grid.write_bytes(&payload);
     let secs = parse_start.elapsed().as_secs_f64().max(1e-9);
     let ascii_grid_mb_per_sec = (payload.len() as f64 / (1024.0 * 1024.0)) / secs;
 
+    let mut big_grid = Grid::new(200, 500, [0xcd, 0xd6, 0xf4], [0x00, 0x00, 0x00]);
+    let big_payload = vec![b'A'; 64 * 1024 * 1024];
+    let big_start = Instant::now();
+    big_grid.write_bytes(&big_payload);
+    let big_secs = big_start.elapsed().as_secs_f64().max(1e-9);
+    let throughput_large_grid_mb_per_sec =
+        (big_payload.len() as f64 / (1024.0 * 1024.0)) / big_secs;
+
+    let scan_payload = vec![b'Z'; 64 * 1024 * 1024];
+    let scan_start = Instant::now();
+    let mut scan_count: usize = 0;
+    for &b in scan_payload.iter() {
+        if (0x20..=0x7e).contains(&b) {
+            scan_count += 1;
+        }
+    }
+    let scan_secs = scan_start.elapsed().as_secs_f64().max(1e-9);
+    let scan_mb_per_sec = (scan_payload.len() as f64 / (1024.0 * 1024.0)) / scan_secs;
+    std::hint::black_box(scan_count);
+
     Ok(BenchResult {
         spawn_us,
         shell_ready_us,
         ascii_grid_mb_per_sec,
+        throughput_large_grid_mb_per_sec,
+        scan_mb_per_sec,
         grid_alloc_us,
     })
 }

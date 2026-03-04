@@ -36,6 +36,10 @@ impl PtyChild {
                 Ok(pty)
             }
             ForkptyResult::Child => {
+                unsafe {
+                    std::env::set_var("TERM", "xterm-256color");
+                    std::env::set_var("COLORTERM", "truecolor");
+                }
                 let shell = CString::new(shell_path)
                     .with_context(|| format!("invalid shell path: {shell_path}"))?;
                 let args: [&CStr; 1] = [shell.as_c_str()];

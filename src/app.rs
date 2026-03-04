@@ -11,7 +11,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, Size};
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 pub fn run(config: AppConfig) -> Result<()> {
@@ -36,6 +36,7 @@ struct AppState {
     pty: PtyChild,
     pty_buf: Vec<u8>,
     atlas: GlyphAtlas,
+    pty_closed: bool,
 }
 
 impl HandtermApp {
@@ -92,6 +93,7 @@ impl ApplicationHandler for HandtermApp {
             pty,
             pty_buf: vec![0u8; 64 * 1024],
             atlas,
+            pty_closed: false,
         });
 
         if let Some(s) = &self.state {
@@ -135,7 +137,7 @@ impl ApplicationHandler for HandtermApp {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed
-                    && let Some(bytes) = key_to_bytes(&event.logical_key)
+                    && let Some(bytes) = key_to_bytes(&event.logical_key, &event.physical_key)
                 {
                     let _ = state.pty.write_all(&bytes);
                 }
@@ -148,30 +150,41 @@ impl ApplicationHandler for HandtermApp {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(state) = &mut self.state {
             let n = drain_pty(state);
             if n > 0 {
                 state.window.request_redraw();
+            }
+            if state.pty_closed {
+                event_loop.exit();
             }
         }
     }
 }
 
 fn drain_pty(state: &mut AppState) -> usize {
+    if state.pty_closed {
+        return 0;
+    }
     let mut total = 0;
     loop {
-        let n = state.pty.try_read(&mut state.pty_buf).unwrap_or(0);
-        if n == 0 {
-            break;
+        match state.pty.try_read(&mut state.pty_buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                state.terminal.process(&state.pty_buf[..n]);
+                total += n;
+            }
+            Err(_) => {
+                state.pty_closed = true;
+                break;
+            }
         }
-        state.terminal.process(&state.pty_buf[..n]);
-        total += n;
     }
     total
 }
 
-fn key_to_bytes(key: &Key) -> Option<Vec<u8>> {
+fn key_to_bytes(key: &Key, _physical: &PhysicalKey) -> Option<Vec<u8>> {
     match key {
         Key::Character(s) => Some(s.as_bytes().to_vec()),
         Key::Named(named) => match named {

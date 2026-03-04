@@ -659,6 +659,10 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
             let cell = grid.cell_at_scroll(row, col);
             let is_cursor = show_cursor && row == cursor_row && col == cursor_col;
 
+            if cell.flags & crate::grid::FLAG_WIDE_CONT != 0 && !is_cursor {
+                continue;
+            }
+
             let has_content = cell.ch > 0x20;
             let has_custom_bg = cell.bg != crate::grid::COLOR_DEFAULT;
             let has_attrs = cell.attrs != 0;

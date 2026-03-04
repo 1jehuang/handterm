@@ -253,7 +253,7 @@ impl Parser {
                 Action::OscDispatch(data)
             }
             _ => {
-                if self.osc_buf.len() < 256 {
+                if self.osc_buf.len() < 4096 {
                     self.osc_buf.push(byte);
                 }
                 Action::Nop

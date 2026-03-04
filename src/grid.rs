@@ -18,6 +18,9 @@ pub const ATTR_UNDERLINE: u8 = 0x08;
 pub const ATTR_INVERSE: u8 = 0x10;
 pub const ATTR_STRIKETHROUGH: u8 = 0x20;
 
+pub const FLAG_WIDE: u8 = 0x01;
+pub const FLAG_WIDE_CONT: u8 = 0x02;
+
 #[inline]
 fn decode_utf8(bytes: &[u8]) -> (u32, usize) {
     let b0 = bytes[0];
@@ -319,14 +322,45 @@ impl Grid {
         if self.cursor_row >= self.rows || self.cursor_col >= self.cols {
             return;
         }
+
+        let width = if let Some(c) = char::from_u32(ch) {
+            unicode_width::UnicodeWidthChar::width(c).unwrap_or(1)
+        } else {
+            1
+        };
+
+        if width == 2 && self.cursor_col + 1 >= self.cols {
+            let idx = self.cell_index_at(self.cursor_row, self.cursor_col);
+            self.cells[idx] = Cell::BLANK;
+            self.cursor_col = 0;
+            if self.cursor_row + 1 >= self.scroll_bottom {
+                self.scroll_up();
+            } else {
+                self.cursor_row += 1;
+            }
+        }
+
         let idx = self.cell_index_at(self.cursor_row, self.cursor_col);
         let cell = &mut self.cells[idx];
         cell.ch = ch;
         cell.fg = self.current_fg;
         cell.bg = self.current_bg;
         cell.attrs = self.current_attrs;
+        cell.flags = if width == 2 { FLAG_WIDE } else { 0 };
 
         self.cursor_col += 1;
+
+        if width == 2 && self.cursor_col < self.cols {
+            let idx2 = self.cell_index_at(self.cursor_row, self.cursor_col);
+            let cell2 = &mut self.cells[idx2];
+            cell2.ch = 0;
+            cell2.fg = self.current_fg;
+            cell2.bg = self.current_bg;
+            cell2.attrs = self.current_attrs;
+            cell2.flags = FLAG_WIDE_CONT;
+            self.cursor_col += 1;
+        }
+
         if self.cursor_col >= self.cols {
             self.cursor_col = 0;
             if self.cursor_row + 1 >= self.scroll_bottom {

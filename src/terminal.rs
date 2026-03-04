@@ -250,24 +250,40 @@ impl Terminal {
                 24 => self.grid.set_underline(false),
                 27 => self.grid.set_inverse(false),
                 29 => self.grid.set_strikethrough(false),
-                30..=37 => self.grid.set_fg(params[i] as u8 - 30),
+                30..=37 => self.grid.set_fg((params[i] - 30) as u32),
                 38 => {
-                    if i + 1 < params.len() && params[i + 1] == 5 && i + 2 < params.len() {
-                        self.grid.set_fg(params[i + 2] as u8);
-                        i += 2;
+                    if i + 1 < params.len() {
+                        if params[i + 1] == 5 && i + 2 < params.len() {
+                            self.grid.set_fg(params[i + 2] as u32);
+                            i += 2;
+                        } else if params[i + 1] == 2 && i + 4 < params.len() {
+                            let r = params[i + 2] as u8;
+                            let g = params[i + 3] as u8;
+                            let b = params[i + 4] as u8;
+                            self.grid.set_fg_rgb(r, g, b);
+                            i += 4;
+                        }
                     }
                 }
                 39 => self.grid.set_fg(0),
-                40..=47 => self.grid.set_bg(params[i] as u8 - 40),
+                40..=47 => self.grid.set_bg((params[i] - 40) as u32),
                 48 => {
-                    if i + 1 < params.len() && params[i + 1] == 5 && i + 2 < params.len() {
-                        self.grid.set_bg(params[i + 2] as u8);
-                        i += 2;
+                    if i + 1 < params.len() {
+                        if params[i + 1] == 5 && i + 2 < params.len() {
+                            self.grid.set_bg(params[i + 2] as u32);
+                            i += 2;
+                        } else if params[i + 1] == 2 && i + 4 < params.len() {
+                            let r = params[i + 2] as u8;
+                            let g = params[i + 3] as u8;
+                            let b = params[i + 4] as u8;
+                            self.grid.set_bg_rgb(r, g, b);
+                            i += 4;
+                        }
                     }
                 }
                 49 => self.grid.set_bg(0),
-                90..=97 => self.grid.set_fg(params[i] as u8 - 90 + 8),
-                100..=107 => self.grid.set_bg(params[i] as u8 - 100 + 8),
+                90..=97 => self.grid.set_fg((params[i] - 90 + 8) as u32),
+                100..=107 => self.grid.set_bg((params[i] - 100 + 8) as u32),
                 _ => {}
             }
             i += 1;

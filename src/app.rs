@@ -383,20 +383,26 @@ const PALETTE: [u32; 16] = [
     0xeeeeec, // 15 bright white
 ];
 
-fn color_to_rgb(idx: u8) -> u32 {
-    if (idx as usize) < PALETTE.len() {
-        PALETTE[idx as usize]
-    } else if (16..232).contains(&idx) {
-        let c = idx - 16;
-        let r = (c / 36) * 51;
-        let g = ((c % 36) / 6) * 51;
-        let b = (c % 6) * 51;
-        ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
-    } else if idx >= 232 {
-        let v = 8 + (idx - 232) as u32 * 10;
-        (v << 16) | (v << 8) | v
+fn color_to_rgb(c: u32) -> u32 {
+    use crate::grid::COLOR_FLAG_RGB;
+    if c & COLOR_FLAG_RGB != 0 {
+        c & 0x00FF_FFFF
     } else {
-        0xffffff
+        let idx = c as u8;
+        if (idx as usize) < PALETTE.len() {
+            PALETTE[idx as usize]
+        } else if (16..232).contains(&idx) {
+            let v = idx - 16;
+            let r = (v / 36) * 51;
+            let g = ((v % 36) / 6) * 51;
+            let b = (v % 6) * 51;
+            ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+        } else if idx >= 232 {
+            let v = 8 + (idx - 232) as u32 * 10;
+            (v << 16) | (v << 8) | v
+        } else {
+            0xffffff
+        }
     }
 }
 
@@ -437,18 +443,18 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
             let is_cursor = show_cursor && row == cursor_row && col == cursor_col;
 
             let has_content = cell.ch > 0x20 && cell.ch < 0x7f;
-            let has_custom_bg = cell.bg != 0;
+            let has_custom_bg = cell.bg != crate::grid::COLOR_DEFAULT;
 
             if !is_cursor && !has_content && !has_custom_bg {
                 continue;
             }
 
-            let fg = if cell.fg == 0 {
+            let fg = if cell.fg == crate::grid::COLOR_DEFAULT {
                 base_fg
             } else {
                 color_to_rgb(cell.fg)
             };
-            let bg = if cell.bg == 0 {
+            let bg = if cell.bg == crate::grid::COLOR_DEFAULT {
                 base_bg
             } else {
                 color_to_rgb(cell.bg)

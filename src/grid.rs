@@ -2,11 +2,14 @@
 #[repr(C)]
 pub struct Cell {
     pub ch: u32,
-    pub fg: u8,
-    pub bg: u8,
+    pub fg: u32,
+    pub bg: u32,
     pub attrs: u8,
     pub flags: u8,
 }
+
+pub const COLOR_DEFAULT: u32 = 0;
+pub const COLOR_FLAG_RGB: u32 = 0x8000_0000;
 
 pub const ATTR_BOLD: u8 = 0x01;
 pub const ATTR_DIM: u8 = 0x02;
@@ -18,8 +21,8 @@ pub const ATTR_STRIKETHROUGH: u8 = 0x20;
 impl Cell {
     pub const BLANK: Self = Self {
         ch: b' ' as u32,
-        fg: 0,
-        bg: 0,
+        fg: COLOR_DEFAULT,
+        bg: COLOR_DEFAULT,
         attrs: 0,
         flags: 0,
     };
@@ -37,8 +40,8 @@ pub struct Grid {
     cursor_row: usize,
     cells: Vec<Cell>,
     top_row: usize,
-    current_fg: u8,
-    current_bg: u8,
+    current_fg: u32,
+    current_bg: u32,
     current_attrs: u8,
     scroll_top: usize,
     scroll_bottom: usize,
@@ -55,8 +58,8 @@ impl Grid {
             cursor_row: 0,
             cells: vec![Cell::BLANK; cols * rows],
             top_row: 0,
-            current_fg: 0,
-            current_bg: 0,
+            current_fg: COLOR_DEFAULT,
+            current_bg: COLOR_DEFAULT,
             current_attrs: 0,
             scroll_top: 0,
             scroll_bottom: rows,
@@ -451,8 +454,8 @@ impl Grid {
     }
 
     pub fn reset_attrs(&mut self) {
-        self.current_fg = 0;
-        self.current_bg = 0;
+        self.current_fg = COLOR_DEFAULT;
+        self.current_bg = COLOR_DEFAULT;
         self.current_attrs = 0;
     }
 
@@ -504,12 +507,20 @@ impl Grid {
         }
     }
 
-    pub fn set_fg(&mut self, color: u8) {
+    pub fn set_fg(&mut self, color: u32) {
         self.current_fg = color;
     }
 
-    pub fn set_bg(&mut self, color: u8) {
+    pub fn set_bg(&mut self, color: u32) {
         self.current_bg = color;
+    }
+
+    pub fn set_fg_rgb(&mut self, r: u8, g: u8, b: u8) {
+        self.current_fg = COLOR_FLAG_RGB | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+    }
+
+    pub fn set_bg_rgb(&mut self, r: u8, g: u8, b: u8) {
+        self.current_bg = COLOR_FLAG_RGB | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
     }
 }
 
@@ -555,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn cell_is_8_bytes() {
-        assert_eq!(std::mem::size_of::<super::Cell>(), 8);
+    fn cell_is_16_bytes() {
+        assert_eq!(std::mem::size_of::<super::Cell>(), 16);
     }
 }

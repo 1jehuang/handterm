@@ -109,26 +109,23 @@ impl GlyphAtlas {
     ) {
         let px_x = cell_x * self.cell_width;
         let px_y = cell_y * self.cell_height;
+        let cw = self.cell_width;
+        let ch_height = self.cell_height;
 
-        for dy in 0..self.cell_height {
-            let y = px_y + dy;
-            if y >= buf_h {
-                break;
-            }
-            for dx in 0..self.cell_width {
-                let x = px_x + dx;
-                if x >= buf_w {
-                    break;
-                }
-                buffer[y * buf_w + x] = bg;
-            }
+        let x_end = (px_x + cw).min(buf_w);
+        let y_end = (px_y + ch_height).min(buf_h);
+
+        for y in px_y..y_end {
+            let row_start = y * buf_w + px_x;
+            let row_end = y * buf_w + x_end;
+            buffer[row_start..row_end].fill(bg);
         }
 
         let Some(glyph) = self.glyphs.get(&ch) else {
             return;
         };
 
-        let origin_y = px_y as i32 + (self.cell_height as i32 - self.baseline as i32);
+        let origin_y = px_y as i32 + (ch_height as i32 - self.baseline as i32);
         let glyph_top = origin_y - glyph.bearing_y;
         let glyph_left = px_x as i32 + glyph.bearing_x;
 
@@ -136,26 +133,33 @@ impl GlyphAtlas {
         let fg_g = (fg >> 8) & 0xff;
         let fg_b = fg & 0xff;
 
-        for gy in 0..glyph.height {
-            let screen_y = glyph_top + gy as i32;
-            if screen_y < 0 || screen_y as usize >= buf_h {
-                continue;
-            }
-            let sy = screen_y as usize;
+        let gy_start = if glyph_top < 0 {
+            (-glyph_top) as usize
+        } else {
+            0
+        };
+        let gy_end = glyph.height.min(((buf_h as i32) - glyph_top).max(0) as usize);
 
-            for gx in 0..glyph.width {
-                let screen_x = glyph_left + gx as i32;
-                if screen_x < 0 || screen_x as usize >= buf_w {
-                    continue;
-                }
-                let sx = screen_x as usize;
+        let gx_start = if glyph_left < 0 {
+            (-glyph_left) as usize
+        } else {
+            0
+        };
+        let gx_end = glyph.width.min(((buf_w as i32) - glyph_left).max(0) as usize);
 
-                let alpha = glyph.bitmap[gy * glyph.width + gx] as u32;
+        for gy in gy_start..gy_end {
+            let sy = (glyph_top + gy as i32) as usize;
+            let bmp_row = gy * glyph.width;
+            let screen_row = sy * buf_w;
+
+            for gx in gx_start..gx_end {
+                let alpha = glyph.bitmap[bmp_row + gx] as u32;
                 if alpha == 0 {
                     continue;
                 }
 
-                let pixel = &mut buffer[sy * buf_w + sx];
+                let sx = (glyph_left + gx as i32) as usize;
+                let pixel = &mut buffer[screen_row + sx];
 
                 if alpha == 255 {
                     *pixel = fg;

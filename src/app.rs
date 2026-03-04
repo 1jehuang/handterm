@@ -264,6 +264,14 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
     for row in 0..grid.rows {
         for col in 0..grid.cols {
             let cell = grid.cell_at(row, col);
+            let is_cursor = row == cursor_row && col == cursor_col;
+
+            let has_content = cell.ch > 0x20 && cell.ch < 0x7f;
+            let has_custom_bg = cell.bg != 0;
+
+            if !is_cursor && !has_content && !has_custom_bg {
+                continue;
+            }
 
             let fg = if cell.fg == 0 {
                 base_fg
@@ -275,8 +283,6 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
             } else {
                 color_to_rgb(cell.bg)
             };
-
-            let is_cursor = row == cursor_row && col == cursor_col;
 
             let actual_fg = if is_cursor { base_bg } else { fg };
             let actual_bg = if is_cursor { base_fg } else { bg };

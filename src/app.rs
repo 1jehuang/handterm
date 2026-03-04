@@ -197,6 +197,22 @@ impl ApplicationHandler for HandtermApp {
                         }
                     }
 
+                    if shift {
+                        if let Key::Named(NamedKey::PageUp) = &event.logical_key {
+                            let max = state.terminal.grid.scrollback_len();
+                            let half = state.terminal.rows as usize / 2;
+                            state.terminal.grid.scroll_offset = (state.terminal.grid.scroll_offset + half).min(max);
+                            state.window.request_redraw();
+                            return;
+                        }
+                        if let Key::Named(NamedKey::PageDown) = &event.logical_key {
+                            let half = state.terminal.rows as usize / 2;
+                            state.terminal.grid.scroll_offset = state.terminal.grid.scroll_offset.saturating_sub(half);
+                            state.window.request_redraw();
+                            return;
+                        }
+                    }
+
                     if let Some(bytes) = key_to_bytes(
                         &event.logical_key,
                         &event.physical_key,
@@ -204,6 +220,7 @@ impl ApplicationHandler for HandtermApp {
                         ctrl,
                     ) {
                         let _ = state.pty.write_all(&bytes);
+                        state.terminal.grid.scroll_offset = 0;
                     }
                 }
             }
@@ -239,6 +256,14 @@ impl ApplicationHandler for HandtermApp {
                             let _ = state.pty.write_all(&bytes);
                         }
                     }
+                } else {
+                    let max = state.terminal.grid.scrollback_len();
+                    if up {
+                        state.terminal.grid.scroll_offset = (state.terminal.grid.scroll_offset + lines * 3).min(max);
+                    } else {
+                        state.terminal.grid.scroll_offset = state.terminal.grid.scroll_offset.saturating_sub(lines * 3);
+                    }
+                    state.window.request_redraw();
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -425,6 +450,7 @@ fn drain_pty(state: &mut AppState) -> usize {
         if let Some(title) = state.terminal.take_title() {
             state.window.set_title(&title);
         }
+        state.terminal.grid.scroll_offset = 0;
     }
     total
 }
@@ -566,12 +592,12 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
     buffer.fill(base_bg);
 
     let (cursor_col, cursor_row) = grid.cursor_pos();
-    let show_cursor = state.terminal.cursor_visible;
+    let show_cursor = state.terminal.cursor_visible && grid.scroll_offset == 0;
     let cursor_style = state.terminal.cursor_style;
 
     for row in 0..grid.rows {
         for col in 0..grid.cols {
-            let cell = grid.cell_at(row, col);
+            let cell = grid.cell_at_scroll(row, col);
             let is_cursor = show_cursor && row == cursor_row && col == cursor_col;
 
             let has_content = cell.ch > 0x20;

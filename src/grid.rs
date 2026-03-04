@@ -87,6 +87,9 @@ pub struct Grid {
     current_attrs: u8,
     scroll_top: usize,
     scroll_bottom: usize,
+    scrollback: Vec<Vec<Cell>>,
+    scrollback_max: usize,
+    pub scroll_offset: usize,
 }
 
 impl Grid {
@@ -105,6 +108,9 @@ impl Grid {
             current_attrs: 0,
             scroll_top: 0,
             scroll_bottom: rows,
+            scrollback: Vec::new(),
+            scrollback_max: 10000,
+            scroll_offset: 0,
         }
     }
 
@@ -139,6 +145,37 @@ impl Grid {
 
     pub fn get_selection_text(&self) -> String {
         String::new()
+    }
+
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    pub fn cell_at_scroll(&self, row: usize, col: usize) -> &Cell {
+        if self.scroll_offset == 0 {
+            return self.cell_at(row, col);
+        }
+        let sb_len = self.scrollback.len();
+        if self.scroll_offset > sb_len {
+            return &Cell::BLANK;
+        }
+        let sb_start = sb_len - self.scroll_offset;
+        let line_in_sb = sb_start + row;
+        if line_in_sb < sb_len {
+            let sb_row = &self.scrollback[line_in_sb];
+            if col < sb_row.len() {
+                &sb_row[col]
+            } else {
+                &Cell::BLANK
+            }
+        } else {
+            let grid_row = line_in_sb - sb_len;
+            if grid_row < self.rows && col < self.cols {
+                self.cell_at(grid_row, col)
+            } else {
+                &Cell::BLANK
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -473,6 +510,13 @@ impl Grid {
             let old_top = self.physical_row(0);
             let blank_start = old_top * self.cols;
             let blank_end = blank_start + self.cols;
+
+            let row = self.cells[blank_start..blank_end].to_vec();
+            self.scrollback.push(row);
+            if self.scrollback.len() > self.scrollback_max {
+                self.scrollback.remove(0);
+            }
+
             self.cells[blank_start..blank_end].fill(Cell::BLANK);
             self.top_row = (self.top_row + 1) % self.rows;
         } else {

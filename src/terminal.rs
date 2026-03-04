@@ -94,6 +94,10 @@ impl Terminal {
         self.osc52_clipboard.take()
     }
 
+    pub fn focus_events_mode(&self) -> bool {
+        self.mode_focus_events
+    }
+
     pub fn encode_mouse(&self, button: u8, col: usize, row: usize, pressed: bool) -> Option<Vec<u8>> {
         if self.mouse_mode == MouseMode::Off {
             return None;

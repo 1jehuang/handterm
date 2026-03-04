@@ -266,6 +266,15 @@ impl ApplicationHandler for HandtermApp {
                     state.window.request_redraw();
                 }
             }
+            WindowEvent::Focused(focused) => {
+                if state.terminal.focus_events_mode() {
+                    if focused {
+                        let _ = state.pty.write_all(b"\x1b[I");
+                    } else {
+                        let _ = state.pty.write_all(b"\x1b[O");
+                    }
+                }
+            }
             WindowEvent::RedrawRequested => {
                 drain_pty(state);
                 render_grid(state, &self.config).expect("frame render should succeed");

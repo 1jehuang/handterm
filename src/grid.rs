@@ -115,14 +115,37 @@ impl Grid {
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
-        self.cols = cols.max(1) as usize;
-        self.rows = rows.max(1) as usize;
-        self.cursor_col = 0;
-        self.cursor_row = 0;
+        let new_cols = cols.max(1) as usize;
+        let new_rows = rows.max(1) as usize;
+
+        if new_cols == self.cols && new_rows == self.rows {
+            return;
+        }
+
+        let old_cols = self.cols;
+        let old_rows = self.rows;
+        let mut new_cells = vec![Cell::BLANK; new_cols * new_rows];
+
+        let copy_rows = old_rows.min(new_rows);
+        let copy_cols = old_cols.min(new_cols);
+
+        for r in 0..copy_rows {
+            let src_phys = self.physical_row(r);
+            let src_start = src_phys * old_cols;
+            let dst_start = r * new_cols;
+            for c in 0..copy_cols {
+                new_cells[dst_start + c] = self.cells[src_start + c];
+            }
+        }
+
+        self.cells = new_cells;
+        self.cols = new_cols;
+        self.rows = new_rows;
         self.top_row = 0;
         self.scroll_top = 0;
-        self.scroll_bottom = self.rows;
-        self.cells = vec![Cell::BLANK; self.cols * self.rows];
+        self.scroll_bottom = new_rows;
+        self.cursor_col = self.cursor_col.min(new_cols.saturating_sub(1));
+        self.cursor_row = self.cursor_row.min(new_rows.saturating_sub(1));
     }
 
     pub fn cursor_pos(&self) -> (usize, usize) {

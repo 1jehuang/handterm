@@ -63,7 +63,6 @@ impl Grid {
         }
     }
 
-    #[allow(dead_code)]
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.cols = cols.max(1) as usize;
         self.rows = rows.max(1) as usize;

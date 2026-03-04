@@ -18,6 +18,12 @@ impl Terminal {
         }
     }
 
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        self.cols = cols;
+        self.rows = rows;
+        self.grid.resize(cols, rows);
+    }
+
     pub fn process(&mut self, data: &[u8]) {
         let mut ascii_start: Option<usize> = None;
 

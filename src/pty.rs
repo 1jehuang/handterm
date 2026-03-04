@@ -69,6 +69,22 @@ impl PtyChild {
             Err(e) => Err(e).context("pty read failed"),
         }
     }
+
+    pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        use nix::libc::{TIOCSWINSZ, ioctl, winsize};
+        use std::os::fd::AsRawFd;
+        let ws = winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let ret = unsafe { ioctl(self.master_fd.as_raw_fd(), TIOCSWINSZ, &ws) };
+        if ret == -1 {
+            anyhow::bail!("TIOCSWINSZ failed: {}", std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

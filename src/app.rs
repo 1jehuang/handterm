@@ -119,6 +119,17 @@ impl ApplicationHandler for HandtermApp {
                         .surface
                         .resize(width, height)
                         .expect("surface resize should succeed");
+
+                    let new_cols = (width.get() as usize / state.atlas.cell_width.max(1)) as u16;
+                    let new_rows = (height.get() as usize / state.atlas.cell_height.max(1)) as u16;
+                    let new_cols = new_cols.max(1);
+                    let new_rows = new_rows.max(1);
+
+                    if new_cols != state.terminal.cols || new_rows != state.terminal.rows {
+                        state.terminal.resize(new_cols, new_rows);
+                        let _ = state.pty.resize(new_cols, new_rows);
+                    }
+
                     state.window.request_redraw();
                 }
             }

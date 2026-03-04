@@ -129,11 +129,14 @@ impl Grid {
             let chunk_len = remaining_in_row.min(run_len - ri);
 
             let dest_start = row_base + self.cursor_col;
-            let dest = &mut self.cells[dest_start..dest_start + chunk_len];
-            let src = &run[ri..ri + chunk_len];
 
-            for (cell, &byte) in dest.iter_mut().zip(src.iter()) {
-                cell.ch = byte as u32;
+            unsafe {
+                let base_ptr = self.cells.as_mut_ptr().add(dest_start);
+                let src_ptr = run.as_ptr().add(ri);
+                for j in 0..chunk_len {
+                    let cell = &mut *base_ptr.add(j);
+                    cell.ch = *src_ptr.add(j) as u32;
+                }
             }
 
             ri += chunk_len;

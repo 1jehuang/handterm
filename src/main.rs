@@ -4,6 +4,7 @@ mod color;
 mod config;
 mod grid;
 mod metrics;
+mod parser;
 mod pty;
 
 use anyhow::Result;

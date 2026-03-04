@@ -70,8 +70,23 @@ impl Parser {
 
     #[inline(always)]
     pub fn advance(&mut self, byte: u8) -> Action {
+        if self.state as u8 == 0 {
+            if byte >= 0x20 {
+                return Action::Print(byte);
+            }
+            if byte == 0x1b {
+                self.state = State::Escape;
+                return Action::Nop;
+            }
+            return Action::Execute(byte);
+        }
+        self.advance_slow(byte)
+    }
+
+    #[inline(never)]
+    fn advance_slow(&mut self, byte: u8) -> Action {
         match self.state {
-            State::Ground => self.ground(byte),
+            State::Ground => unreachable!(),
             State::Escape => self.escape(byte),
             State::EscapeIntermediate => self.escape_intermediate(byte),
             State::CsiEntry => self.csi_entry(byte),
@@ -79,19 +94,6 @@ impl Parser {
             State::CsiIntermediate => self.csi_intermediate(byte),
             State::OscString => self.osc_string(byte),
             State::DcsEntry => self.dcs_entry(byte),
-        }
-    }
-
-    #[inline(always)]
-    fn ground(&mut self, byte: u8) -> Action {
-        match byte {
-            0x1b => {
-                self.state = State::Escape;
-                Action::Nop
-            }
-            0x20..=0x7e | 0x80..=0xff => Action::Print(byte),
-            0x00..=0x1a | 0x1c..=0x1f => Action::Execute(byte),
-            _ => Action::Nop,
         }
     }
 

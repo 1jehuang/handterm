@@ -13,6 +13,7 @@ pub struct Terminal {
     saved_cursor: Option<(usize, usize)>,
     mode_bracketed_paste: bool,
     mode_focus_events: bool,
+    pub application_cursor_keys: bool,
 }
 
 impl Terminal {
@@ -29,6 +30,7 @@ impl Terminal {
             saved_cursor: None,
             mode_bracketed_paste: false,
             mode_focus_events: false,
+            application_cursor_keys: false,
         }
     }
 
@@ -183,7 +185,7 @@ impl Terminal {
                 let params: Vec<u16> = self.parser.params().to_vec();
                 for param in &params {
                     match param {
-                        1 => {}    // DECCKM - application cursor keys (TODO)
+                        1 => self.application_cursor_keys = true,
                         7 => {}    // DECAWM - auto wrap (TODO)
                         12 => {}   // Cursor blink
                         25 => self.cursor_visible = true,   // DECTCEM show cursor
@@ -203,7 +205,7 @@ impl Terminal {
                 let params: Vec<u16> = self.parser.params().to_vec();
                 for param in &params {
                     match param {
-                        1 => {}
+                        1 => self.application_cursor_keys = false,
                         7 => {}
                         12 => {}
                         25 => self.cursor_visible = false,  // DECTCEM hide cursor
@@ -455,5 +457,15 @@ mod tests {
         assert_eq!(t.grid.cursor_pos(), (0, 0));
         t.process(b"\x1b8");
         assert_eq!(t.grid.cursor_pos(), (9, 4));
+    }
+
+    #[test]
+    fn application_cursor_keys() {
+        let mut t = Terminal::new(80, 24);
+        assert!(!t.application_cursor_keys);
+        t.process(b"\x1b[?1h");
+        assert!(t.application_cursor_keys);
+        t.process(b"\x1b[?1l");
+        assert!(!t.application_cursor_keys);
     }
 }

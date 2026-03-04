@@ -147,7 +147,7 @@ impl ApplicationHandler for HandtermApp {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed
-                    && let Some(bytes) = key_to_bytes(&event.logical_key, &event.physical_key)
+                    && let Some(bytes) = key_to_bytes(&event.logical_key, &event.physical_key, state.terminal.application_cursor_keys)
                 {
                     let _ = state.pty.write_all(&bytes);
                 }
@@ -340,7 +340,7 @@ fn drain_pty(state: &mut AppState) -> usize {
     total
 }
 
-fn key_to_bytes(key: &Key, _physical: &PhysicalKey) -> Option<Vec<u8>> {
+fn key_to_bytes(key: &Key, _physical: &PhysicalKey, app_cursor: bool) -> Option<Vec<u8>> {
     match key {
         Key::Character(s) => Some(s.as_bytes().to_vec()),
         Key::Named(named) => match named {
@@ -348,6 +348,12 @@ fn key_to_bytes(key: &Key, _physical: &PhysicalKey) -> Option<Vec<u8>> {
             NamedKey::Backspace => Some(b"\x7f".to_vec()),
             NamedKey::Tab => Some(b"\t".to_vec()),
             NamedKey::Escape => Some(b"\x1b".to_vec()),
+            NamedKey::ArrowUp if app_cursor => Some(b"\x1bOA".to_vec()),
+            NamedKey::ArrowDown if app_cursor => Some(b"\x1bOB".to_vec()),
+            NamedKey::ArrowRight if app_cursor => Some(b"\x1bOC".to_vec()),
+            NamedKey::ArrowLeft if app_cursor => Some(b"\x1bOD".to_vec()),
+            NamedKey::Home if app_cursor => Some(b"\x1bOH".to_vec()),
+            NamedKey::End if app_cursor => Some(b"\x1bOF".to_vec()),
             NamedKey::ArrowUp => Some(b"\x1b[A".to_vec()),
             NamedKey::ArrowDown => Some(b"\x1b[B".to_vec()),
             NamedKey::ArrowRight => Some(b"\x1b[C".to_vec()),

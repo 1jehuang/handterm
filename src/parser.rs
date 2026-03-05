@@ -164,7 +164,7 @@ impl Parser {
                 self.state = State::CsiParam;
                 Action::Nop
             }
-            b'?' | b'>' | b'=' => {
+            b'?' | b'>' | b'=' | b'<' => {
                 self.intermediate = byte;
                 Action::Nop
             }

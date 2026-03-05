@@ -394,6 +394,16 @@ impl Terminal {
                     _ => {}
                 }
             }
+            // Kitty keyboard protocol query - respond with flags=0 (no enhancement)
+            (b'?', b'u') => {
+                self.response_buf.extend_from_slice(b"\x1b[?0u");
+            }
+            // Kitty keyboard protocol push/pop - silently accept
+            (b'>', b'u') | (b'<', b'u') => {}
+            // XTVERSION query
+            (b'>', b'q') => {
+                self.response_buf.extend_from_slice(b"\x1bP>|handterm(0.1)\x1b\\");
+            }
             // Private mode set
             (b'?', b'h') => {
                 let params: Vec<u16> = self.parser.params().to_vec();
@@ -554,6 +564,20 @@ impl Terminal {
                     }
                 }
                 b"1" => {}
+                b"10" => {
+                    if payload == b"?" {
+                        self.response_buf.extend_from_slice(
+                            b"\x1b]10;rgb:cd/d6/f4\x1b\\",
+                        );
+                    }
+                }
+                b"11" => {
+                    if payload == b"?" {
+                        self.response_buf.extend_from_slice(
+                            b"\x1b]11;rgb:00/00/00\x1b\\",
+                        );
+                    }
+                }
                 b"52" => {
                     if let Some(semi2) = payload.iter().position(|&b| b == b';') {
                         let b64_data = &payload[semi2 + 1..];
@@ -707,5 +731,59 @@ mod tests {
         assert!(t.application_cursor_keys);
         t.process(b"\x1b[?1l");
         assert!(!t.application_cursor_keys);
+    }
+
+    #[test]
+    fn fish_startup_queries_no_leak() {
+        let mut t = Terminal::new(80, 24);
+
+        let fish_init: &[u8] = b"\x1b[?u\x1b[>0q\x1b]11;?\x1b\\\x1b[?1049h\
+            \x1bP+q696e646e\x1b\\\
+            \x1bP+q71756572792d6f732d6e616d65\x1b\\\
+            \x1b[?1049l\x1b[0c";
+
+        t.process(fish_init);
+
+        for row in 0..24 {
+            for col in 0..80 {
+                let ch = t.grid.cell_char(row, col);
+                assert!(
+                    ch == ' ' || ch == '\0',
+                    "unexpected char '{}' (U+{:04X}) at row={} col={}",
+                    ch,
+                    ch as u32,
+                    row,
+                    col,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn starship_prompt_renders_text() {
+        let mut t = Terminal::new(80, 24);
+
+        // Simplified starship-like prompt with truecolor SGR + powerline chars
+        let prompt: &[u8] = b"\x1b[J\n\x1b[38;2;243;139;168m\
+            \x1b[48;2;243;139;168;38;2;17;17;27m jeremy\
+            \x1b[48;2;250;179;135;38;2;243;139;168m\
+            \x1b[38;2;17;17;27m ~/code \
+            \x1b[0m\x1b[38;2;180;190;254m \x1b[1;38;2;166;227;161m\xe2\x9d\xaf\x1b[0m ";
+
+        t.process(prompt);
+
+        // "jeremy" should appear on row 1 (row 0 had the \n after ESC[J)
+        let mut row1_text = String::new();
+        for col in 0..80 {
+            let ch = t.grid.cell_char(1, col);
+            if ch != ' ' && ch != '\0' {
+                row1_text.push(ch);
+            }
+        }
+        assert!(
+            row1_text.contains("jeremy"),
+            "expected 'jeremy' in row 1, got: {:?}",
+            row1_text,
+        );
     }
 }

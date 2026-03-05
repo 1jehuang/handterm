@@ -274,6 +274,18 @@ impl ApplicationHandler for HandtermApp {
                         state.window.request_redraw();
                     } else {
                         state.selecting = false;
+                        let text = state.terminal.grid.get_selection_text();
+                        if !text.is_empty() {
+                            let mut child = std::process::Command::new("wl-copy")
+                                .stdin(std::process::Stdio::piped())
+                                .spawn()
+                                .ok();
+                            if let Some(ref mut c) = child {
+                                if let Some(ref mut stdin) = c.stdin {
+                                    let _ = std::io::Write::write_all(stdin, text.as_bytes());
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -689,7 +701,8 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
     let grid = &state.terminal.grid;
     let atlas = &mut state.atlas;
 
-    let full_redraw = grid.all_dirty;
+    let has_selection = grid.selection.is_some();
+    let full_redraw = grid.all_dirty || has_selection;
     if full_redraw {
         buffer.fill(base_bg);
     }

@@ -482,7 +482,22 @@ impl Terminal {
                 1 => self.grid.set_bold(true),
                 2 => self.grid.set_dim(true),
                 3 => self.grid.set_italic(true),
-                4 => self.grid.set_underline(true),
+                4 => {
+                    if i + 1 < params.len() && params[i] == 4 {
+                        match params[i + 1] {
+                            0 => self.grid.set_underline_style(crate::grid::UnderlineStyle::None),
+                            1 => self.grid.set_underline_style(crate::grid::UnderlineStyle::Single),
+                            2 => self.grid.set_underline_style(crate::grid::UnderlineStyle::Double),
+                            3 => self.grid.set_underline_style(crate::grid::UnderlineStyle::Curly),
+                            4 => self.grid.set_underline_style(crate::grid::UnderlineStyle::Dotted),
+                            5 => self.grid.set_underline_style(crate::grid::UnderlineStyle::Dashed),
+                            _ => self.grid.set_underline_style(crate::grid::UnderlineStyle::Single),
+                        }
+                        i += 1;
+                    } else {
+                        self.grid.set_underline_style(crate::grid::UnderlineStyle::Single);
+                    }
+                }
                 7 => self.grid.set_inverse(true),
                 9 => self.grid.set_strikethrough(true),
                 22 => {
@@ -490,7 +505,7 @@ impl Terminal {
                     self.grid.set_dim(false);
                 }
                 23 => self.grid.set_italic(false),
-                24 => self.grid.set_underline(false),
+                24 => self.grid.set_underline_style(crate::grid::UnderlineStyle::None),
                 27 => self.grid.set_inverse(false),
                 29 => self.grid.set_strikethrough(false),
                 30..=37 => self.grid.set_fg((params[i] - 30) as u32),
@@ -525,6 +540,21 @@ impl Terminal {
                     }
                 }
                 49 => self.grid.set_bg(0),
+                58 => {
+                    if i + 1 < params.len() {
+                        if params[i + 1] == 5 && i + 2 < params.len() {
+                            self.grid.set_underline_color(params[i + 2] as u32);
+                            i += 2;
+                        } else if params[i + 1] == 2 && i + 4 < params.len() {
+                            let r = params[i + 2] as u8;
+                            let g = params[i + 3] as u8;
+                            let b = params[i + 4] as u8;
+                            self.grid.set_underline_color_rgb(r, g, b);
+                            i += 4;
+                        }
+                    }
+                }
+                59 => self.grid.reset_underline_color(),
                 90..=97 => self.grid.set_fg((params[i] - 90 + 8) as u32),
                 100..=107 => self.grid.set_bg((params[i] - 100 + 8) as u32),
                 _ => {}

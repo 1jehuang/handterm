@@ -4,8 +4,22 @@ pub struct Cell {
     pub ch: u32,
     pub fg: u32,
     pub bg: u32,
+    pub underline_color: u32,
     pub attrs: u8,
     pub flags: u8,
+    pub underline_style: UnderlineStyle,
+    _pad: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum UnderlineStyle {
+    None = 0,
+    Single = 1,
+    Double = 2,
+    Curly = 3,
+    Dotted = 4,
+    Dashed = 5,
 }
 
 pub const COLOR_DEFAULT: u32 = 0;
@@ -17,6 +31,7 @@ pub const ATTR_ITALIC: u8 = 0x04;
 pub const ATTR_UNDERLINE: u8 = 0x08;
 pub const ATTR_INVERSE: u8 = 0x10;
 pub const ATTR_STRIKETHROUGH: u8 = 0x20;
+pub const ATTR_HAS_UCOLOR: u8 = 0x40;
 
 pub const FLAG_WIDE: u8 = 0x01;
 pub const FLAG_WIDE_CONT: u8 = 0x02;
@@ -68,8 +83,11 @@ impl Cell {
         ch: b' ' as u32,
         fg: COLOR_DEFAULT,
         bg: COLOR_DEFAULT,
+        underline_color: COLOR_DEFAULT,
         attrs: 0,
         flags: 0,
+        underline_style: UnderlineStyle::None,
+        _pad: 0,
     };
 
     #[allow(dead_code)]
@@ -88,6 +106,8 @@ pub struct Grid {
     current_fg: u32,
     current_bg: u32,
     current_attrs: u8,
+    current_underline_color: u32,
+    current_underline_style: UnderlineStyle,
     scroll_top: usize,
     scroll_bottom: usize,
     pub autowrap: bool,
@@ -127,6 +147,8 @@ impl Grid {
             current_fg: COLOR_DEFAULT,
             current_bg: COLOR_DEFAULT,
             current_attrs: 0,
+            current_underline_color: COLOR_DEFAULT,
+            current_underline_style: UnderlineStyle::None,
             scroll_top: 0,
             scroll_bottom: rows,
             autowrap: true,
@@ -408,6 +430,8 @@ impl Grid {
         let fg = self.current_fg;
         let bg = self.current_bg;
         let attrs = self.current_attrs;
+        let ucol = self.current_underline_color;
+        let ustyle = self.current_underline_style;
         let is_full_scroll = self.scroll_top == 0 && self.scroll_bottom == rows;
 
         while ri < run_len {
@@ -451,6 +475,8 @@ impl Grid {
                         cell.fg = fg;
                         cell.bg = bg;
                         cell.attrs = attrs;
+                        cell.underline_color = ucol;
+                        cell.underline_style = ustyle;
                         cell.flags = 0;
                     }
                     j += 4;
@@ -461,6 +487,8 @@ impl Grid {
                     cell.fg = fg;
                     cell.bg = bg;
                     cell.attrs = attrs;
+                    cell.underline_color = ucol;
+                    cell.underline_style = ustyle;
                     cell.flags = 0;
                     j += 1;
                 }
@@ -554,6 +582,8 @@ impl Grid {
         cell.fg = self.current_fg;
         cell.bg = self.current_bg;
         cell.attrs = self.current_attrs;
+        cell.underline_color = self.current_underline_color;
+        cell.underline_style = self.current_underline_style;
         cell.flags = if width == 2 { FLAG_WIDE } else { 0 };
         self.mark_dirty(idx);
 
@@ -566,6 +596,8 @@ impl Grid {
             cell2.fg = self.current_fg;
             cell2.bg = self.current_bg;
             cell2.attrs = self.current_attrs;
+            cell2.underline_color = self.current_underline_color;
+            cell2.underline_style = self.current_underline_style;
             cell2.flags = FLAG_WIDE_CONT;
             self.mark_dirty(idx2);
             self.cursor_col += 1;
@@ -844,6 +876,8 @@ impl Grid {
         self.current_fg = COLOR_DEFAULT;
         self.current_bg = COLOR_DEFAULT;
         self.current_attrs = 0;
+        self.current_underline_color = COLOR_DEFAULT;
+        self.current_underline_style = UnderlineStyle::None;
     }
 
     pub fn set_bold(&mut self, on: bool) {
@@ -909,6 +943,33 @@ impl Grid {
     pub fn set_bg_rgb(&mut self, r: u8, g: u8, b: u8) {
         self.current_bg = COLOR_FLAG_RGB | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
     }
+
+    pub fn set_underline_style(&mut self, style: UnderlineStyle) {
+        self.current_underline_style = style;
+        if style != UnderlineStyle::None {
+            self.current_attrs |= ATTR_UNDERLINE;
+        } else {
+            self.current_attrs &= !ATTR_UNDERLINE;
+        }
+    }
+
+    pub fn set_underline_color(&mut self, color: u32) {
+        self.current_underline_color = color;
+        if color != COLOR_DEFAULT {
+            self.current_attrs |= ATTR_HAS_UCOLOR;
+        } else {
+            self.current_attrs &= !ATTR_HAS_UCOLOR;
+        }
+    }
+
+    pub fn set_underline_color_rgb(&mut self, r: u8, g: u8, b: u8) {
+        self.set_underline_color(COLOR_FLAG_RGB | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32));
+    }
+
+    pub fn reset_underline_color(&mut self) {
+        self.current_underline_color = COLOR_DEFAULT;
+        self.current_attrs &= !ATTR_HAS_UCOLOR;
+    }
 }
 
 #[cfg(test)]
@@ -953,8 +1014,8 @@ mod tests {
     }
 
     #[test]
-    fn cell_is_16_bytes() {
-        assert_eq!(std::mem::size_of::<super::Cell>(), 16);
+    fn cell_is_20_bytes() {
+        assert_eq!(std::mem::size_of::<super::Cell>(), 20);
     }
 
     #[test]

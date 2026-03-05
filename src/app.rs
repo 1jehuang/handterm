@@ -853,10 +853,67 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
                 let px_y = row * cell_h;
 
                 if cell.attrs & ATTR_UNDERLINE != 0 {
-                    let y = (px_y + cell_h).saturating_sub(1);
-                    if y < buf_h {
-                        for x in px_x..(px_x + cell_w).min(buf_w) {
-                            buffer[y * buf_w + x] = actual_fg;
+                    let ul_color = if cell.attrs & ATTR_HAS_UCOLOR != 0 {
+                        color_to_rgb(cell.underline_color)
+                    } else {
+                        actual_fg
+                    };
+                    let y_base = (px_y + cell_h).saturating_sub(2);
+                    match cell.underline_style {
+                        UnderlineStyle::Single | UnderlineStyle::None => {
+                            if y_base < buf_h {
+                                for x in px_x..(px_x + cell_w).min(buf_w) {
+                                    buffer[y_base * buf_w + x] = ul_color;
+                                }
+                            }
+                        }
+                        UnderlineStyle::Double => {
+                            let y1 = y_base;
+                            let y2 = y_base.saturating_sub(2);
+                            for &y in &[y1, y2] {
+                                if y < buf_h {
+                                    for x in px_x..(px_x + cell_w).min(buf_w) {
+                                        buffer[y * buf_w + x] = ul_color;
+                                    }
+                                }
+                            }
+                        }
+                        UnderlineStyle::Curly => {
+                            let x_start = px_x;
+                            let x_end = (px_x + cell_w).min(buf_w);
+                            let amplitude = 2.0_f32;
+                            let period = cell_w as f32;
+                            for x in x_start..x_end {
+                                let phase = (x - px_x) as f32 / period * std::f32::consts::TAU;
+                                let dy = (phase.sin() * amplitude) as i32;
+                                let y = (y_base as i32 + dy).max(0) as usize;
+                                if y < buf_h {
+                                    buffer[y * buf_w + x] = ul_color;
+                                    if y + 1 < buf_h {
+                                        buffer[(y + 1) * buf_w + x] = ul_color;
+                                    }
+                                }
+                            }
+                        }
+                        UnderlineStyle::Dotted => {
+                            if y_base < buf_h {
+                                for x in px_x..(px_x + cell_w).min(buf_w) {
+                                    if (x - px_x) % 3 == 0 {
+                                        buffer[y_base * buf_w + x] = ul_color;
+                                    }
+                                }
+                            }
+                        }
+                        UnderlineStyle::Dashed => {
+                            if y_base < buf_h {
+                                let dash = cell_w / 3;
+                                for x in px_x..(px_x + cell_w).min(buf_w) {
+                                    let offset = x - px_x;
+                                    if offset < dash || (offset >= dash * 2 && offset < dash * 3) {
+                                        buffer[y_base * buf_w + x] = ul_color;
+                                    }
+                                }
+                            }
                         }
                     }
                 }

@@ -92,6 +92,8 @@ pub struct Grid {
     scroll_bottom: usize,
     pub autowrap: bool,
     pending_wrap: bool,
+    dirty: Vec<u64>,
+    pub all_dirty: bool,
     scrollback: Vec<Cell>,
     scrollback_len: usize,
     scrollback_head: usize,
@@ -113,12 +115,14 @@ impl Grid {
         let cols = cols as usize;
         let rows = rows as usize;
         let scrollback_max = 10000;
+        let total_cells = cols * rows;
+        let dirty_words = (total_cells + 63) / 64;
         Self {
             cols,
             rows,
             cursor_col: 0,
             cursor_row: 0,
-            cells: vec![Cell::BLANK; cols * rows],
+            cells: vec![Cell::BLANK; total_cells],
             top_row: 0,
             current_fg: COLOR_DEFAULT,
             current_bg: COLOR_DEFAULT,
@@ -127,6 +131,8 @@ impl Grid {
             scroll_bottom: rows,
             autowrap: true,
             pending_wrap: false,
+            dirty: vec![!0u64; dirty_words],
+            all_dirty: true,
             scrollback: Vec::new(),
             scrollback_len: 0,
             scrollback_head: 0,
@@ -169,10 +175,70 @@ impl Grid {
         self.cursor_col = self.cursor_col.min(new_cols.saturating_sub(1));
         self.cursor_row = self.cursor_row.min(new_rows.saturating_sub(1));
         self.pending_wrap = false;
+        let total_cells = new_cols * new_rows;
+        let dirty_words = (total_cells + 63) / 64;
+        self.dirty = vec![!0u64; dirty_words];
+        self.all_dirty = true;
     }
 
     pub fn cursor_pos(&self) -> (usize, usize) {
         (self.cursor_col, self.cursor_row)
+    }
+
+    #[inline(always)]
+    fn mark_dirty(&mut self, idx: usize) {
+        let word = idx / 64;
+        let bit = idx % 64;
+        unsafe { *self.dirty.get_unchecked_mut(word) |= 1u64 << bit; }
+    }
+
+    #[inline(always)]
+    fn mark_dirty_range(&mut self, start: usize, len: usize) {
+        if len == 0 { return; }
+        let end = start + len;
+        let first_word = start / 64;
+        let last_word = (end - 1) / 64;
+
+        if first_word == last_word {
+            let mask = ((!0u64) << (start % 64)) & ((!0u64) >> (63 - ((end - 1) % 64)));
+            unsafe { *self.dirty.get_unchecked_mut(first_word) |= mask; }
+        } else {
+            unsafe {
+                *self.dirty.get_unchecked_mut(first_word) |= !0u64 << (start % 64);
+                for w in first_word + 1..last_word {
+                    *self.dirty.get_unchecked_mut(w) = !0u64;
+                }
+                *self.dirty.get_unchecked_mut(last_word) |= !0u64 >> (63 - ((end - 1) % 64));
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn mark_all_dirty(&mut self) {
+        self.dirty.fill(!0u64);
+        self.all_dirty = true;
+    }
+
+    pub fn clear_dirty(&mut self) {
+        self.dirty.fill(0);
+        self.all_dirty = false;
+    }
+
+    #[inline]
+    pub fn is_cell_dirty(&self, row: usize, col: usize) -> bool {
+        if self.all_dirty {
+            return true;
+        }
+        let phys = self.physical_row(row);
+        let idx = phys * self.cols + col;
+        let word = idx / 64;
+        let bit = idx % 64;
+        (self.dirty[word] >> bit) & 1 != 0
+    }
+
+    #[allow(dead_code)]
+    pub fn has_any_dirty(&self) -> bool {
+        self.all_dirty || self.dirty.iter().any(|&w| w != 0)
     }
 
     #[inline(always)]
@@ -402,6 +468,7 @@ impl Grid {
 
             ri += chunk_len;
             self.cursor_col += chunk_len;
+            self.mark_dirty_range(dest_start, chunk_len);
 
             if self.cursor_col >= cols {
                 self.pending_wrap = true;
@@ -434,6 +501,7 @@ impl Grid {
 
         self.cells[blank_start..blank_start + cols].fill(Cell::BLANK);
         self.top_row = (old_top + 1) % self.rows;
+        self.all_dirty = true;
     }
 
     pub fn put_char(&mut self, ch: u32) {
@@ -487,6 +555,7 @@ impl Grid {
         cell.bg = self.current_bg;
         cell.attrs = self.current_attrs;
         cell.flags = if width == 2 { FLAG_WIDE } else { 0 };
+        self.mark_dirty(idx);
 
         self.cursor_col += 1;
 
@@ -498,6 +567,7 @@ impl Grid {
             cell2.bg = self.current_bg;
             cell2.attrs = self.current_attrs;
             cell2.flags = FLAG_WIDE_CONT;
+            self.mark_dirty(idx2);
             self.cursor_col += 1;
         }
 
@@ -598,6 +668,7 @@ impl Grid {
         let start = phys * self.cols;
         let end = start + self.cols;
         self.cells[start..end].fill(Cell::BLANK);
+        self.mark_dirty_range(start, self.cols);
     }
 
     pub fn erase_line_right(&mut self) {
@@ -607,7 +678,9 @@ impl Grid {
         let phys = self.physical_row(self.cursor_row);
         let start = phys * self.cols + self.cursor_col;
         let end = phys * self.cols + self.cols;
+        let len = end - start;
         self.cells[start..end].fill(Cell::BLANK);
+        self.mark_dirty_range(start, len);
     }
 
     pub fn erase_line_left(&mut self) {
@@ -617,7 +690,10 @@ impl Grid {
         let phys = self.physical_row(self.cursor_row);
         let start = phys * self.cols;
         let end = phys * self.cols + self.cursor_col + 1;
-        self.cells[start..end.min(start + self.cols)].fill(Cell::BLANK);
+        let actual_end = end.min(start + self.cols);
+        let len = actual_end - start;
+        self.cells[start..actual_end].fill(Cell::BLANK);
+        self.mark_dirty_range(start, len);
     }
 
     pub fn erase_line_all(&mut self) {
@@ -631,7 +707,9 @@ impl Grid {
         let phys = self.physical_row(self.cursor_row);
         let start = phys * self.cols + self.cursor_col;
         let end = (start + n).min(phys * self.cols + self.cols);
+        let len = end - start;
         self.cells[start..end].fill(Cell::BLANK);
+        self.mark_dirty_range(start, len);
     }
 
     pub fn insert_lines(&mut self, n: usize) {
@@ -661,6 +739,7 @@ impl Grid {
             self.cells.copy_within(src..src + move_count, dest);
         }
         self.cells[src..src + n].fill(Cell::BLANK);
+        self.mark_dirty_range(row_start + col, self.cols - col);
     }
 
     pub fn delete_chars(&mut self, n: usize) {
@@ -679,6 +758,7 @@ impl Grid {
         }
         let blank_start = row_start + self.cols - n;
         self.cells[blank_start..row_start + self.cols].fill(Cell::BLANK);
+        self.mark_dirty_range(row_start + col, self.cols - col);
     }
 
     pub fn set_scroll_region(&mut self, top: usize, bottom: usize) {
@@ -740,6 +820,7 @@ impl Grid {
             let start = last * self.cols;
             self.cells[start..start + self.cols].fill(Cell::BLANK);
         }
+        self.all_dirty = true;
     }
 
     fn scroll_down(&mut self) {
@@ -756,6 +837,7 @@ impl Grid {
         let first = self.physical_row(self.scroll_top);
         let start = first * self.cols;
         self.cells[start..start + self.cols].fill(Cell::BLANK);
+        self.all_dirty = true;
     }
 
     pub fn reset_attrs(&mut self) {

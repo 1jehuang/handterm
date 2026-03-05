@@ -677,7 +677,10 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
     let grid = &state.terminal.grid;
     let atlas = &mut state.atlas;
 
-    buffer.fill(base_bg);
+    let full_redraw = grid.all_dirty;
+    if full_redraw {
+        buffer.fill(base_bg);
+    }
 
     let (cursor_col, cursor_row) = grid.cursor_pos();
     let show_cursor = state.terminal.cursor_visible && grid.scroll_offset == 0;
@@ -685,8 +688,13 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
 
     for row in 0..grid.rows {
         for col in 0..grid.cols {
-            let cell = grid.cell_at_scroll(row, col);
             let is_cursor = show_cursor && row == cursor_row && col == cursor_col;
+
+            if !full_redraw && !is_cursor && !grid.is_cell_dirty(row, col) {
+                continue;
+            }
+
+            let cell = grid.cell_at_scroll(row, col);
 
             if cell.flags & crate::grid::FLAG_WIDE_CONT != 0 && !is_cursor {
                 continue;
@@ -822,5 +830,6 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
     buffer
         .present()
         .map_err(|e| anyhow::anyhow!("failed presenting frame: {e}"))?;
+    state.terminal.grid.clear_dirty();
     Ok(())
 }

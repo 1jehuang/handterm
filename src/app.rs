@@ -81,9 +81,21 @@ impl ApplicationHandler for HandtermApp {
         let cols = self.config.window.columns;
         let rows = self.config.window.rows;
 
-        let atlas = GlyphAtlas::with_family(&self.config.style.font_family, self.config.style.font_size)
-            .or_else(|_| GlyphAtlas::new(self.config.style.font_size))
-            .expect("failed to load font atlas");
+        let probe_window = event_loop
+            .create_window(Window::default_attributes().with_visible(false))
+            .expect("probe window should succeed");
+        let scale_factor = probe_window.scale_factor();
+        drop(probe_window);
+
+        let dpi = (96.0 * scale_factor) as u32;
+
+        let atlas = GlyphAtlas::with_family_dpi(
+            &self.config.style.font_family,
+            self.config.style.font_size,
+            dpi,
+        )
+        .or_else(|_| GlyphAtlas::new_with_dpi(self.config.style.font_size, dpi))
+        .expect("failed to load font atlas");
 
         let window = Arc::new(
             event_loop

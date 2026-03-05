@@ -8,6 +8,7 @@ pub struct GlyphAtlas {
     lib: Library,
     font_path: String,
     font_size_pt: f64,
+    dpi: u32,
     pub cell_width: usize,
     pub cell_height: usize,
     pub baseline: usize,
@@ -25,29 +26,41 @@ struct RasterizedGlyph {
 
 impl GlyphAtlas {
     pub fn new(font_size_pt: f64) -> Result<Self> {
+        Self::new_with_dpi(font_size_pt, 96)
+    }
+
+    pub fn new_with_dpi(font_size_pt: f64, dpi: u32) -> Result<Self> {
         let font_path = find_monospace_font(None)?;
-        Self::from_font_path(&font_path, font_size_pt)
+        Self::from_font_path_dpi(&font_path, font_size_pt, dpi)
     }
 
     pub fn with_family(family: &str, font_size_pt: f64) -> Result<Self> {
+        Self::with_family_dpi(family, font_size_pt, 96)
+    }
+
+    pub fn with_family_dpi(family: &str, font_size_pt: f64, dpi: u32) -> Result<Self> {
         if let Some(cached) = load_cached_font_path(family) {
             if std::path::Path::new(&cached).exists() {
-                return Self::from_font_path(&cached, font_size_pt);
+                return Self::from_font_path_dpi(&cached, font_size_pt, dpi);
             }
         }
         let font_path = find_monospace_font(Some(family))?;
         save_cached_font_path(family, &font_path);
-        Self::from_font_path(&font_path, font_size_pt)
+        Self::from_font_path_dpi(&font_path, font_size_pt, dpi)
     }
 
     pub fn from_font_path(path: &str, font_size_pt: f64) -> Result<Self> {
+        Self::from_font_path_dpi(path, font_size_pt, 96)
+    }
+
+    pub fn from_font_path_dpi(path: &str, font_size_pt: f64, dpi: u32) -> Result<Self> {
         let lib = Library::init().context("failed to init freetype")?;
 
         let face = lib
             .new_face(path, 0)
             .context("failed to load font face")?;
 
-        face.set_char_size((font_size_pt * 64.0) as isize, 0, 96, 0)
+        face.set_char_size((font_size_pt * 64.0) as isize, 0, dpi, 0)
             .context("failed to set char size")?;
 
         let metrics = face.size_metrics().context("no size metrics")?;
@@ -63,6 +76,7 @@ impl GlyphAtlas {
             lib,
             font_path: path.to_string(),
             font_size_pt,
+            dpi,
             cell_width: cell_width.max(1),
             cell_height: cell_height.max(1),
             baseline,
@@ -77,7 +91,7 @@ impl GlyphAtlas {
             return false;
         };
         if face
-            .set_char_size((self.font_size_pt * 64.0) as isize, 0, 96, 0)
+            .set_char_size((self.font_size_pt * 64.0) as isize, 0, self.dpi, 0)
             .is_err()
         {
             return false;

@@ -5,12 +5,12 @@ use crate::pty::PtyChild;
 use crate::terminal::Terminal;
 use anyhow::{Context, Result};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, Size};
 use winit::event::{ElementState, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
@@ -55,9 +55,18 @@ struct GpuGlyphEntry {
     bearing_y: i32,
 }
 
+#[derive(Debug, Clone)]
+enum GpuAppEvent {
+    PtyReadable,
+}
+
 pub fn run(config: AppConfig) -> Result<()> {
-    let event_loop = EventLoop::new().context("failed to create event loop")?;
-    event_loop.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(8)));
+    let event_loop = EventLoop::<GpuAppEvent>::with_user_event()
+        .build()
+        .context("failed to create event loop")?;
+    event_loop.set_control_flow(ControlFlow::Wait);
+
+    let proxy = event_loop.create_proxy();
 
     let socket_path = crate::ipc::default_socket_path();
     let ipc = IpcServer::bind(&socket_path).ok();
@@ -65,7 +74,7 @@ pub fn run(config: AppConfig) -> Result<()> {
         eprintln!("handterm: listening on {}", ipc.path().display());
     }
 
-    let mut app = GpuApp::new(config, ipc);
+    let mut app = GpuApp::new(config, ipc, proxy);
     event_loop
         .run_app(&mut app)
         .context("failed while running app")
@@ -75,6 +84,9 @@ struct GpuApp {
     config: AppConfig,
     state: Option<GpuState>,
     ipc: Option<IpcServer>,
+    proxy: EventLoopProxy<GpuAppEvent>,
+    watcher_started: bool,
+    watcher_stop: Option<Arc<AtomicBool>>,
 }
 
 struct GpuState {
@@ -105,12 +117,36 @@ struct GpuState {
 }
 
 impl GpuApp {
-    fn new(config: AppConfig, ipc: Option<IpcServer>) -> Self {
+    fn new(config: AppConfig, ipc: Option<IpcServer>, proxy: EventLoopProxy<GpuAppEvent>) -> Self {
         Self {
             config,
             state: None,
             ipc,
+            proxy,
+            watcher_started: false,
+            watcher_stop: None,
         }
+    }
+
+    fn start_pty_watcher(&mut self) {
+        if self.watcher_started {
+            return;
+        }
+        let Some(state) = &self.state else { return };
+
+        let pty_fd = state.pty.raw_fd();
+        let ipc_fd = self.ipc.as_ref().map(|s| s.listener_raw_fd()).unwrap_or(-1);
+        let proxy = self.proxy.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        self.watcher_stop = Some(stop.clone());
+        self.watcher_started = true;
+
+        std::thread::Builder::new()
+            .name("pty-watcher-gpu".into())
+            .spawn(move || {
+                gpu_pty_watcher_thread(pty_fd, ipc_fd, proxy, stop);
+            })
+            .expect("failed to spawn pty watcher thread");
     }
 
     fn create_window_attributes(&self, atlas: &GlyphAtlas) -> WindowAttributes {
@@ -243,7 +279,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
-impl ApplicationHandler for GpuApp {
+impl ApplicationHandler<GpuAppEvent> for GpuApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_some() {
             return;
@@ -509,6 +545,38 @@ impl ApplicationHandler for GpuApp {
 
         if let Some(s) = &self.state {
             s.window.request_redraw();
+        }
+
+        self.start_pty_watcher();
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: GpuAppEvent) {
+        match event {
+            GpuAppEvent::PtyReadable => {
+                if let Some(state) = &mut self.state {
+                    let n = drain_pty(state);
+                    if n > 0 {
+                        state.window.request_redraw();
+                    }
+                }
+                if let (Some(ipc), Some(state)) = (&mut self.ipc, &mut self.state) {
+                    let actions = ipc.poll(&mut |req| handle_ipc_request(req, state));
+                    for action in actions {
+                        match action {
+                            IpcAction::SendText(bytes) => {
+                                let _ = state.pty.write_all(&bytes);
+                            }
+                            IpcAction::SetTitle(title) => {
+                                state.window.set_title(&title);
+                            }
+                            IpcAction::Close => {
+                                _event_loop.exit();
+                            }
+                            IpcAction::None => {}
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -784,31 +852,12 @@ impl ApplicationHandler for GpuApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(state) = &mut self.state {
-            let n = drain_pty(state);
-            if n > 0 {
-                state.window.request_redraw();
-            }
+        if let Some(state) = &self.state {
             if state.pty_closed {
-                event_loop.exit();
-            }
-        }
-
-        if let (Some(ipc), Some(state)) = (&mut self.ipc, &mut self.state) {
-            let actions = ipc.poll(&mut |req| handle_ipc_request(req, state));
-            for action in actions {
-                match action {
-                    IpcAction::SendText(bytes) => {
-                        let _ = state.pty.write_all(&bytes);
-                    }
-                    IpcAction::SetTitle(title) => {
-                        state.window.set_title(&title);
-                    }
-                    IpcAction::Close => {
-                        event_loop.exit();
-                    }
-                    IpcAction::None => {}
+                if let Some(stop) = &self.watcher_stop {
+                    stop.store(true, Ordering::Relaxed);
                 }
+                event_loop.exit();
             }
         }
     }
@@ -1255,4 +1304,41 @@ fn base64_decode(input: &[u8]) -> Result<Vec<u8>, ()> {
         }
     }
     Ok(out)
+}
+
+fn gpu_pty_watcher_thread(
+    pty_fd: i32,
+    ipc_fd: i32,
+    proxy: EventLoopProxy<GpuAppEvent>,
+    stop: Arc<AtomicBool>,
+) {
+    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+    use std::os::fd::BorrowedFd;
+
+    let mut fds = Vec::with_capacity(2);
+    fds.push(PollFd::new(
+        unsafe { BorrowedFd::borrow_raw(pty_fd) },
+        PollFlags::POLLIN | PollFlags::POLLHUP,
+    ));
+    if ipc_fd >= 0 {
+        fds.push(PollFd::new(
+            unsafe { BorrowedFd::borrow_raw(ipc_fd) },
+            PollFlags::POLLIN,
+        ));
+    }
+
+    while !stop.load(Ordering::Relaxed) {
+        match poll(&mut fds, PollTimeout::from(100u16)) {
+            Ok(0) => continue,
+            Ok(_) => {
+                if fds[0].revents().map_or(false, |r| r.contains(PollFlags::POLLHUP)) {
+                    let _ = proxy.send_event(GpuAppEvent::PtyReadable);
+                    break;
+                }
+                let _ = proxy.send_event(GpuAppEvent::PtyReadable);
+            }
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(_) => break,
+        }
+    }
 }

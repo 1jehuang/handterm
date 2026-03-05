@@ -41,6 +41,14 @@ pub struct Terminal {
     charset_g0: Charset,
     charset_g1: Charset,
     active_charset: u8,
+    kitty_images: Vec<KittyImage>,
+    pub kitty_placements: Vec<KittyPlacement>,
+    kitty_payload_buf: Vec<u8>,
+    kitty_pending_id: u32,
+    kitty_pending_fmt: u32,
+    kitty_pending_width: u32,
+    kitty_pending_height: u32,
+    kitty_more_chunks: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +80,23 @@ pub enum MouseEncoding {
     Sgr,
 }
 
+#[derive(Debug, Clone)]
+pub struct KittyImage {
+    pub id: u32,
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct KittyPlacement {
+    pub image_id: u32,
+    pub col: usize,
+    pub row: usize,
+    pub cols: usize,
+    pub rows: usize,
+}
+
 impl Terminal {
     pub fn new(cols: u16, rows: u16) -> Self {
         Self {
@@ -95,6 +120,14 @@ impl Terminal {
             charset_g0: Charset::Ascii,
             charset_g1: Charset::Ascii,
             active_charset: 0,
+            kitty_images: Vec::new(),
+            kitty_placements: Vec::new(),
+            kitty_payload_buf: Vec::new(),
+            kitty_pending_id: 0,
+            kitty_pending_fmt: 0,
+            kitty_pending_width: 0,
+            kitty_pending_height: 0,
+            kitty_more_chunks: false,
         }
     }
 
@@ -281,6 +314,7 @@ impl Terminal {
                 final_byte,
             } => self.esc_dispatch(intermediate, final_byte),
             Action::OscDispatch(data) => self.osc_dispatch(&data),
+            Action::ApcDispatch(data) => self.apc_dispatch(&data),
             Action::Print(_) | Action::Nop => {}
         }
     }
@@ -644,6 +678,183 @@ impl Terminal {
         if let Some((col, row)) = self.saved_cursor {
             self.grid.set_cursor(row, col);
         }
+    }
+
+    fn apc_dispatch(&mut self, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        if data[0] == b'G' {
+            self.handle_kitty_graphics(&data[1..]);
+        }
+    }
+
+    fn handle_kitty_graphics(&mut self, data: &[u8]) {
+        let (control, payload) = if let Some(pos) = data.iter().position(|&b| b == b';') {
+            (&data[..pos], &data[pos + 1..])
+        } else {
+            (data, &[][..])
+        };
+
+        let mut action = 0u8;
+        let mut img_id = 0u32;
+        let mut fmt = 32u32;
+        let mut width = 0u32;
+        let mut height = 0u32;
+        let mut more = false;
+        let mut cols = 0u32;
+        let mut rows_param = 0u32;
+
+        for kv in control.split(|&b| b == b',') {
+            if kv.len() < 3 || kv[1] != b'=' {
+                continue;
+            }
+            let key = kv[0];
+            let val = &kv[2..];
+            let val_num = || -> u32 {
+                val.iter().fold(0u32, |acc, &b| {
+                    if b.is_ascii_digit() {
+                        acc.saturating_mul(10).saturating_add((b - b'0') as u32)
+                    } else {
+                        acc
+                    }
+                })
+            };
+            match key {
+                b'a' => action = val[0],
+                b'i' => img_id = val_num(),
+                b'f' => fmt = val_num(),
+                b's' => width = val_num(),
+                b'v' => height = val_num(),
+                b'm' => more = val_num() == 1,
+                b'c' => cols = val_num(),
+                b'r' => rows_param = val_num(),
+                _ => {}
+            }
+        }
+
+        match action {
+            b't' | b'T' | 0 => {
+                if self.kitty_more_chunks || more {
+                    self.kitty_payload_buf.extend_from_slice(payload);
+                    if img_id > 0 { self.kitty_pending_id = img_id; }
+                    if fmt > 0 { self.kitty_pending_fmt = fmt; }
+                    if width > 0 { self.kitty_pending_width = width; }
+                    if height > 0 { self.kitty_pending_height = height; }
+                    self.kitty_more_chunks = more;
+                    if !more {
+                        let full_payload = std::mem::take(&mut self.kitty_payload_buf);
+                        let final_id = self.kitty_pending_id;
+                        let final_fmt = self.kitty_pending_fmt;
+                        let final_w = self.kitty_pending_width;
+                        let final_h = self.kitty_pending_height;
+                        self.kitty_pending_id = 0;
+                        self.kitty_pending_fmt = 0;
+                        self.kitty_pending_width = 0;
+                        self.kitty_pending_height = 0;
+                        self.finalize_kitty_image(final_id, final_fmt, final_w, final_h, &full_payload, action, cols, rows_param);
+                    }
+                    return;
+                }
+                self.finalize_kitty_image(img_id, fmt, width, height, payload, action, cols, rows_param);
+            }
+            b'p' => {
+                if let Some(_img) = self.kitty_images.iter().find(|i| i.id == img_id) {
+                    let (col, row) = self.grid.cursor_pos();
+                    self.kitty_placements.push(KittyPlacement {
+                        image_id: img_id,
+                        col,
+                        row,
+                        cols: if cols > 0 { cols as usize } else { 1 },
+                        rows: if rows_param > 0 { rows_param as usize } else { 1 },
+                    });
+                }
+            }
+            b'd' => {
+                self.kitty_images.retain(|i| i.id != img_id);
+                self.kitty_placements.retain(|p| p.image_id != img_id);
+            }
+            _ => {}
+        }
+
+        if img_id > 0 {
+            let resp = format!("\x1b_Gi={};OK\x1b\\", img_id);
+            self.response_buf.extend_from_slice(resp.as_bytes());
+        }
+    }
+
+    fn finalize_kitty_image(&mut self, id: u32, fmt: u32, width: u32, height: u32, payload: &[u8], action: u8, cols: u32, rows_param: u32) {
+        let decoded = if let Ok(d) = self.base64_decode_kitty(payload) { d } else { return };
+
+        let actual_id = if id > 0 { id } else {
+            (self.kitty_images.len() as u32) + 1
+        };
+
+        let image = KittyImage {
+            id: actual_id,
+            width,
+            height,
+            data: decoded,
+        };
+
+        self.kitty_images.retain(|i| i.id != actual_id);
+        self.kitty_images.push(image);
+
+        if action == b'T' || action == 0 {
+            let (col, row) = self.grid.cursor_pos();
+            self.kitty_placements.push(KittyPlacement {
+                image_id: actual_id,
+                col,
+                row,
+                cols: if cols > 0 { cols as usize } else { (width / self.grid.cols.max(1) as u32).max(1) as usize },
+                rows: if rows_param > 0 { rows_param as usize } else { (height / self.grid.rows.max(1) as u32).max(1) as usize },
+            });
+        }
+
+        if actual_id > 0 {
+            let resp = format!("\x1b_Gi={};OK\x1b\\", actual_id);
+            self.response_buf.extend_from_slice(resp.as_bytes());
+        }
+    }
+
+    fn base64_decode_kitty(&self, input: &[u8]) -> Result<Vec<u8>, ()> {
+        const TABLE: [u8; 256] = {
+            let mut t = [0xffu8; 256];
+            let mut i = 0u8;
+            while i < 26 {
+                t[(b'A' + i) as usize] = i;
+                t[(b'a' + i) as usize] = i + 26;
+                i += 1;
+            }
+            let mut d = 0u8;
+            while d < 10 {
+                t[(b'0' + d) as usize] = d + 52;
+                d += 1;
+            }
+            t[b'+' as usize] = 62;
+            t[b'/' as usize] = 63;
+            t
+        };
+        let mut out = Vec::with_capacity(input.len() * 3 / 4);
+        let mut buf = 0u32;
+        let mut bits = 0u32;
+        for &b in input {
+            if b == b'=' || b == b'\n' || b == b'\r' { continue; }
+            let val = TABLE[b as usize];
+            if val == 0xff { return Err(()); }
+            buf = (buf << 6) | val as u32;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push((buf >> bits) as u8);
+                buf &= (1 << bits) - 1;
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn kitty_image(&self, id: u32) -> Option<&KittyImage> {
+        self.kitty_images.iter().find(|i| i.id == id)
     }
 
     fn enter_alt_screen(&mut self) {

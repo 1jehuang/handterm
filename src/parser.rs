@@ -9,6 +9,7 @@ pub enum State {
     CsiIntermediate,
     OscString,
     DcsEntry,
+    ApcString,
 }
 
 pub const MAX_PARAMS: usize = 16;
@@ -36,6 +37,7 @@ pub enum Action {
         final_byte: u8,
     },
     OscDispatch(Vec<u8>),
+    ApcDispatch(Vec<u8>),
     Nop,
 }
 
@@ -94,6 +96,7 @@ impl Parser {
             State::CsiIntermediate => self.csi_intermediate(byte),
             State::OscString => self.osc_string(byte),
             State::DcsEntry => self.dcs_entry(byte),
+            State::ApcString => self.apc_string(byte),
         }
     }
 
@@ -110,6 +113,11 @@ impl Parser {
             }
             b'P' => {
                 self.state = State::DcsEntry;
+                Action::Nop
+            }
+            b'_' => {
+                self.osc_buf.clear();
+                self.state = State::ApcString;
                 Action::Nop
             }
             0x20..=0x2f => {
@@ -275,6 +283,27 @@ impl Parser {
                 Action::Nop
             }
             _ => Action::Nop,
+        }
+    }
+
+    fn apc_string(&mut self, byte: u8) -> Action {
+        match byte {
+            0x1b => {
+                self.state = State::Escape;
+                let data = std::mem::take(&mut self.osc_buf);
+                Action::ApcDispatch(data)
+            }
+            0x07 => {
+                self.state = State::Ground;
+                let data = std::mem::take(&mut self.osc_buf);
+                Action::ApcDispatch(data)
+            }
+            _ => {
+                if self.osc_buf.len() < 1024 * 1024 {
+                    self.osc_buf.push(byte);
+                }
+                Action::Nop
+            }
         }
     }
 

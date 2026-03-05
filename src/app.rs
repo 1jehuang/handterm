@@ -267,6 +267,18 @@ impl ApplicationHandler for HandtermApp {
 
                 if btn == 0 {
                     if pressed {
+                        let ctrl = state.modifiers.state().control_key();
+                        if ctrl {
+                            let cell = state.terminal.grid.cell_at(state.mouse_row, state.mouse_col);
+                            if cell.hyperlink_id != 0 {
+                                if let Some(url) = state.terminal.grid.hyperlink_url(cell.hyperlink_id) {
+                                    let _ = std::process::Command::new("xdg-open")
+                                        .arg(url)
+                                        .spawn();
+                                    return;
+                                }
+                            }
+                        }
                         state.terminal.grid.selection = Some(crate::grid::Selection {
                             start_col: state.mouse_col,
                             start_row: state.mouse_row,

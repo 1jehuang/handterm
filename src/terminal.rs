@@ -617,6 +617,20 @@ impl Terminal {
                         }
                     }
                 }
+                b"8" => {
+                    if let Some(semi2) = payload.iter().position(|&b| b == b';') {
+                        let url = &payload[semi2 + 1..];
+                        if let Ok(url_str) = std::str::from_utf8(url) {
+                            if url_str.is_empty() {
+                                self.grid.clear_hyperlink();
+                            } else {
+                                self.grid.set_hyperlink(url_str);
+                            }
+                        }
+                    } else if payload.is_empty() {
+                        self.grid.clear_hyperlink();
+                    }
+                }
                 _ => {}
             }
         }

@@ -5,10 +5,11 @@ pub struct Cell {
     pub fg: u32,
     pub bg: u32,
     pub underline_color: u32,
+    pub hyperlink_id: u16,
     pub attrs: u8,
     pub flags: u8,
     pub underline_style: UnderlineStyle,
-    _pad: u8,
+    _pad: [u8; 3],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,10 +85,11 @@ impl Cell {
         fg: COLOR_DEFAULT,
         bg: COLOR_DEFAULT,
         underline_color: COLOR_DEFAULT,
+        hyperlink_id: 0,
         attrs: 0,
         flags: 0,
         underline_style: UnderlineStyle::None,
-        _pad: 0,
+        _pad: [0; 3],
     };
 
     #[allow(dead_code)]
@@ -108,6 +110,8 @@ pub struct Grid {
     current_attrs: u8,
     current_underline_color: u32,
     current_underline_style: UnderlineStyle,
+    current_hyperlink_id: u16,
+    pub hyperlinks: Vec<String>,
     scroll_top: usize,
     scroll_bottom: usize,
     pub autowrap: bool,
@@ -149,6 +153,8 @@ impl Grid {
             current_attrs: 0,
             current_underline_color: COLOR_DEFAULT,
             current_underline_style: UnderlineStyle::None,
+            current_hyperlink_id: 0,
+            hyperlinks: vec![String::new()],
             scroll_top: 0,
             scroll_bottom: rows,
             autowrap: true,
@@ -432,6 +438,7 @@ impl Grid {
         let attrs = self.current_attrs;
         let ucol = self.current_underline_color;
         let ustyle = self.current_underline_style;
+        let hlink = self.current_hyperlink_id;
         let is_full_scroll = self.scroll_top == 0 && self.scroll_bottom == rows;
 
         while ri < run_len {
@@ -477,6 +484,7 @@ impl Grid {
                         cell.attrs = attrs;
                         cell.underline_color = ucol;
                         cell.underline_style = ustyle;
+                        cell.hyperlink_id = hlink;
                         cell.flags = 0;
                     }
                     j += 4;
@@ -489,6 +497,7 @@ impl Grid {
                     cell.attrs = attrs;
                     cell.underline_color = ucol;
                     cell.underline_style = ustyle;
+                    cell.hyperlink_id = hlink;
                     cell.flags = 0;
                     j += 1;
                 }
@@ -584,6 +593,7 @@ impl Grid {
         cell.attrs = self.current_attrs;
         cell.underline_color = self.current_underline_color;
         cell.underline_style = self.current_underline_style;
+        cell.hyperlink_id = self.current_hyperlink_id;
         cell.flags = if width == 2 { FLAG_WIDE } else { 0 };
         self.mark_dirty(idx);
 
@@ -598,6 +608,7 @@ impl Grid {
             cell2.attrs = self.current_attrs;
             cell2.underline_color = self.current_underline_color;
             cell2.underline_style = self.current_underline_style;
+            cell2.hyperlink_id = self.current_hyperlink_id;
             cell2.flags = FLAG_WIDE_CONT;
             self.mark_dirty(idx2);
             self.cursor_col += 1;
@@ -970,6 +981,33 @@ impl Grid {
         self.current_underline_color = COLOR_DEFAULT;
         self.current_attrs &= !ATTR_HAS_UCOLOR;
     }
+
+    pub fn set_hyperlink(&mut self, url: &str) {
+        if url.is_empty() {
+            self.current_hyperlink_id = 0;
+            return;
+        }
+        if let Some(pos) = self.hyperlinks.iter().position(|u| u == url) {
+            self.current_hyperlink_id = pos as u16;
+        } else {
+            if self.hyperlinks.len() < u16::MAX as usize {
+                self.current_hyperlink_id = self.hyperlinks.len() as u16;
+                self.hyperlinks.push(url.to_string());
+            }
+        }
+    }
+
+    pub fn clear_hyperlink(&mut self) {
+        self.current_hyperlink_id = 0;
+    }
+
+    pub fn hyperlink_url(&self, id: u16) -> Option<&str> {
+        if id == 0 {
+            None
+        } else {
+            self.hyperlinks.get(id as usize).map(|s| s.as_str())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1014,8 +1052,8 @@ mod tests {
     }
 
     #[test]
-    fn cell_is_20_bytes() {
-        assert_eq!(std::mem::size_of::<super::Cell>(), 20);
+    fn cell_is_24_bytes() {
+        assert_eq!(std::mem::size_of::<super::Cell>(), 24);
     }
 
     #[test]

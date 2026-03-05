@@ -227,6 +227,7 @@ impl Terminal {
                                 } else {
                                     self.grid.write_bytes(&data[run_start..i]);
                                 }
+                                i += 1;
                                 self.handle_action(next_action);
                                 break;
                             }
@@ -621,7 +622,7 @@ impl Terminal {
 
 #[cfg(test)]
 mod tests {
-    use super::Terminal;
+    use super::*;
 
     #[test]
     fn processes_plain_text() {
@@ -785,5 +786,405 @@ mod tests {
             "expected 'jeremy' in row 1, got: {:?}",
             row1_text,
         );
+    }
+
+    #[test]
+    fn starship_exact_bytes_no_raw_escapes() {
+        let mut t = Terminal::new(80, 24);
+
+        // Exact starship output from hex dump (fish startup)
+        let prompt: &[u8] = &[
+            0x1b, 0x5b, 0x4a, // ESC[J
+            0x0a,             // newline
+            0x1b, 0x5b, 0x33, 0x38, 0x3b, 0x32, 0x3b, 0x32, 0x34, 0x33, 0x3b,
+            0x31, 0x33, 0x39, 0x3b, 0x31, 0x36, 0x38, 0x6d, // ESC[38;2;243;139;168m
+            0xee, 0x82, 0xb6, // U+E0B6 (powerline)
+            0x1b, 0x5b, 0x34, 0x38, 0x3b, 0x32, 0x3b, 0x32, 0x34, 0x33, 0x3b,
+            0x31, 0x33, 0x39, 0x3b, 0x31, 0x36, 0x38, 0x3b, 0x33, 0x38, 0x3b,
+            0x32, 0x3b, 0x31, 0x37, 0x3b, 0x31, 0x37, 0x3b, 0x32, 0x37,
+            0x6d, // ESC[48;2;243;139;168;38;2;17;17;27m
+            0xf3, 0xb0, 0xa3, 0x87, // U+F0E07 (nerd font icon)
+            0x20, // space
+            0x6a, 0x65, 0x72, 0x65, 0x6d, 0x79, // "jeremy"
+            0x1b, 0x5b, 0x30, 0x6d, // ESC[0m
+        ];
+
+        t.process(prompt);
+
+        let mut text = String::new();
+        for col in 0..80 {
+            let ch = t.grid.cell_char(1, col);
+            if ch != ' ' && ch != '\0' {
+                text.push(ch);
+            }
+        }
+
+        assert!(text.contains("jeremy"), "row 1 should contain 'jeremy', got: {:?}", text);
+        assert!(!text.contains("38;"), "raw SGR params leaked: {:?}", text);
+        assert!(!text.contains("48;"), "raw SGR params leaked: {:?}", text);
+        assert!(!text.contains("["), "raw CSI bracket leaked: {:?}", text);
+    }
+
+    #[test]
+    fn combined_sgr_fg_bg_truecolor() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[48;2;243;139;168;38;2;17;17;27mX");
+        let cell = t.grid.cell_at(0, 0);
+        assert_eq!(cell.ch, b'X' as u32);
+        assert_ne!(cell.fg, crate::grid::COLOR_DEFAULT, "fg should be set");
+        assert_ne!(cell.bg, crate::grid::COLOR_DEFAULT, "bg should be set");
+    }
+
+    #[test]
+    fn csi_less_than_intermediate_parsed() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[<u");
+        for col in 0..80 {
+            let ch = t.grid.cell_char(0, col);
+            assert!(ch == ' ' || ch == '\0', "CSI < u leaked char '{}' at col {}", ch, col);
+        }
+    }
+
+    #[test]
+    fn csi_question_u_responds() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[?u");
+        let resp = t.drain_responses().unwrap();
+        assert_eq!(resp, b"\x1b[?0u");
+    }
+
+    #[test]
+    fn xtversion_responds() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[>0q");
+        let resp = t.drain_responses().unwrap();
+        assert!(resp.starts_with(b"\x1bP>|handterm"), "XTVERSION: {:?}", String::from_utf8_lossy(&resp));
+    }
+
+    #[test]
+    fn osc_10_fg_query_responds() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b]10;?\x07");
+        let resp = t.drain_responses().unwrap();
+        assert!(resp.starts_with(b"\x1b]10;rgb:"), "OSC 10: {:?}", String::from_utf8_lossy(&resp));
+    }
+
+    #[test]
+    fn osc_11_bg_query_responds() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b]11;?\x07");
+        let resp = t.drain_responses().unwrap();
+        assert!(resp.starts_with(b"\x1b]11;rgb:"), "OSC 11: {:?}", String::from_utf8_lossy(&resp));
+    }
+
+    #[test]
+    fn dcs_string_silently_consumed() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1bP+q696e646e\x1b\\");
+        for col in 0..80 {
+            let ch = t.grid.cell_char(0, col);
+            assert!(ch == ' ' || ch == '\0', "DCS leaked char '{}' at col {}", ch, col);
+        }
+    }
+
+    #[test]
+    fn osc_st_terminator() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b]0;My Title\x1b\\visible");
+        assert_eq!(t.take_title().unwrap(), "My Title");
+        assert_eq!(t.grid.cell_char(0, 0), 'v');
+        assert_eq!(t.grid.cell_char(0, 6), 'e');
+    }
+
+    #[test]
+    fn sgr_256_color() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[38;5;196mR\x1b[48;5;21mB");
+        let r_cell = t.grid.cell_at(0, 0);
+        assert_eq!(r_cell.ch, b'R' as u32);
+        assert_eq!(r_cell.fg, 196);
+        let b_cell = t.grid.cell_at(0, 1);
+        assert_eq!(b_cell.ch, b'B' as u32);
+        assert_eq!(b_cell.bg, 21);
+    }
+
+    #[test]
+    fn sgr_bright_colors() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[91mA\x1b[102mB");
+        let a = t.grid.cell_at(0, 0);
+        assert_eq!(a.fg, 9);
+        let b = t.grid.cell_at(0, 1);
+        assert_eq!(b.bg, 10);
+    }
+
+    #[test]
+    fn scroll_region_and_index() {
+        let mut t = Terminal::new(10, 5);
+        t.process(b"\x1b[2;4r");
+        t.process(b"\x1b[2;1HAAA\x1b[3;1HBBB\x1b[4;1HCCC");
+        t.process(b"\x1b[4;1H\n"); // LF at bottom of scroll region -> scroll within region
+        // After scroll within region 2-4: row 1 had AAA, row 2 had BBB, row 3 had CCC
+        // Scroll moves: BBB->row1 pos, CCC->row2 pos, blank->row3 pos (within region)
+        let c = t.grid.cell_char(1, 0);
+        assert!(c == 'B', "after scroll region LF: row 1 = '{}' (expected B)", c);
+    }
+
+    #[test]
+    fn insert_delete_lines() {
+        let mut t = Terminal::new(10, 5);
+        t.process(b"\x1b[1;1HAAAA\x1b[2;1HBBBB\x1b[3;1HCCCC");
+        t.process(b"\x1b[2;1H");
+        t.process(b"\x1b[1L");
+        // insert_lines scrolls down within scroll region
+        // row 0 should shift to row 1, blank at row 0
+        assert_eq!(t.grid.cell_char(0, 0), ' ');
+        assert_eq!(t.grid.cell_char(1, 0), 'A');
+    }
+
+    #[test]
+    fn insert_delete_chars() {
+        let mut t = Terminal::new(10, 5);
+        t.process(b"ABCDE");
+        t.process(b"\x1b[1;2H");
+        t.process(b"\x1b[1P");
+        assert_eq!(t.grid.cell_char(0, 0), 'A');
+        assert_eq!(t.grid.cell_char(0, 1), 'C');
+        assert_eq!(t.grid.cell_char(0, 2), 'D');
+    }
+
+    #[test]
+    fn erase_chars() {
+        let mut t = Terminal::new(10, 5);
+        t.process(b"ABCDE");
+        t.process(b"\x1b[1;2H");
+        t.process(b"\x1b[2X");
+        assert_eq!(t.grid.cell_char(0, 0), 'A');
+        assert_eq!(t.grid.cell_char(0, 1), ' ');
+        assert_eq!(t.grid.cell_char(0, 2), ' ');
+        assert_eq!(t.grid.cell_char(0, 3), 'D');
+    }
+
+    #[test]
+    fn cursor_horizontal_absolute() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"ABCDE\x1b[3GX");
+        assert_eq!(t.grid.cell_char(0, 2), 'X');
+    }
+
+    #[test]
+    fn vertical_position_absolute() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[5dX");
+        assert_eq!(t.grid.cell_char(4, 0), 'X');
+    }
+
+    #[test]
+    fn cursor_next_prev_line() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[3;5H");
+        t.process(b"\x1b[2EX");
+        assert_eq!(t.grid.cell_char(4, 0), 'X');
+
+        let mut t2 = Terminal::new(80, 24);
+        t2.process(b"\x1b[5;5H");
+        t2.process(b"\x1b[2FX");
+        assert_eq!(t2.grid.cell_char(2, 0), 'X');
+    }
+
+    #[test]
+    fn tab_stops() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\tX");
+        assert_eq!(t.grid.cell_char(0, 8), 'X');
+    }
+
+    #[test]
+    fn reverse_index() {
+        let mut t = Terminal::new(10, 5);
+        t.process(b"LINE1\nLINE2");
+        t.process(b"\x1b[1;1H");
+        t.process(b"\x1bM");
+        assert_eq!(t.grid.cell_char(0, 0), ' ');
+        assert_eq!(t.grid.cell_char(1, 0), 'L');
+    }
+
+    #[test]
+    fn line_drawing_charset() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b(0");
+        t.process(b"q");
+        let ch = t.grid.cell_char(0, 0);
+        assert_eq!(ch, '\u{2500}', "expected box-drawing horizontal, got '{}'", ch);
+        t.process(b"\x1b(B");
+        t.process(b"q");
+        assert_eq!(t.grid.cell_char(0, 1), 'q');
+    }
+
+    #[test]
+    fn utf8_multibyte() {
+        let mut t = Terminal::new(80, 24);
+        t.process("héllo".as_bytes());
+        assert_eq!(t.grid.cell_char(0, 0), 'h');
+        assert_eq!(t.grid.cell_char(0, 1), 'é');
+        assert_eq!(t.grid.cell_char(0, 2), 'l');
+    }
+
+    #[test]
+    fn attrs_bold_dim_inverse() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[1mB\x1b[2mD\x1b[7mI\x1b[0mN");
+        let b = t.grid.cell_at(0, 0);
+        assert!(b.attrs & crate::grid::ATTR_BOLD != 0);
+        let d = t.grid.cell_at(0, 1);
+        assert!(d.attrs & crate::grid::ATTR_DIM != 0);
+        let i = t.grid.cell_at(0, 2);
+        assert!(i.attrs & crate::grid::ATTR_INVERSE != 0);
+        let n = t.grid.cell_at(0, 3);
+        assert_eq!(n.attrs, 0);
+    }
+
+    #[test]
+    fn bracketed_paste_mode() {
+        let mut t = Terminal::new(80, 24);
+        assert!(!t.bracketed_paste_mode());
+        t.process(b"\x1b[?2004h");
+        assert!(t.bracketed_paste_mode());
+        t.process(b"\x1b[?2004l");
+        assert!(!t.bracketed_paste_mode());
+    }
+
+    #[test]
+    fn focus_events_mode() {
+        let mut t = Terminal::new(80, 24);
+        assert!(!t.focus_events_mode());
+        t.process(b"\x1b[?1004h");
+        assert!(t.focus_events_mode());
+        t.process(b"\x1b[?1004l");
+        assert!(!t.focus_events_mode());
+    }
+
+    #[test]
+    fn mouse_modes() {
+        let mut t = Terminal::new(80, 24);
+        assert_eq!(t.mouse_mode, MouseMode::Off);
+        t.process(b"\x1b[?1000h");
+        assert_eq!(t.mouse_mode, MouseMode::Normal);
+        t.process(b"\x1b[?1002h");
+        assert_eq!(t.mouse_mode, MouseMode::ButtonEvent);
+        t.process(b"\x1b[?1003h");
+        assert_eq!(t.mouse_mode, MouseMode::AnyEvent);
+        t.process(b"\x1b[?1003l");
+        assert_eq!(t.mouse_mode, MouseMode::Off);
+    }
+
+    #[test]
+    fn mouse_sgr_encoding() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[?1000h\x1b[?1006h");
+        assert_eq!(t.mouse_encoding, MouseEncoding::Sgr);
+        let resp = t.encode_mouse(0, 5, 10, true).unwrap();
+        assert_eq!(resp, b"\x1b[<0;6;11M");
+        let resp = t.encode_mouse(0, 5, 10, false).unwrap();
+        assert_eq!(resp, b"\x1b[<0;6;11m");
+    }
+
+    #[test]
+    fn cursor_style_decscusr() {
+        let mut t = Terminal::new(80, 24);
+        assert_eq!(t.cursor_style, CursorStyle::Block);
+        t.process(b"\x1b[5 q");
+        assert_eq!(t.cursor_style, CursorStyle::Bar);
+        t.process(b"\x1b[3 q");
+        assert_eq!(t.cursor_style, CursorStyle::Underline);
+        t.process(b"\x1b[1 q");
+        assert_eq!(t.cursor_style, CursorStyle::Block);
+    }
+
+    #[test]
+    fn dsr_status_report() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[5n");
+        let resp = t.drain_responses().unwrap();
+        assert_eq!(resp, b"\x1b[0n");
+    }
+
+    #[test]
+    fn window_size_report() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[18t");
+        let resp = t.drain_responses().unwrap();
+        assert_eq!(resp, b"\x1b[8;24;80t");
+    }
+
+    #[test]
+    fn full_reset() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[1mhello\x1b[?25l");
+        assert!(!t.cursor_visible);
+        t.process(b"\x1bc");
+        assert!(t.cursor_visible);
+        assert_eq!(t.grid.cell_char(0, 0), ' ');
+    }
+
+    #[test]
+    fn erase_line_variants() {
+        let mut t = Terminal::new(10, 1);
+        t.process(b"ABCDEFGHIJ");
+        t.process(b"\x1b[1;5H");
+        t.process(b"\x1b[0K");
+        assert_eq!(t.grid.cell_char(0, 3), 'D');
+        assert_eq!(t.grid.cell_char(0, 4), ' ');
+        assert_eq!(t.grid.cell_char(0, 9), ' ');
+
+        let mut t2 = Terminal::new(10, 1);
+        t2.process(b"ABCDEFGHIJ");
+        t2.process(b"\x1b[1;5H");
+        t2.process(b"\x1b[1K");
+        assert_eq!(t2.grid.cell_char(0, 0), ' ');
+        assert_eq!(t2.grid.cell_char(0, 4), ' ');
+        assert_eq!(t2.grid.cell_char(0, 5), 'F');
+
+        let mut t3 = Terminal::new(10, 1);
+        t3.process(b"ABCDEFGHIJ");
+        t3.process(b"\x1b[1;5H");
+        t3.process(b"\x1b[2K");
+        for col in 0..10 {
+            assert_eq!(t3.grid.cell_char(0, col), ' ');
+        }
+    }
+
+    #[test]
+    fn scroll_up_down() {
+        let mut t = Terminal::new(10, 3);
+        t.process(b"\x1b[1;1HAAA\x1b[2;1HBBB\x1b[3;1HCCC");
+        t.process(b"\x1b[1S");
+        assert_eq!(t.grid.cell_char(0, 0), 'B');
+        assert_eq!(t.grid.cell_char(1, 0), 'C');
+        assert_eq!(t.grid.cell_char(2, 0), ' ');
+
+        let mut t2 = Terminal::new(10, 3);
+        t2.process(b"\x1b[1;1HAAA\x1b[2;1HBBB\x1b[3;1HCCC");
+        t2.process(b"\x1b[1T");
+        assert_eq!(t2.grid.cell_char(0, 0), ' ');
+        assert_eq!(t2.grid.cell_char(1, 0), 'A');
+        assert_eq!(t2.grid.cell_char(2, 0), 'B');
+    }
+
+    #[test]
+    fn autowrap_mode() {
+        let mut t = Terminal::new(5, 2);
+        t.process(b"\x1b[?7h");
+        assert!(t.grid.autowrap);
+        t.process(b"ABCDEFG");
+        assert_eq!(t.grid.cell_char(0, 4), 'E');
+        assert_eq!(t.grid.cell_char(1, 0), 'F');
+
+        let mut t2 = Terminal::new(5, 2);
+        t2.process(b"\x1b[?7l");
+        assert!(!t2.grid.autowrap);
+        t2.process(b"ABCDEFG");
+        assert_eq!(t2.grid.cell_char(0, 4), 'G');
+        assert_eq!(t2.grid.cell_char(1, 0), ' ');
     }
 }

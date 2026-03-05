@@ -64,6 +64,34 @@ impl From<HexColor> for String {
     }
 }
 
+const PALETTE: [u32; 16] = [
+    0x000000, 0xcc0000, 0x4e9a06, 0xc4a000, 0x3465a4, 0x75507b, 0x06989a, 0xd3d7cf,
+    0x555753, 0xef2929, 0x8ae234, 0xfce94f, 0x729fcf, 0xad7fa8, 0x34e2e2, 0xeeeeec,
+];
+
+pub fn to_rgb(c: u32) -> u32 {
+    use crate::grid::COLOR_FLAG_RGB;
+    if c & COLOR_FLAG_RGB != 0 {
+        c & 0x00FF_FFFF
+    } else {
+        let idx = c as u8;
+        if (idx as usize) < PALETTE.len() {
+            PALETTE[idx as usize]
+        } else if (16..232).contains(&idx) {
+            let v = idx - 16;
+            let r = (v / 36) * 51;
+            let g = ((v % 36) / 6) * 51;
+            let b = (v % 6) * 51;
+            ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+        } else if idx >= 232 {
+            let v = 8 + (idx - 232) as u32 * 10;
+            (v << 16) | (v << 8) | v
+        } else {
+            0xffffff
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::HexColor;

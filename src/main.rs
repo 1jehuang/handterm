@@ -1,8 +1,11 @@
+#[cfg(feature = "cpu")]
 mod app;
 mod cli;
 mod color;
 mod config;
 mod font;
+#[cfg(feature = "gpu")]
+mod gpu_app;
 mod grid;
 mod ipc;
 mod metrics;
@@ -56,6 +59,11 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        None => app::run(config),
+        None => {
+            #[cfg(feature = "gpu")]
+            return gpu_app::run(config);
+            #[cfg(not(feature = "gpu"))]
+            app::run(config)
+        }
     }
 }

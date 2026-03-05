@@ -607,25 +607,6 @@ fn key_to_bytes(key: &Key, _physical: &PhysicalKey, app_cursor: bool, ctrl: bool
     }
 }
 
-const PALETTE: [u32; 16] = [
-    0x000000, // 0 black
-    0xcc0000, // 1 red
-    0x4e9a06, // 2 green
-    0xc4a000, // 3 yellow
-    0x3465a4, // 4 blue
-    0x75507b, // 5 magenta
-    0x06989a, // 6 cyan
-    0xd3d7cf, // 7 white
-    0x555753, // 8 bright black
-    0xef2929, // 9 bright red
-    0x8ae234, // 10 bright green
-    0xfce94f, // 11 bright yellow
-    0x729fcf, // 12 bright blue
-    0xad7fa8, // 13 bright magenta
-    0x34e2e2, // 14 bright cyan
-    0xeeeeec, // 15 bright white
-];
-
 fn base64_decode(input: &[u8]) -> Result<Vec<u8>, ()> {
     const TABLE: [u8; 256] = {
         let mut t = [0xffu8; 256];
@@ -667,26 +648,7 @@ fn base64_decode(input: &[u8]) -> Result<Vec<u8>, ()> {
 }
 
 fn color_to_rgb(c: u32) -> u32 {
-    use crate::grid::COLOR_FLAG_RGB;
-    if c & COLOR_FLAG_RGB != 0 {
-        c & 0x00FF_FFFF
-    } else {
-        let idx = c as u8;
-        if (idx as usize) < PALETTE.len() {
-            PALETTE[idx as usize]
-        } else if (16..232).contains(&idx) {
-            let v = idx - 16;
-            let r = (v / 36) * 51;
-            let g = ((v % 36) / 6) * 51;
-            let b = (v % 6) * 51;
-            ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
-        } else if idx >= 232 {
-            let v = 8 + (idx - 232) as u32 * 10;
-            (v << 16) | (v << 8) | v
-        } else {
-            0xffffff
-        }
-    }
+    crate::color::to_rgb(c)
 }
 
 fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {

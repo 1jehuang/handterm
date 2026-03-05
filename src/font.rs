@@ -14,6 +14,14 @@ pub struct GlyphAtlas {
     pub baseline: usize,
 }
 
+pub struct GlyphData<'a> {
+    pub bitmap: &'a [u8],
+    pub width: usize,
+    pub height: usize,
+    pub bearing_x: i32,
+    pub bearing_y: i32,
+}
+
 struct RasterizedGlyph {
     bitmap: Vec<u8>,
     width: usize,
@@ -83,7 +91,7 @@ impl GlyphAtlas {
         })
     }
 
-    fn ensure_glyph(&mut self, ch: u32) -> bool {
+    pub fn ensure_glyph(&mut self, ch: u32) -> bool {
         if self.glyphs.contains_key(&ch) {
             return true;
         }
@@ -221,6 +229,16 @@ impl GlyphAtlas {
     #[allow(dead_code)]
     pub fn has_glyph(&self, ch: u32) -> bool {
         self.glyphs.contains_key(&ch)
+    }
+
+    pub fn get_glyph(&self, ch: u32) -> Option<GlyphData> {
+        self.glyphs.get(&ch).map(|g| GlyphData {
+            bitmap: &g.bitmap,
+            width: g.width,
+            height: g.height,
+            bearing_x: g.bearing_x,
+            bearing_y: g.bearing_y,
+        })
     }
 }
 

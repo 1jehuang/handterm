@@ -10,14 +10,21 @@ The name is a nod to `foot`: lean, practical, and fast.
 
 ## Current status
 
-- Wayland-only runtime scaffolding with `winit`
-- Software startup surface via `softbuffer`
-- Config model with defaults matching the author's current kitty styling
-- CLI commands:
-  - `handterm print-config`
-  - `handterm init-config`
-  - `handterm bench`
-- Unit + integration tests for config and CLI behavior
+- Wayland-only runtime with `winit` + `softbuffer` CPU rendering
+- PTY spawn and shell management
+- Full terminal grid with ring buffer and 10k line scrollback
+- VT100/VT220 parser (CSI, SGR, OSC, DCS)
+- True color (24-bit RGB), bold, dim, italic, underline, inverse, strikethrough
+- DECAWM auto-wrap with pending wrap semantics
+- Mouse reporting (X10, Normal, Button, Any, SGR encoding)
+- Text selection with clipboard copy (OSC 52, wl-copy)
+- Unicode with on-demand FreeType glyph rasterization
+- Wide character and DEC special graphics support
+- Alt screen, cursor styles, bracketed paste, focus events
+- IPC remote control via Unix socket
+- Damage tracking (bitset dirty map, skip unchanged cells)
+- Config model with defaults matching kitty styling
+- CLI commands: `print-config`, `init-config`, `bench`
 
 ## Default style baseline (mirrors kitty config)
 
@@ -49,23 +56,26 @@ cargo run
 
 ## Roadmap
 
-1. PTY process management and shell spawn
-2. Terminal grid + parser (core ANSI/VT sequences)
-3. GPU renderer and damage tracking
-4. Input stack (keyboard, mouse, bracketed paste)
+1. ~~PTY process management and shell spawn~~ Done
+2. ~~Terminal grid + parser (core ANSI/VT sequences)~~ Done
+3. GPU renderer (wgpu) and ~~damage tracking~~ Done
+4. ~~Input stack (keyboard, mouse, bracketed paste)~~ Done
 5. Daemon mode for ultra-fast window spawning
 6. Extended compatibility (kitty keyboard/graphics, OSC 8/52)
 
 ## Measurable performance baseline
 
-`handterm bench` currently reports:
+`handterm bench` reports throughput at every layer of the pipeline, compared to theoretical floors (memcpy, byte scan). Key metrics on Intel Core Ultra 7 256V:
 
-- `pty_spawn_us`: PTY + shell process spawn latency (microseconds)
-- `shell_ready_us`: time until a marker command is observed from shell output (microseconds)
-- `grid_alloc_us`: grid allocation time (microseconds)
-- `ascii_grid_mb_per_sec`: in-memory ASCII grid write throughput
+| Metric | Value |
+|--------|-------|
+| Terminal ASCII throughput | ~400 MB/s |
+| Cell write latency | ~2.8 ns |
+| PTY spawn | ~150 us |
+| Grid alloc | ~12 us |
+| Frames/sec (80x24) | ~12,000+ |
 
-These metrics are intentionally simple and deterministic so we can track regressions while iterating toward theoretical limits.
+Run `handterm bench` for the full breakdown including parser, grid write, and full terminal pipeline throughput with ASCII, SGR, and mixed workloads.
 
 ## License
 

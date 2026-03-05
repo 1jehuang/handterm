@@ -30,12 +30,19 @@ impl GlyphAtlas {
     }
 
     pub fn with_family(family: &str, font_size_pt: f64) -> Result<Self> {
+        if let Some(cached) = load_cached_font_path(family) {
+            if std::path::Path::new(&cached).exists() {
+                return Self::from_font_path(&cached, font_size_pt);
+            }
+        }
         let font_path = find_monospace_font(Some(family))?;
+        save_cached_font_path(family, &font_path);
         Self::from_font_path(&font_path, font_size_pt)
     }
 
     pub fn from_font_path(path: &str, font_size_pt: f64) -> Result<Self> {
         let lib = Library::init().context("failed to init freetype")?;
+
         let face = lib
             .new_face(path, 0)
             .context("failed to load font face")?;
@@ -51,16 +58,8 @@ impl GlyphAtlas {
             .context("failed to load 'M'")?;
         let cell_width = (face.glyph().advance().x >> 6) as usize;
 
-        let mut glyphs = HashMap::with_capacity(128);
-
-        for ch in 0x20u32..=0x7e {
-            if let Some(g) = rasterize_one(&face, ch) {
-                glyphs.insert(ch, g);
-            }
-        }
-
         Ok(Self {
-            glyphs,
+            glyphs: HashMap::with_capacity(128),
             lib,
             font_path: path.to_string(),
             font_size_pt,
@@ -238,17 +237,47 @@ fn find_monospace_font(preferred_family: Option<&str>) -> Result<String> {
     anyhow::bail!("no monospace font found via fontconfig")
 }
 
+fn font_cache_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".cache").join("handterm").join("font_path"))
+}
+
+fn load_cached_font_path(family: &str) -> Option<String> {
+    let cache = font_cache_path()?;
+    let content = std::fs::read_to_string(&cache).ok()?;
+    for line in content.lines() {
+        if let Some((k, v)) = line.split_once('=') {
+            if k == family {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn save_cached_font_path(family: &str, path: &str) {
+    let Some(cache) = font_cache_path() else { return };
+    if let Some(parent) = cache.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut content = std::fs::read_to_string(&cache).unwrap_or_default();
+    let entry = format!("{}={}\n", family, path);
+    if !content.contains(&entry) {
+        content.push_str(&entry);
+        let _ = std::fs::write(&cache, content);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn loads_system_monospace_font() {
-        let atlas = GlyphAtlas::new(14.0).expect("should load a monospace font");
+        let mut atlas = GlyphAtlas::new(14.0).expect("should load a monospace font");
         assert!(atlas.cell_width > 0);
         assert!(atlas.cell_height > 0);
-        assert!(atlas.has_glyph(b'A' as u32));
-        assert!(atlas.has_glyph(b'@' as u32));
+        assert!(atlas.ensure_glyph(b'A' as u32));
+        assert!(atlas.ensure_glyph(b'@' as u32));
     }
 
     #[test]

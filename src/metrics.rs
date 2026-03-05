@@ -213,12 +213,18 @@ fn build_mixed_payload(target_size: usize) -> Vec<u8> {
 }
 
 pub fn format_bench_results(r: &BenchResult) -> String {
-    let cols = 80usize;
-    let rows = 24usize;
-    let cells_per_frame = cols * rows;
-    let bytes_per_frame = cells_per_frame * r.cell_size_bytes;
+    let cols_small = 80usize;
+    let rows_small = 24usize;
+    let cells_small = cols_small * rows_small;
+    let bytes_small = cells_small * r.cell_size_bytes;
 
-    let ascii_frames_per_sec = r.terminal_ascii_mb_s * 1024.0 * 1024.0 / bytes_per_frame as f64;
+    let cols_full = 120usize;
+    let rows_full = 72usize;
+    let cells_full = cols_full * rows_full;
+    let bytes_full = cells_full * r.cell_size_bytes;
+
+    let fps_small = r.terminal_ascii_mb_s * 1024.0 * 1024.0 / bytes_small as f64;
+    let fps_full = r.terminal_ascii_mb_s * 1024.0 * 1024.0 / bytes_full as f64;
     let parser_pct_of_memcpy = (r.parser_ascii_mb_s / r.memcpy_mb_s) * 100.0;
     let grid_pct_of_memcpy = (r.grid_ascii_mb_s / r.memcpy_mb_s) * 100.0;
     let terminal_pct_of_memcpy = (r.terminal_ascii_mb_s / r.memcpy_mb_s) * 100.0;
@@ -250,6 +256,7 @@ pub fn format_bench_results(r: &BenchResult) -> String {
   cell size               : {} bytes
   cell write latency      : {:.1} ns/cell
   grid memory (80x24)     : {} KB
+  grid memory (120x72)    : {} KB
   scrollback/line (80col) : {} bytes
   10k scrollback          : {} KB
 
@@ -259,8 +266,10 @@ pub fn format_bench_results(r: &BenchResult) -> String {
   grid alloc              : {} us
 
 --- Derived ---
-  ASCII frames/sec (80x24): {:.0}
-  full-screen write       : {:.1} us ({} bytes)",
+  frames/sec (80x24)      : {:.0}
+  frames/sec (120x72)     : {:.0}
+  full-screen write 80x24 : {:.1} us ({} bytes)
+  full-screen write 120x72: {:.1} us ({} bytes)",
         r.memcpy_mb_s,
         r.byte_scan_mb_s,
         r.parser_ascii_mb_s, parser_pct_of_memcpy,
@@ -275,14 +284,18 @@ pub fn format_bench_results(r: &BenchResult) -> String {
         r.cell_size_bytes,
         r.cell_write_ns,
         r.grid_memory_kb,
+        cells_full * r.cell_size_bytes / 1024,
         r.scrollback_per_line_bytes,
         r.scrollback_per_line_bytes * 10000 / 1024,
         r.spawn_us,
         r.shell_ready_us,
         r.grid_alloc_us,
-        ascii_frames_per_sec,
-        (bytes_per_frame as f64 / (r.terminal_ascii_mb_s * 1024.0 * 1024.0)) * 1_000_000.0,
-        bytes_per_frame,
+        fps_small,
+        fps_full,
+        (bytes_small as f64 / (r.terminal_ascii_mb_s * 1024.0 * 1024.0)) * 1_000_000.0,
+        bytes_small,
+        (bytes_full as f64 / (r.terminal_ascii_mb_s * 1024.0 * 1024.0)) * 1_000_000.0,
+        bytes_full,
     )
 }
 

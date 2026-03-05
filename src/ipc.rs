@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -99,6 +99,10 @@ impl IpcServer {
     #[allow(dead_code)]
     pub fn listener_fd(&self) -> BorrowedFd<'_> {
         self.listener.as_fd()
+    }
+
+    pub fn listener_raw_fd(&self) -> i32 {
+        self.listener.as_raw_fd()
     }
 
     #[allow(dead_code)]

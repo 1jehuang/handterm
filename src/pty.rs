@@ -3,7 +3,7 @@ use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::pty::{ForkptyResult, Winsize, forkpty};
 use nix::unistd::{Pid, execvp};
 use std::ffi::{CStr, CString};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
 pub struct PtyChild {
     master_fd: OwnedFd,
@@ -54,6 +54,15 @@ impl PtyChild {
         let new_flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
         fcntl(&self.master_fd, FcntlArg::F_SETFL(new_flags)).context("F_SETFL failed")?;
         Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn fd(&self) -> BorrowedFd<'_> {
+        self.master_fd.as_fd()
+    }
+
+    pub fn raw_fd(&self) -> i32 {
+        self.master_fd.as_raw_fd()
     }
 
     pub fn write_all(&self, data: &[u8]) -> Result<()> {

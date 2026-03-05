@@ -400,7 +400,7 @@ impl Terminal {
                 for param in &params {
                     match param {
                         1 => self.application_cursor_keys = true,
-                        7 => {}    // DECAWM - auto wrap (TODO)
+                        7 => self.grid.autowrap = true,
                         12 => {}   // Cursor blink
                         25 => self.cursor_visible = true,   // DECTCEM show cursor
                         47 | 1047 => self.enter_alt_screen(),
@@ -426,7 +426,7 @@ impl Terminal {
                 for param in &params {
                     match param {
                         1 => self.application_cursor_keys = false,
-                        7 => {}
+                        7 => self.grid.autowrap = false,
                         12 => {}
                         25 => self.cursor_visible = false,  // DECTCEM hide cursor
                         47 | 1047 => self.leave_alt_screen(),

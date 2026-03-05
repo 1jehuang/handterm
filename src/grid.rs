@@ -90,6 +90,8 @@ pub struct Grid {
     current_attrs: u8,
     scroll_top: usize,
     scroll_bottom: usize,
+    pub autowrap: bool,
+    pending_wrap: bool,
     scrollback: Vec<Cell>,
     scrollback_len: usize,
     scrollback_head: usize,
@@ -123,6 +125,8 @@ impl Grid {
             current_attrs: 0,
             scroll_top: 0,
             scroll_bottom: rows,
+            autowrap: true,
+            pending_wrap: false,
             scrollback: Vec::new(),
             scrollback_len: 0,
             scrollback_head: 0,
@@ -164,6 +168,7 @@ impl Grid {
         self.scroll_bottom = new_rows;
         self.cursor_col = self.cursor_col.min(new_cols.saturating_sub(1));
         self.cursor_row = self.cursor_row.min(new_rows.saturating_sub(1));
+        self.pending_wrap = false;
     }
 
     pub fn cursor_pos(&self) -> (usize, usize) {
@@ -344,6 +349,25 @@ impl Grid {
                 return;
             }
 
+            if self.pending_wrap {
+                if !self.autowrap {
+                    self.cursor_col = cols.saturating_sub(1);
+                    self.pending_wrap = false;
+                } else {
+                    self.pending_wrap = false;
+                    self.cursor_col = 0;
+                    if self.cursor_row + 1 >= self.scroll_bottom {
+                        if is_full_scroll {
+                            self.scroll_up_ring();
+                        } else {
+                            self.scroll_up();
+                        }
+                    } else {
+                        self.cursor_row += 1;
+                    }
+                }
+            }
+
             let remaining_in_row = cols - self.cursor_col;
             let chunk_len = remaining_in_row.min(run_len - ri);
 
@@ -380,16 +404,8 @@ impl Grid {
             self.cursor_col += chunk_len;
 
             if self.cursor_col >= cols {
-                self.cursor_col = 0;
-                if self.cursor_row + 1 >= self.scroll_bottom {
-                    if is_full_scroll {
-                        self.scroll_up_ring();
-                    } else {
-                        self.scroll_up();
-                    }
-                } else {
-                    self.cursor_row += 1;
-                }
+                self.pending_wrap = true;
+                self.cursor_col = cols - 1;
             }
         }
     }
@@ -421,7 +437,26 @@ impl Grid {
     }
 
     pub fn put_char(&mut self, ch: u32) {
-        if self.cursor_row >= self.rows || self.cursor_col >= self.cols {
+        if self.cursor_row >= self.rows {
+            return;
+        }
+
+        if self.pending_wrap {
+            if !self.autowrap {
+                self.cursor_col = self.cols.saturating_sub(1);
+                self.pending_wrap = false;
+            } else {
+                self.pending_wrap = false;
+                self.cursor_col = 0;
+                if self.cursor_row + 1 >= self.scroll_bottom {
+                    self.scroll_up();
+                } else {
+                    self.cursor_row += 1;
+                }
+            }
+        }
+
+        if self.cursor_col >= self.cols {
             return;
         }
 
@@ -432,6 +467,9 @@ impl Grid {
         };
 
         if width == 2 && self.cursor_col + 1 >= self.cols {
+            if !self.autowrap {
+                return;
+            }
             let idx = self.cell_index_at(self.cursor_row, self.cursor_col);
             self.cells[idx] = Cell::BLANK;
             self.cursor_col = 0;
@@ -464,12 +502,8 @@ impl Grid {
         }
 
         if self.cursor_col >= self.cols {
-            self.cursor_col = 0;
-            if self.cursor_row + 1 >= self.scroll_bottom {
-                self.scroll_up();
-            } else {
-                self.cursor_row += 1;
-            }
+            self.pending_wrap = true;
+            self.cursor_col = self.cols - 1;
         }
     }
 
@@ -483,17 +517,20 @@ impl Grid {
 
     pub fn carriage_return(&mut self) {
         self.cursor_col = 0;
+        self.pending_wrap = false;
     }
 
     pub fn tab(&mut self) {
         let next = ((self.cursor_col / 8) + 1) * 8;
         self.cursor_col = next.min(self.cols.saturating_sub(1));
+        self.pending_wrap = false;
     }
 
     pub fn backspace(&mut self) {
         if self.cursor_col > 0 {
             self.cursor_col -= 1;
         }
+        self.pending_wrap = false;
     }
 
     pub fn reverse_index(&mut self) {
@@ -507,14 +544,17 @@ impl Grid {
     pub fn set_cursor(&mut self, row: usize, col: usize) {
         self.cursor_row = row.min(self.rows.saturating_sub(1));
         self.cursor_col = col.min(self.cols.saturating_sub(1));
+        self.pending_wrap = false;
     }
 
     pub fn set_cursor_row(&mut self, row: usize) {
         self.cursor_row = row.min(self.rows.saturating_sub(1));
+        self.pending_wrap = false;
     }
 
     pub fn set_cursor_col(&mut self, col: usize) {
         self.cursor_col = col.min(self.cols.saturating_sub(1));
+        self.pending_wrap = false;
     }
 
     pub fn move_cursor_up(&mut self, n: usize) {
@@ -861,5 +901,26 @@ mod tests {
         let mut g = super::Grid::new(80, 24, [0xff; 3], [0; 3]);
         g.write_bytes("😀".as_bytes());
         assert_eq!(g.cell_at(0, 0).ch, 0x1F600);
+    }
+
+    #[test]
+    fn pending_wrap_defers_line_advance() {
+        let mut g = Grid::new(4, 2, [0; 3], [0; 3]);
+        g.write_bytes(b"abcd");
+        assert_eq!(g.cell_char(0, 3), 'd');
+        let (col, row) = g.cursor_pos();
+        assert_eq!((col, row), (3, 0));
+        g.write_bytes(b"e");
+        assert_eq!(g.cell_char(1, 0), 'e');
+    }
+
+    #[test]
+    fn autowrap_off_stays_at_last_col() {
+        let mut g = Grid::new(4, 2, [0; 3], [0; 3]);
+        g.autowrap = false;
+        g.write_bytes(b"abcdef");
+        assert_eq!(g.cell_char(0, 3), 'f');
+        let (col, row) = g.cursor_pos();
+        assert_eq!((col, row), (3, 0));
     }
 }

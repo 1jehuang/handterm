@@ -797,6 +797,197 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
     }
 
     // Pass 2: Draw all glyphs, underlines, cursors
+    #[cfg(feature = "ligatures")]
+    {
+        for row in 0..grid.rows {
+            let any_dirty = full_redraw || (0..grid.cols).any(|c| grid.is_cell_dirty(row, c))
+                || (show_cursor && row == cursor_row);
+            if !any_dirty {
+                continue;
+            }
+
+            let mut run_text = String::new();
+            let mut run_start: usize = 0;
+            let mut run_fg: u32 = 0;
+            let mut run_attrs: u8 = 0;
+
+            let mut flush_run = |atlas: &mut crate::font::GlyphAtlas,
+                                  buffer: &mut [u32],
+                                  buf_w: usize, buf_h: usize,
+                                  text: &str, start_col: usize, row: usize, fg: u32| {
+                if text.is_empty() {
+                    return;
+                }
+                let shaped = atlas.shape_run(text);
+                let mut col = start_col;
+                for sg in &shaped {
+                    atlas.draw_shaped_glyph(buffer, buf_w, buf_h, col, row, sg.codepoint, sg.cells, fg);
+                    col += sg.cells;
+                }
+            };
+
+            for col in 0..grid.cols {
+                let cell = grid.cell_at_scroll(row, col);
+                if cell.flags & crate::grid::FLAG_WIDE_CONT != 0 {
+                    continue;
+                }
+
+                let is_cursor_here = show_cursor && row == cursor_row && col == cursor_col;
+                let is_cursor_block =
+                    is_cursor_here && cursor_style == crate::terminal::CursorStyle::Block;
+                let selected = is_in_selection(selection, row, col);
+                let (actual_fg, _) = cell_colors(cell, base_fg, base_bg, is_cursor_block, selected);
+                let has_content = cell.ch > 0x20;
+
+                let same_run = has_content
+                    && !run_text.is_empty()
+                    && actual_fg == run_fg
+                    && cell.attrs == run_attrs;
+
+                if !same_run && !run_text.is_empty() {
+                    flush_run(atlas, &mut buffer, buf_w, buf_h, &run_text, run_start, row, run_fg);
+                    run_text.clear();
+                }
+
+                if has_content {
+                    if run_text.is_empty() {
+                        run_start = col;
+                        run_fg = actual_fg;
+                        run_attrs = cell.attrs;
+                    }
+                    if let Some(ch) = char::from_u32(cell.ch) {
+                        run_text.push(ch);
+                    }
+                }
+
+                if is_cursor_here && cursor_style != crate::terminal::CursorStyle::Block {
+                    let px_x = col * cell_w;
+                    let px_y = row * cell_h;
+                    match cursor_style {
+                        crate::terminal::CursorStyle::Bar => {
+                            let bar_w = 2.min(cell_w);
+                            for y in px_y..(px_y + cell_h).min(buf_h) {
+                                for x in px_x..(px_x + bar_w).min(buf_w) {
+                                    buffer[y * buf_w + x] = base_fg;
+                                }
+                            }
+                        }
+                        crate::terminal::CursorStyle::Underline => {
+                            let ul_h = 2.min(cell_h);
+                            let y_start = (px_y + cell_h).saturating_sub(ul_h);
+                            for y in y_start..(px_y + cell_h).min(buf_h) {
+                                for x in px_x..(px_x + cell_w).min(buf_w) {
+                                    buffer[y * buf_w + x] = base_fg;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            if !run_text.is_empty() {
+                flush_run(atlas, &mut buffer, buf_w, buf_h, &run_text, run_start, row, run_fg);
+            }
+
+            // Still need underlines/strikethrough per-cell
+            for col in 0..grid.cols {
+                let cell = grid.cell_at_scroll(row, col);
+                if cell.attrs == 0 {
+                    continue;
+                }
+                if !full_redraw && !grid.is_cell_dirty(row, col) {
+                    continue;
+                }
+                let is_cursor_here = show_cursor && row == cursor_row && col == cursor_col;
+                let is_cursor_block =
+                    is_cursor_here && cursor_style == crate::terminal::CursorStyle::Block;
+                let selected = is_in_selection(selection, row, col);
+                let (actual_fg, _) = cell_colors(cell, base_fg, base_bg, is_cursor_block, selected);
+
+                use crate::grid::*;
+                let px_x = col * cell_w;
+                let px_y = row * cell_h;
+
+                if cell.attrs & ATTR_UNDERLINE != 0 {
+                    let ul_color = if cell.attrs & ATTR_HAS_UCOLOR != 0 {
+                        color_to_rgb(cell.underline_color)
+                    } else {
+                        actual_fg
+                    };
+                    let y_base = (px_y + cell_h).saturating_sub(2);
+                    match cell.underline_style {
+                        UnderlineStyle::Single | UnderlineStyle::None => {
+                            if y_base < buf_h {
+                                for x in px_x..(px_x + cell_w).min(buf_w) {
+                                    buffer[y_base * buf_w + x] = ul_color;
+                                }
+                            }
+                        }
+                        UnderlineStyle::Double => {
+                            let y1 = y_base;
+                            let y2 = y_base.saturating_sub(2);
+                            for &y in &[y1, y2] {
+                                if y < buf_h {
+                                    for x in px_x..(px_x + cell_w).min(buf_w) {
+                                        buffer[y * buf_w + x] = ul_color;
+                                    }
+                                }
+                            }
+                        }
+                        UnderlineStyle::Curly => {
+                            let x_start = px_x;
+                            let x_end = (px_x + cell_w).min(buf_w);
+                            let amplitude = 2.0_f32;
+                            let period = cell_w as f32;
+                            for x in x_start..x_end {
+                                let phase = (x - px_x) as f32 / period * std::f32::consts::TAU;
+                                let dy = (phase.sin() * amplitude) as i32;
+                                let y = (y_base as i32 + dy).max(0) as usize;
+                                if y < buf_h {
+                                    buffer[y * buf_w + x] = ul_color;
+                                    if y + 1 < buf_h {
+                                        buffer[(y + 1) * buf_w + x] = ul_color;
+                                    }
+                                }
+                            }
+                        }
+                        UnderlineStyle::Dotted => {
+                            if y_base < buf_h {
+                                for x in px_x..(px_x + cell_w).min(buf_w) {
+                                    if (x - px_x) % 3 == 0 {
+                                        buffer[y_base * buf_w + x] = ul_color;
+                                    }
+                                }
+                            }
+                        }
+                        UnderlineStyle::Dashed => {
+                            if y_base < buf_h {
+                                let dash = cell_w / 3;
+                                for x in px_x..(px_x + cell_w).min(buf_w) {
+                                    let offset = x - px_x;
+                                    if offset < dash || (offset >= dash * 2 && offset < dash * 3) {
+                                        buffer[y_base * buf_w + x] = ul_color;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if cell.attrs & ATTR_STRIKETHROUGH != 0 {
+                    let y = px_y + cell_h / 2;
+                    if y < buf_h {
+                        for x in px_x..(px_x + cell_w).min(buf_w) {
+                            buffer[y * buf_w + x] = actual_fg;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "ligatures"))]
+    {
     for row in 0..grid.rows {
         for col in 0..grid.cols {
             let is_cursor = show_cursor && row == cursor_row && col == cursor_col;
@@ -927,6 +1118,7 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
                 }
             }
         }
+    }
     }
 
     buffer

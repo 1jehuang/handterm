@@ -3,6 +3,9 @@ use freetype::face::LoadFlag;
 use freetype::Library;
 use std::collections::HashMap;
 
+#[cfg(feature = "ligatures")]
+use rustybuzz;
+
 pub struct GlyphAtlas {
     glyphs: HashMap<u32, RasterizedGlyph>,
     lib: Library,
@@ -12,6 +15,8 @@ pub struct GlyphAtlas {
     pub cell_width: usize,
     pub cell_height: usize,
     pub baseline: usize,
+    #[cfg(feature = "ligatures")]
+    rb_face: Option<rustybuzz::Face<'static>>,
 }
 
 pub struct GlyphData<'a> {
@@ -88,6 +93,8 @@ impl GlyphAtlas {
             cell_width: cell_width.max(1),
             cell_height: cell_height.max(1),
             baseline,
+            #[cfg(feature = "ligatures")]
+            rb_face: init_rustybuzz(path),
         })
     }
 
@@ -240,6 +247,149 @@ impl GlyphAtlas {
             bearing_y: g.bearing_y,
         })
     }
+
+    #[cfg(feature = "ligatures")]
+    pub fn shape_run(&mut self, text: &str) -> Vec<ShapedGlyph> {
+        let Some(ref face) = self.rb_face else {
+            return text.chars().map(|ch| ShapedGlyph {
+                codepoint: ch as u32,
+                cluster: 0,
+                cells: 1,
+            }).collect();
+        };
+
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(text);
+        let output = rustybuzz::shape(face, &[], buffer);
+        let info = output.glyph_infos();
+        let _positions = output.glyph_positions();
+
+        let mut result = Vec::with_capacity(info.len());
+        for (i, gi) in info.iter().enumerate() {
+            let next_cluster = if i + 1 < info.len() {
+                info[i + 1].cluster
+            } else {
+                text.len() as u32
+            };
+            let char_count = (next_cluster - gi.cluster) as usize;
+            let cells = char_count.max(1);
+
+            self.ensure_glyph_id(gi.glyph_id);
+
+            result.push(ShapedGlyph {
+                codepoint: gi.glyph_id,
+                cluster: gi.cluster,
+                cells,
+            });
+        }
+        result
+    }
+
+    #[cfg(feature = "ligatures")]
+    fn ensure_glyph_id(&mut self, glyph_id: u32) -> bool {
+        if self.glyphs.contains_key(&(glyph_id | 0x8000_0000)) {
+            return true;
+        }
+        let Ok(face) = self.lib.new_face(&self.font_path, 0) else {
+            return false;
+        };
+        if face.set_char_size((self.font_size_pt * 64.0) as isize, 0, self.dpi, 0).is_err() {
+            return false;
+        }
+        if face.load_glyph(glyph_id, LoadFlag::RENDER).is_ok() {
+            if let Some(g) = rasterize_loaded(&face) {
+                self.glyphs.insert(glyph_id | 0x8000_0000, g);
+                return true;
+            }
+        }
+        false
+    }
+
+    #[cfg(feature = "ligatures")]
+    pub fn get_shaped_glyph(&self, glyph_id: u32) -> Option<GlyphData> {
+        self.glyphs.get(&(glyph_id | 0x8000_0000)).map(|g| GlyphData {
+            bitmap: &g.bitmap,
+            width: g.width,
+            height: g.height,
+            bearing_x: g.bearing_x,
+            bearing_y: g.bearing_y,
+        })
+    }
+
+    #[cfg(feature = "ligatures")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_shaped_glyph(
+        &mut self,
+        buffer: &mut [u32],
+        buf_w: usize,
+        buf_h: usize,
+        cell_x: usize,
+        cell_y: usize,
+        glyph_id: u32,
+        cells: usize,
+        fg: u32,
+    ) {
+        self.ensure_glyph_id(glyph_id);
+
+        let key = glyph_id | 0x8000_0000;
+        let Some(glyph) = self.glyphs.get(&key) else {
+            return;
+        };
+
+        let px_x = cell_x * self.cell_width;
+        let px_y = cell_y * self.cell_height;
+        let ch_height = self.cell_height;
+        let span_width = cells * self.cell_width;
+
+        let origin_y = px_y as i32 + (ch_height as i32 - self.baseline as i32);
+        let glyph_top = origin_y - glyph.bearing_y;
+        let glyph_left = px_x as i32 + glyph.bearing_x;
+
+        let fg_r = (fg >> 16) & 0xff;
+        let fg_g = (fg >> 8) & 0xff;
+        let fg_b = fg & 0xff;
+
+        let gy_start = if glyph_top < 0 { (-glyph_top) as usize } else { 0 };
+        let gy_end = glyph.height.min(((buf_h as i32) - glyph_top).max(0) as usize);
+        let gx_start = if glyph_left < 0 { (-glyph_left) as usize } else { 0 };
+        let gx_end = glyph.width.min(((buf_w as i32) - glyph_left).max(0) as usize);
+        let _ = span_width;
+
+        for gy in gy_start..gy_end {
+            let sy = (glyph_top + gy as i32) as usize;
+            let bmp_row = gy * glyph.width;
+            let screen_row = sy * buf_w;
+
+            for gx in gx_start..gx_end {
+                let alpha = glyph.bitmap[bmp_row + gx] as u32;
+                if alpha == 0 {
+                    continue;
+                }
+                let sx = (glyph_left + gx as i32) as usize;
+                let pixel = &mut buffer[screen_row + sx];
+                if alpha == 255 {
+                    *pixel = fg;
+                } else {
+                    let bg_pixel = *pixel;
+                    let bg_r = (bg_pixel >> 16) & 0xff;
+                    let bg_g = (bg_pixel >> 8) & 0xff;
+                    let bg_b = bg_pixel & 0xff;
+                    let inv = 255 - alpha;
+                    let r = (fg_r * alpha + bg_r * inv) / 255;
+                    let g = (fg_g * alpha + bg_g * inv) / 255;
+                    let b = (fg_b * alpha + bg_b * inv) / 255;
+                    *pixel = (r << 16) | (g << 8) | b;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "ligatures")]
+pub struct ShapedGlyph {
+    pub codepoint: u32,
+    pub cluster: u32,
+    pub cells: usize,
 }
 
 fn rasterize_one(face: &freetype::Face, ch: u32) -> Option<RasterizedGlyph> {
@@ -266,6 +416,38 @@ fn rasterize_one(face: &freetype::Face, ch: u32) -> Option<RasterizedGlyph> {
         bearing_y: glyph.bitmap_top(),
         advance: (glyph.advance().x >> 6) as i32,
     })
+}
+
+fn rasterize_loaded(face: &freetype::Face) -> Option<RasterizedGlyph> {
+    let glyph = face.glyph();
+    let bmp = glyph.bitmap();
+    let width = bmp.width() as usize;
+    let height = bmp.rows() as usize;
+    let pitch = bmp.pitch().unsigned_abs() as usize;
+    let buffer = bmp.buffer();
+
+    let mut bitmap = vec![0u8; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            bitmap[y * width + x] = buffer[y * pitch + x];
+        }
+    }
+
+    Some(RasterizedGlyph {
+        bitmap,
+        width,
+        height,
+        bearing_x: glyph.bitmap_left(),
+        bearing_y: glyph.bitmap_top(),
+        advance: (glyph.advance().x >> 6) as i32,
+    })
+}
+
+#[cfg(feature = "ligatures")]
+fn init_rustybuzz(font_path: &str) -> Option<rustybuzz::Face<'static>> {
+    let font_data = std::fs::read(font_path).ok()?;
+    let font_data: &'static [u8] = Box::leak(font_data.into_boxed_slice());
+    rustybuzz::Face::from_slice(font_data, 0)
 }
 
 fn find_monospace_font(preferred_family: Option<&str>) -> Result<String> {

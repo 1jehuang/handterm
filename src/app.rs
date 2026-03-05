@@ -17,7 +17,7 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 pub fn run(config: AppConfig) -> Result<()> {
     let event_loop = EventLoop::new().context("failed to create event loop")?;
-    event_loop.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(8)));
+    event_loop.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(16)));
 
     let socket_path = crate::ipc::default_socket_path();
     let ipc = IpcServer::bind(&socket_path).ok();
@@ -356,6 +356,9 @@ impl ApplicationHandler for HandtermApp {
             let n = drain_pty(state);
             if n > 0 {
                 state.window.request_redraw();
+                event_loop.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(4)));
+            } else {
+                event_loop.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(16)));
             }
             if state.pty_closed {
                 event_loop.exit();

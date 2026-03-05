@@ -3,6 +3,7 @@ mod app;
 mod cli;
 mod color;
 mod config;
+#[allow(dead_code)]
 mod font;
 #[cfg(feature = "gpu")]
 mod gpu_app;
@@ -11,6 +12,7 @@ mod ipc;
 mod metrics;
 mod parser;
 mod pty;
+#[allow(dead_code)]
 mod terminal;
 
 use anyhow::Result;

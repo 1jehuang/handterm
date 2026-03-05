@@ -915,6 +915,7 @@ impl Grid {
         }
     }
 
+    #[allow(dead_code)]
     pub fn set_underline(&mut self, on: bool) {
         if on {
             self.current_attrs |= ATTR_UNDERLINE;

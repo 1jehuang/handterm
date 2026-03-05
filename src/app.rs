@@ -799,6 +799,11 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
     // Pass 2: Draw all glyphs, underlines, cursors
     #[cfg(feature = "ligatures")]
     {
+        let mut run_text = String::with_capacity(grid.cols);
+        let mut run_start: usize = 0;
+        let mut run_fg: u32 = 0;
+        let mut run_attrs: u8 = 0;
+
         for row in 0..grid.rows {
             let any_dirty = full_redraw || (0..grid.cols).any(|c| grid.is_cell_dirty(row, c))
                 || (show_cursor && row == cursor_row);
@@ -806,12 +811,9 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
                 continue;
             }
 
-            let mut run_text = String::new();
-            let mut run_start: usize = 0;
-            let mut run_fg: u32 = 0;
-            let mut run_attrs: u8 = 0;
+            run_text.clear();
 
-            let mut flush_run = |atlas: &mut crate::font::GlyphAtlas,
+            let flush_run = |atlas: &mut crate::font::GlyphAtlas,
                                   buffer: &mut [u32],
                                   buf_w: usize, buf_h: usize,
                                   text: &str, start_col: usize, row: usize, fg: u32| {

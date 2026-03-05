@@ -783,7 +783,7 @@ impl Terminal {
         }
     }
 
-    fn finalize_kitty_image(&mut self, id: u32, fmt: u32, width: u32, height: u32, payload: &[u8], action: u8, cols: u32, rows_param: u32) {
+    fn finalize_kitty_image(&mut self, id: u32, _fmt: u32, width: u32, height: u32, payload: &[u8], action: u8, cols: u32, rows_param: u32) {
         let decoded = if let Ok(d) = self.base64_decode_kitty(payload) { d } else { return };
 
         let actual_id = if id > 0 { id } else {
@@ -853,6 +853,7 @@ impl Terminal {
         Ok(out)
     }
 
+    #[allow(dead_code)]
     pub fn kitty_image(&self, id: u32) -> Option<&KittyImage> {
         self.kitty_images.iter().find(|i| i.id == id)
     }

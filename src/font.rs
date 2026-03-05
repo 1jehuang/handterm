@@ -238,7 +238,7 @@ impl GlyphAtlas {
         self.glyphs.contains_key(&ch)
     }
 
-    pub fn get_glyph(&self, ch: u32) -> Option<GlyphData> {
+    pub fn get_glyph(&self, ch: u32) -> Option<GlyphData<'_>> {
         self.glyphs.get(&ch).map(|g| GlyphData {
             bitmap: &g.bitmap,
             width: g.width,
@@ -306,7 +306,7 @@ impl GlyphAtlas {
     }
 
     #[cfg(feature = "ligatures")]
-    pub fn get_shaped_glyph(&self, glyph_id: u32) -> Option<GlyphData> {
+    pub fn get_shaped_glyph(&self, glyph_id: u32) -> Option<GlyphData<'_>> {
         self.glyphs.get(&(glyph_id | 0x8000_0000)).map(|g| GlyphData {
             bitmap: &g.bitmap,
             width: g.width,
@@ -388,6 +388,7 @@ impl GlyphAtlas {
 #[cfg(feature = "ligatures")]
 pub struct ShapedGlyph {
     pub codepoint: u32,
+    #[allow(dead_code)]
     pub cluster: u32,
     pub cells: usize,
 }

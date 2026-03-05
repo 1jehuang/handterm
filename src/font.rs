@@ -105,7 +105,29 @@ impl GlyphAtlas {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn draw_char(
+    pub fn draw_bg(
+        &self,
+        buffer: &mut [u32],
+        buf_w: usize,
+        buf_h: usize,
+        cell_x: usize,
+        cell_y: usize,
+        bg: u32,
+    ) {
+        let px_x = cell_x * self.cell_width;
+        let px_y = cell_y * self.cell_height;
+        let x_end = (px_x + self.cell_width).min(buf_w);
+        let y_end = (px_y + self.cell_height).min(buf_h);
+
+        for y in px_y..y_end {
+            let row_start = y * buf_w + px_x;
+            let row_end = y * buf_w + x_end;
+            buffer[row_start..row_end].fill(bg);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_glyph(
         &mut self,
         buffer: &mut [u32],
         buf_w: usize,
@@ -114,21 +136,10 @@ impl GlyphAtlas {
         cell_y: usize,
         ch: u32,
         fg: u32,
-        bg: u32,
     ) {
         let px_x = cell_x * self.cell_width;
         let px_y = cell_y * self.cell_height;
-        let cw = self.cell_width;
         let ch_height = self.cell_height;
-
-        let x_end = (px_x + cw).min(buf_w);
-        let y_end = (px_y + ch_height).min(buf_h);
-
-        for y in px_y..y_end {
-            let row_start = y * buf_w + px_x;
-            let row_end = y * buf_w + x_end;
-            buffer[row_start..row_end].fill(bg);
-        }
 
         self.ensure_glyph(ch);
 
@@ -186,6 +197,24 @@ impl GlyphAtlas {
                     *pixel = (r << 16) | (g << 8) | b;
                 }
             }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_char(
+        &mut self,
+        buffer: &mut [u32],
+        buf_w: usize,
+        buf_h: usize,
+        cell_x: usize,
+        cell_y: usize,
+        ch: u32,
+        fg: u32,
+        bg: u32,
+    ) {
+        self.draw_bg(buffer, buf_w, buf_h, cell_x, cell_y, bg);
+        if ch > 0x20 {
+            self.draw_glyph(buffer, buf_w, buf_h, cell_x, cell_y, ch, fg);
         }
     }
 

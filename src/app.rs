@@ -234,7 +234,10 @@ impl ApplicationHandler for HandtermApp {
                         ctrl,
                     ) {
                         let _ = state.pty.write_all(&bytes);
-                        state.terminal.grid.scroll_offset = 0;
+                        if state.terminal.grid.scroll_offset > 0 {
+                            state.terminal.grid.scroll_offset = 0;
+                            state.terminal.grid.all_dirty = true;
+                        }
                         state.terminal.grid.selection = None;
                     }
                 }
@@ -522,7 +525,6 @@ fn drain_pty(state: &mut AppState) -> usize {
                 }
             }
         }
-        state.terminal.grid.scroll_offset = 0;
     }
     total
 }
@@ -702,7 +704,8 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
     let atlas = &mut state.atlas;
 
     let has_selection = grid.selection.is_some();
-    let full_redraw = grid.all_dirty || has_selection;
+    let scrolled = grid.scroll_offset > 0;
+    let full_redraw = grid.all_dirty || has_selection || scrolled;
     if full_redraw {
         buffer.fill(base_bg);
     }
@@ -711,6 +714,115 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
     let show_cursor = state.terminal.cursor_visible && grid.scroll_offset == 0;
     let cursor_style = state.terminal.cursor_style;
 
+    let selection = grid.selection;
+
+    let cell_w = atlas.cell_width;
+    let cell_h = atlas.cell_height;
+
+    // Helper closure: compute fg/bg for a cell
+    #[inline]
+    fn cell_colors(
+        cell: &crate::grid::Cell,
+        base_fg: u32,
+        base_bg: u32,
+        is_cursor_block: bool,
+        is_selected: bool,
+    ) -> (u32, u32) {
+        let mut fg = if cell.fg == crate::grid::COLOR_DEFAULT {
+            base_fg
+        } else {
+            color_to_rgb(cell.fg)
+        };
+        let mut bg = if cell.bg == crate::grid::COLOR_DEFAULT {
+            base_bg
+        } else {
+            color_to_rgb(cell.bg)
+        };
+
+        if cell.attrs != 0 {
+            use crate::grid::*;
+            if cell.attrs & ATTR_BOLD != 0
+                && cell.fg != COLOR_DEFAULT
+                && (cell.fg & COLOR_FLAG_RGB == 0)
+                && (cell.fg as u8) < 8
+            {
+                fg = color_to_rgb(cell.fg + 8);
+            }
+            if cell.attrs & ATTR_DIM != 0 {
+                let r = ((fg >> 16) & 0xff) * 2 / 3;
+                let g = ((fg >> 8) & 0xff) * 2 / 3;
+                let b = (fg & 0xff) * 2 / 3;
+                fg = (r << 16) | (g << 8) | b;
+            }
+            if cell.attrs & ATTR_INVERSE != 0 {
+                std::mem::swap(&mut fg, &mut bg);
+            }
+        }
+
+        let invert = is_cursor_block || is_selected;
+        if invert {
+            (bg, fg)
+        } else {
+            (fg, bg)
+        }
+    }
+
+    #[inline]
+    fn is_in_selection(
+        selection: Option<crate::grid::Selection>,
+        row: usize,
+        col: usize,
+    ) -> bool {
+        let Some(sel) = selection else {
+            return false;
+        };
+        let (sr, sc, er, ec) = if sel.start_row < sel.end_row
+            || (sel.start_row == sel.end_row && sel.start_col <= sel.end_col)
+        {
+            (sel.start_row, sel.start_col, sel.end_row, sel.end_col)
+        } else {
+            (sel.end_row, sel.end_col, sel.start_row, sel.start_col)
+        };
+        if row < sr || row > er {
+            false
+        } else if row == sr && row == er {
+            col >= sc && col <= ec
+        } else if row == sr {
+            col >= sc
+        } else if row == er {
+            col <= ec
+        } else {
+            true
+        }
+    }
+
+    // Pass 1: Draw all backgrounds
+    for row in 0..grid.rows {
+        for col in 0..grid.cols {
+            let is_cursor = show_cursor && row == cursor_row && col == cursor_col;
+
+            if !full_redraw && !is_cursor && !grid.is_cell_dirty(row, col) {
+                continue;
+            }
+
+            let cell = grid.cell_at_scroll(row, col);
+            let has_custom_bg = cell.bg != crate::grid::COLOR_DEFAULT;
+            let is_dirty = grid.is_cell_dirty(row, col);
+
+            if !full_redraw && !is_cursor && !has_custom_bg && !is_dirty {
+                continue;
+            }
+
+            let is_cursor_block =
+                is_cursor && cursor_style == crate::terminal::CursorStyle::Block;
+            let selected = is_in_selection(selection, row, col);
+            let (_, actual_bg) = cell_colors(cell, base_fg, base_bg, is_cursor_block, selected);
+
+            atlas.draw_bg(&mut buffer, buf_w, buf_h, col, row, actual_bg);
+        }
+    }
+
+    // Pass 2: Draw all glyphs, underlines, cursors
     for row in 0..grid.rows {
         for col in 0..grid.cols {
             let is_cursor = show_cursor && row == cursor_row && col == cursor_col;
@@ -726,122 +838,56 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
             }
 
             let has_content = cell.ch > 0x20;
-            let has_custom_bg = cell.bg != crate::grid::COLOR_DEFAULT;
-            let has_attrs = cell.attrs != 0;
+            let is_cursor_block =
+                is_cursor && cursor_style == crate::terminal::CursorStyle::Block;
+            let selected = is_in_selection(selection, row, col);
+            let (actual_fg, _) = cell_colors(cell, base_fg, base_bg, is_cursor_block, selected);
 
-            if !is_cursor && !has_content && !has_custom_bg {
-                continue;
+            if has_content {
+                atlas.draw_glyph(&mut buffer, buf_w, buf_h, col, row, cell.ch, actual_fg);
             }
 
-            let mut fg = if cell.fg == crate::grid::COLOR_DEFAULT {
-                base_fg
-            } else {
-                color_to_rgb(cell.fg)
-            };
-            let mut bg = if cell.bg == crate::grid::COLOR_DEFAULT {
-                base_bg
-            } else {
-                color_to_rgb(cell.bg)
-            };
-
-            if has_attrs {
+            if cell.attrs != 0 {
                 use crate::grid::*;
-                if cell.attrs & ATTR_BOLD != 0 && cell.fg != crate::grid::COLOR_DEFAULT && (cell.fg & crate::grid::COLOR_FLAG_RGB == 0) && (cell.fg as u8) < 8 {
-                    fg = color_to_rgb(cell.fg + 8);
-                }
-                if cell.attrs & ATTR_DIM != 0 {
-                    let r = ((fg >> 16) & 0xff) * 2 / 3;
-                    let g = ((fg >> 8) & 0xff) * 2 / 3;
-                    let b = (fg & 0xff) * 2 / 3;
-                    fg = (r << 16) | (g << 8) | b;
-                }
-                if cell.attrs & ATTR_INVERSE != 0 {
-                    std::mem::swap(&mut fg, &mut bg);
-                }
-            }
-
-            let is_block_cursor = is_cursor && cursor_style == crate::terminal::CursorStyle::Block;
-            let is_selected = grid.selection.map_or(false, |sel| {
-                let (sr, sc, er, ec) = if sel.start_row < sel.end_row
-                    || (sel.start_row == sel.end_row && sel.start_col <= sel.end_col)
-                {
-                    (sel.start_row, sel.start_col, sel.end_row, sel.end_col)
-                } else {
-                    (sel.end_row, sel.end_col, sel.start_row, sel.start_col)
-                };
-                if row < sr || row > er {
-                    false
-                } else if row == sr && row == er {
-                    col >= sc && col <= ec
-                } else if row == sr {
-                    col >= sc
-                } else if row == er {
-                    col <= ec
-                } else {
-                    true
-                }
-            });
-            let invert = is_block_cursor || is_selected;
-            let actual_fg = if invert { bg } else { fg };
-            let actual_bg = if invert { fg } else { bg };
-
-            atlas.draw_char(
-                &mut buffer,
-                buf_w,
-                buf_h,
-                col,
-                row,
-                cell.ch,
-                actual_fg,
-                actual_bg,
-            );
-
-            if has_attrs {
-                use crate::grid::*;
-                let px_x = col * atlas.cell_width;
-                let px_y = row * atlas.cell_height;
-                let cw = atlas.cell_width;
-                let ch_h = atlas.cell_height;
-                let draw_fg = actual_fg;
+                let px_x = col * cell_w;
+                let px_y = row * cell_h;
 
                 if cell.attrs & ATTR_UNDERLINE != 0 {
-                    let y = (px_y + ch_h).saturating_sub(1);
+                    let y = (px_y + cell_h).saturating_sub(1);
                     if y < buf_h {
-                        for x in px_x..(px_x + cw).min(buf_w) {
-                            buffer[y * buf_w + x] = draw_fg;
+                        for x in px_x..(px_x + cell_w).min(buf_w) {
+                            buffer[y * buf_w + x] = actual_fg;
                         }
                     }
                 }
                 if cell.attrs & ATTR_STRIKETHROUGH != 0 {
-                    let y = px_y + ch_h / 2;
+                    let y = px_y + cell_h / 2;
                     if y < buf_h {
-                        for x in px_x..(px_x + cw).min(buf_w) {
-                            buffer[y * buf_w + x] = draw_fg;
+                        for x in px_x..(px_x + cell_w).min(buf_w) {
+                            buffer[y * buf_w + x] = actual_fg;
                         }
                     }
                 }
             }
 
             if is_cursor && cursor_style != crate::terminal::CursorStyle::Block {
-                let px_x = col * atlas.cell_width;
-                let px_y = row * atlas.cell_height;
-                let cw = atlas.cell_width;
-                let ch = atlas.cell_height;
+                let px_x = col * cell_w;
+                let px_y = row * cell_h;
 
                 match cursor_style {
                     crate::terminal::CursorStyle::Bar => {
-                        let bar_w = 2.min(cw);
-                        for y in px_y..(px_y + ch).min(buf_h) {
+                        let bar_w = 2.min(cell_w);
+                        for y in px_y..(px_y + cell_h).min(buf_h) {
                             for x in px_x..(px_x + bar_w).min(buf_w) {
                                 buffer[y * buf_w + x] = base_fg;
                             }
                         }
                     }
                     crate::terminal::CursorStyle::Underline => {
-                        let ul_h = 2.min(ch);
-                        let y_start = (px_y + ch).saturating_sub(ul_h);
-                        for y in y_start..(px_y + ch).min(buf_h) {
-                            for x in px_x..(px_x + cw).min(buf_w) {
+                        let ul_h = 2.min(cell_h);
+                        let y_start = (px_y + cell_h).saturating_sub(ul_h);
+                        for y in y_start..(px_y + cell_h).min(buf_h) {
+                            for x in px_x..(px_x + cell_w).min(buf_w) {
                                 buffer[y * buf_w + x] = base_fg;
                             }
                         }

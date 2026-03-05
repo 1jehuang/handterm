@@ -254,7 +254,7 @@ impl GlyphAtlas {
             return text.chars().map(|ch| ShapedGlyph {
                 codepoint: ch as u32,
                 cluster: 0,
-                cells: 1,
+                cells: if unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) > 1 { 2 } else { 1 },
             }).collect();
         };
 
@@ -266,13 +266,18 @@ impl GlyphAtlas {
 
         let mut result = Vec::with_capacity(info.len());
         for (i, gi) in info.iter().enumerate() {
-            let next_cluster = if i + 1 < info.len() {
-                info[i + 1].cluster
+            let cluster_start = gi.cluster as usize;
+            let cluster_end = if i + 1 < info.len() {
+                info[i + 1].cluster as usize
             } else {
-                text.len() as u32
+                text.len()
             };
-            let char_count = (next_cluster - gi.cluster) as usize;
-            let cells = char_count.max(1);
+
+            let cluster_str = &text[cluster_start..cluster_end.min(text.len())];
+            let cells: usize = cluster_str.chars().map(|c| {
+                unicode_width::UnicodeWidthChar::width(c).unwrap_or(1)
+            }).sum();
+            let cells = cells.max(1);
 
             self.ensure_glyph_id(gi.glyph_id);
 

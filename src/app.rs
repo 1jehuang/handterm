@@ -870,10 +870,24 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
                     return;
                 }
                 let shaped = atlas.shape_run(text);
-                let mut col = start_col;
-                for sg in &shaped {
-                    atlas.draw_shaped_glyph(buffer, buf_w, buf_h, col, row, sg.codepoint, sg.cells, fg);
-                    col += sg.cells;
+                let char_count = text.chars().count();
+                let is_ligature = shaped.len() < char_count;
+
+                if is_ligature {
+                    let mut col = start_col;
+                    for sg in &shaped {
+                        atlas.draw_shaped_glyph(buffer, buf_w, buf_h, col, row, sg.codepoint, sg.cells, fg);
+                        col += sg.cells;
+                    }
+                } else {
+                    let mut col = start_col;
+                    for ch in text.chars() {
+                        if ch as u32 > 0x20 {
+                            atlas.draw_glyph(buffer, buf_w, buf_h, col, row, ch as u32, fg);
+                        }
+                        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+                        col += w;
+                    }
                 }
             };
 

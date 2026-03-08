@@ -8,7 +8,7 @@ A Wayland-native terminal emulator focused on reaching the theoretical limits of
 [![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org)
 [![Wayland](https://img.shields.io/badge/wayland-native-green.svg)](https://wayland.freedesktop.org)
 
-~8,300 lines of Rust. 3.4 MB binary. 28ms to first frame.
+~8,400 lines of Rust. 3.4 MB binary. 28ms to first frame.
 
 ![handterm screenshot](assets/screenshot.png)
 
@@ -175,11 +175,11 @@ At 120x72 (HiDPI fullscreen), the pipeline can repaint the entire screen **2,507
 
 | Terminal | Lines of code | Language | Dependencies |
 |----------|-------------:|:--------:|:------------:|
-| **handterm** | **~8,300** | Rust | 16 direct, ~290 total |
-| foot | ~30,000 | C | system libs only |
-| alacritty | ~30,000 | Rust | ~100+ crates |
-| kitty | ~60,000 | C + Python | system libs + Python stdlib |
-| ghostty | ~100,000+ | Zig | vendored deps |
+| **handterm** | **~8,400** | Rust | 16 direct, ~290 total |
+| alacritty | ~34,000 | Rust | ~100+ crates |
+| foot | ~55,000 | C | system libs only |
+| kitty | ~116,000 | C + Python | system libs + Python stdlib |
+| ghostty | ~230,000 | Zig | vendored deps |
 
 ### How to reproduce
 

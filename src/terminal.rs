@@ -32,6 +32,7 @@ pub struct Terminal {
     saved_cursor: Option<(usize, usize)>,
     mode_bracketed_paste: bool,
     mode_focus_events: bool,
+    mode_alternate_scroll: bool,
     pub application_cursor_keys: bool,
     pub mouse_mode: MouseMode,
     pub mouse_encoding: MouseEncoding,
@@ -49,6 +50,7 @@ pub struct Terminal {
     kitty_pending_width: u32,
     kitty_pending_height: u32,
     kitty_more_chunks: bool,
+    kitty_generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +113,7 @@ impl Terminal {
             saved_cursor: None,
             mode_bracketed_paste: false,
             mode_focus_events: false,
+            mode_alternate_scroll: false,
             application_cursor_keys: false,
             mouse_mode: MouseMode::Off,
             mouse_encoding: MouseEncoding::X10,
@@ -128,6 +131,7 @@ impl Terminal {
             kitty_pending_width: 0,
             kitty_pending_height: 0,
             kitty_more_chunks: false,
+            kitty_generation: 0,
         }
     }
 
@@ -162,6 +166,14 @@ impl Terminal {
 
     pub fn focus_events_mode(&self) -> bool {
         self.mode_focus_events
+    }
+
+    pub fn alternate_scroll_mode(&self) -> bool {
+        self.mode_alternate_scroll
+    }
+
+    pub fn in_alt_screen(&self) -> bool {
+        self.alt_grid.is_some()
     }
 
     pub fn encode_mouse(&self, button: u8, col: usize, row: usize, pressed: bool) -> Option<Vec<u8>> {
@@ -455,6 +467,7 @@ impl Terminal {
                         }
                         2004 => self.mode_bracketed_paste = true,
                         1004 => self.mode_focus_events = true,
+                        1007 => self.mode_alternate_scroll = true,
                         9 => self.mouse_mode = MouseMode::X10,
                         1000 => self.mouse_mode = MouseMode::Normal,
                         1002 => self.mouse_mode = MouseMode::ButtonEvent,
@@ -481,6 +494,7 @@ impl Terminal {
                         }
                         2004 => self.mode_bracketed_paste = false,
                         1004 => self.mode_focus_events = false,
+                        1007 => self.mode_alternate_scroll = false,
                         9 | 1000 | 1002 | 1003 => self.mouse_mode = MouseMode::Off,
                         1005 | 1006 => self.mouse_encoding = MouseEncoding::X10,
                         _ => {}
@@ -768,11 +782,15 @@ impl Terminal {
                         cols: if cols > 0 { cols as usize } else { 1 },
                         rows: if rows_param > 0 { rows_param as usize } else { 1 },
                     });
+                    self.kitty_generation = self.kitty_generation.wrapping_add(1);
+                    self.grid.mark_all_dirty();
                 }
             }
             b'd' => {
                 self.kitty_images.retain(|i| i.id != img_id);
                 self.kitty_placements.retain(|p| p.image_id != img_id);
+                self.kitty_generation = self.kitty_generation.wrapping_add(1);
+                self.grid.mark_all_dirty();
             }
             _ => {}
         }
@@ -810,6 +828,8 @@ impl Terminal {
                 rows: if rows_param > 0 { rows_param as usize } else { (height / self.grid.rows.max(1) as u32).max(1) as usize },
             });
         }
+        self.kitty_generation = self.kitty_generation.wrapping_add(1);
+        self.grid.mark_all_dirty();
 
         if actual_id > 0 {
             let resp = format!("\x1b_Gi={};OK\x1b\\", actual_id);
@@ -856,6 +876,10 @@ impl Terminal {
     #[allow(dead_code)]
     pub fn kitty_image(&self, id: u32) -> Option<&KittyImage> {
         self.kitty_images.iter().find(|i| i.id == id)
+    }
+
+    pub fn kitty_generation(&self) -> u64 {
+        self.kitty_generation
     }
 
     fn enter_alt_screen(&mut self) {
@@ -1442,5 +1466,22 @@ mod tests {
         t2.process(b"ABCDEFG");
         assert_eq!(t2.grid.cell_char(0, 4), 'G');
         assert_eq!(t2.grid.cell_char(1, 0), ' ');
+    }
+
+    #[test]
+    fn kitty_graphics_upload_places_and_deletes_image() {
+        let mut t = Terminal::new(8, 4);
+        t.process(b"\x1b_Ga=T,i=7,f=32,s=1,v=1,c=1,r=1;/wAA/w==\x1b\\");
+
+        let image = t.kitty_image(7).expect("kitty image should exist");
+        assert_eq!(image.width, 1);
+        assert_eq!(image.height, 1);
+        assert_eq!(image.data, vec![0xff, 0x00, 0x00, 0xff]);
+        assert_eq!(t.kitty_placements.len(), 1);
+        assert_eq!(t.kitty_placements[0].image_id, 7);
+
+        t.process(b"\x1b_Ga=d,i=7\x1b\\");
+        assert!(t.kitty_image(7).is_none());
+        assert!(t.kitty_placements.is_empty());
     }
 }

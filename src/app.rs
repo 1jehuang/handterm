@@ -1,24 +1,33 @@
 use crate::config::AppConfig;
 use crate::font::GlyphAtlas;
-use crate::ipc::{IpcAction, IpcServer, Request, Response};
+use crate::frontend::{
+    FrameScheduler, VisualState, base64_decode, copy_to_clipboard, handle_ipc_request,
+    key_to_bytes, open_url, paste_from_clipboard, scroll_to_bytes, spawn_pty_watcher,
+};
+use crate::ipc::{IpcAction, IpcServer};
 use crate::pty::PtyChild;
+use crate::render::render_terminal_to_buffer;
 use crate::terminal::Terminal;
 use anyhow::{Context, Result};
 use softbuffer::{Context as SoftContext, Surface};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, Size};
 use winit::event::{ElementState, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::{Key, NamedKey, PhysicalKey};
+use winit::keyboard::{Key, NamedKey};
+use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 #[derive(Debug, Clone)]
 enum AppEvent {
     PtyReadable,
 }
+
+const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 
 pub fn run(config: AppConfig) -> Result<()> {
     let event_loop = EventLoop::<AppEvent>::with_user_event()
@@ -47,6 +56,7 @@ struct HandtermApp {
     proxy: EventLoopProxy<AppEvent>,
     watcher_started: bool,
     watcher_stop: Option<Arc<AtomicBool>>,
+    scheduler: FrameScheduler,
 }
 
 struct AppState {
@@ -62,6 +72,7 @@ struct AppState {
     mouse_col: usize,
     mouse_row: usize,
     selecting: bool,
+    last_visual_state: Option<VisualState>,
 }
 
 impl HandtermApp {
@@ -73,6 +84,7 @@ impl HandtermApp {
             proxy,
             watcher_started: false,
             watcher_stop: None,
+            scheduler: FrameScheduler::default(),
         }
     }
 
@@ -89,12 +101,7 @@ impl HandtermApp {
         self.watcher_stop = Some(stop.clone());
         self.watcher_started = true;
 
-        std::thread::Builder::new()
-            .name("pty-watcher".into())
-            .spawn(move || {
-                pty_watcher_thread(pty_fd, ipc_fd, proxy, stop);
-            })
-            .expect("failed to spawn pty watcher thread");
+        spawn_pty_watcher("pty-watcher", pty_fd, ipc_fd, proxy, AppEvent::PtyReadable, stop);
     }
 
     fn create_window_attributes(&self, atlas: &GlyphAtlas) -> WindowAttributes {
@@ -103,7 +110,8 @@ impl HandtermApp {
 
         Window::default_attributes()
             .with_title("handterm")
-            .with_transparent(self.config.style.background_opacity < 1.0)
+            .with_name("handterm", "handterm")
+            .with_transparent(false)
             .with_inner_size(Size::Logical(LogicalSize::new(width, height)))
     }
 }
@@ -160,6 +168,7 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
             mouse_col: 0,
             mouse_row: 0,
             selecting: false,
+            last_visual_state: None,
         });
 
         if let Some(s) = &self.state {
@@ -172,29 +181,7 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
             AppEvent::PtyReadable => {
-                if let Some(state) = &mut self.state {
-                    let n = drain_pty(state);
-                    if n > 0 {
-                        state.window.request_redraw();
-                    }
-                }
-                if let (Some(ipc), Some(state)) = (&mut self.ipc, &mut self.state) {
-                    let actions = ipc.poll(&mut |req| handle_ipc_request(req, state));
-                    for action in actions {
-                        match action {
-                            IpcAction::SendText(bytes) => {
-                                let _ = state.pty.write_all(&bytes);
-                            }
-                            IpcAction::SetTitle(title) => {
-                                state.window.set_title(&title);
-                            }
-                            IpcAction::Close => {
-                                _event_loop.exit();
-                            }
-                            IpcAction::None => {}
-                        }
-                    }
-                }
+                self.scheduler.mark_io_ready(Instant::now(), FRAME_INTERVAL);
             }
         }
     }
@@ -245,34 +232,20 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                         if let Key::Character(s) = &event.logical_key {
                             let ch = s.chars().next().unwrap_or('\0').to_ascii_lowercase();
                             if ch == 'v' {
-                                if let Ok(output) = std::process::Command::new("wl-paste")
-                                    .arg("--no-newline")
-                                    .output()
-                                {
-                                    let text = output.stdout;
-                                    if !text.is_empty() {
-                                        if state.terminal.bracketed_paste_mode() {
-                                            let _ = state.pty.write_all(b"\x1b[200~");
-                                            let _ = state.pty.write_all(&text);
-                                            let _ = state.pty.write_all(b"\x1b[201~");
-                                        } else {
-                                            let _ = state.pty.write_all(&text);
-                                        }
+                                if let Some(text) = paste_from_clipboard() {
+                                    if state.terminal.bracketed_paste_mode() {
+                                        let _ = state.pty.write_all(b"\x1b[200~");
+                                        let _ = state.pty.write_all(&text);
+                                        let _ = state.pty.write_all(b"\x1b[201~");
+                                    } else {
+                                        let _ = state.pty.write_all(&text);
                                     }
                                 }
                                 return;
                             } else if ch == 'c' {
                                 let text = state.terminal.grid.get_selection_text();
                                 if !text.is_empty() {
-                                    let mut child = std::process::Command::new("wl-copy")
-                                        .stdin(std::process::Stdio::piped())
-                                        .spawn()
-                                        .ok();
-                                    if let Some(ref mut c) = child {
-                                        if let Some(ref mut stdin) = c.stdin {
-                                            let _ = std::io::Write::write_all(stdin, text.as_bytes());
-                                        }
-                                    }
+                                    copy_to_clipboard(text.as_bytes());
                                 }
                                 return;
                             }
@@ -284,23 +257,20 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                             let max = state.terminal.grid.scrollback_len();
                             let half = state.terminal.rows as usize / 2;
                             state.terminal.grid.scroll_offset = (state.terminal.grid.scroll_offset + half).min(max);
-                            state.window.request_redraw();
+                            self.scheduler.mark_redraw_needed();
                             return;
                         }
                         if let Key::Named(NamedKey::PageDown) = &event.logical_key {
                             let half = state.terminal.rows as usize / 2;
                             state.terminal.grid.scroll_offset = state.terminal.grid.scroll_offset.saturating_sub(half);
-                            state.window.request_redraw();
+                            self.scheduler.mark_redraw_needed();
                             return;
                         }
                     }
 
-                    if let Some(bytes) = key_to_bytes(
-                        &event.logical_key,
-                        &event.physical_key,
-                        state.terminal.application_cursor_keys,
-                        ctrl,
-                    ) {
+                    if let Some(bytes) =
+                        key_to_bytes(&event.logical_key, state.terminal.application_cursor_keys, ctrl)
+                    {
                         let _ = state.pty.write_all(&bytes);
                         if state.terminal.grid.scroll_offset > 0 {
                             state.terminal.grid.scroll_offset = 0;
@@ -321,7 +291,7 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                         sel.end_col = state.mouse_col;
                         sel.end_row = state.mouse_row;
                     }
-                    state.window.request_redraw();
+                    self.scheduler.mark_redraw_needed();
                 }
             }
             WindowEvent::MouseInput { state: btn_state, button, .. } => {
@@ -340,9 +310,7 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                             let cell = state.terminal.grid.cell_at(state.mouse_row, state.mouse_col);
                             if cell.hyperlink_id != 0 {
                                 if let Some(url) = state.terminal.grid.hyperlink_url(cell.hyperlink_id) {
-                                    let _ = std::process::Command::new("xdg-open")
-                                        .arg(url)
-                                        .spawn();
+                                    open_url(url);
                                     return;
                                 }
                             }
@@ -354,20 +322,12 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                             end_row: state.mouse_row,
                         });
                         state.selecting = true;
-                        state.window.request_redraw();
+                        self.scheduler.mark_redraw_needed();
                     } else {
                         state.selecting = false;
                         let text = state.terminal.grid.get_selection_text();
                         if !text.is_empty() {
-                            let mut child = std::process::Command::new("wl-copy")
-                                .stdin(std::process::Stdio::piped())
-                                .spawn()
-                                .ok();
-                            if let Some(ref mut c) = child {
-                                if let Some(ref mut stdin) = c.stdin {
-                                    let _ = std::io::Write::write_all(stdin, text.as_bytes());
-                                }
-                            }
+                            copy_to_clipboard(text.as_bytes());
                         }
                     }
                 }
@@ -392,6 +352,11 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                             let _ = state.pty.write_all(&bytes);
                         }
                     }
+                } else if state.terminal.alternate_scroll_mode() && state.terminal.in_alt_screen() {
+                    let bytes = scroll_to_bytes(up, state.terminal.application_cursor_keys);
+                    for _ in 0..lines {
+                        let _ = state.pty.write_all(&bytes);
+                    }
                 } else {
                     let max = state.terminal.grid.scrollback_len();
                     if up {
@@ -399,7 +364,7 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                     } else {
                         state.terminal.grid.scroll_offset = state.terminal.grid.scroll_offset.saturating_sub(lines * 3);
                     }
-                    state.window.request_redraw();
+                    self.scheduler.mark_redraw_needed();
                 }
             }
             WindowEvent::Focused(focused) => {
@@ -412,7 +377,6 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                 }
             }
             WindowEvent::RedrawRequested => {
-                drain_pty(state);
                 render_grid(state, &self.config).expect("frame render should succeed");
             }
             _ => {}
@@ -420,7 +384,18 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(state) = &self.state {
+        if let Some(state) = &mut self.state {
+            let decision = self.scheduler.prepare_redraw(Instant::now(), || {
+                process_pending_io(state, self.ipc.as_mut(), event_loop)
+            });
+            if let Some(deadline) = decision.wait_until {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+            } else {
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
+            if decision.request_redraw {
+                state.window.request_redraw();
+            }
             if state.pty_closed {
                 if let Some(stop) = &self.watcher_stop {
                     stop.store(true, Ordering::Relaxed);
@@ -431,124 +406,32 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
     }
 }
 
-fn handle_ipc_request(req: &Request, state: &mut AppState) -> (Response, IpcAction) {
-    match req.cmd.as_str() {
-        "get-text" => {
-            let text = if let Some(obj) = req.args.as_object() {
-                let start = obj
-                    .get("start_row")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
-                let end = obj
-                    .get("end_row")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(state.terminal.grid.rows as u64)
-                    as usize;
-                state.terminal.grid.get_text(start, end)
-            } else {
-                state.terminal.grid.get_all_text()
-            };
-            (
-                Response::ok(serde_json::json!({ "text": text })),
-                IpcAction::None,
-            )
-        }
-        "send-text" => {
-            let text = req
-                .args
-                .as_object()
-                .and_then(|o| o.get("text"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if text.is_empty() {
-                (Response::err("missing 'text' argument"), IpcAction::None)
-            } else {
-                (
-                    Response::ok_empty(),
-                    IpcAction::SendText(text.as_bytes().to_vec()),
-                )
-            }
-        }
-        "send-key" => {
-            let key = req
-                .args
-                .as_object()
-                .and_then(|o| o.get("key"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let bytes = match key {
-                "enter" | "return" => Some(b"\r".to_vec()),
-                "tab" => Some(b"\t".to_vec()),
-                "escape" | "esc" => Some(b"\x1b".to_vec()),
-                "backspace" => Some(b"\x7f".to_vec()),
-                "up" => Some(b"\x1b[A".to_vec()),
-                "down" => Some(b"\x1b[B".to_vec()),
-                "right" => Some(b"\x1b[C".to_vec()),
-                "left" => Some(b"\x1b[D".to_vec()),
-                "home" => Some(b"\x1b[H".to_vec()),
-                "end" => Some(b"\x1b[F".to_vec()),
-                "delete" => Some(b"\x1b[3~".to_vec()),
-                "page_up" => Some(b"\x1b[5~".to_vec()),
-                "page_down" => Some(b"\x1b[6~".to_vec()),
-                "space" => Some(b" ".to_vec()),
-                k if k.starts_with("ctrl+") && k.len() == 6 => {
-                    let ch = k.as_bytes()[5];
-                    if ch.is_ascii_alphabetic() {
-                        Some(vec![ch.to_ascii_lowercase() - b'a' + 1])
-                    } else {
-                        None
-                    }
+fn process_pending_io(
+    state: &mut AppState,
+    ipc: Option<&mut IpcServer>,
+    event_loop: &ActiveEventLoop,
+) -> bool {
+    let needs_redraw = drain_pty(state) > 0;
+
+    if let Some(ipc) = ipc {
+        let actions = ipc.poll(&mut |req| handle_ipc_request(&mut state.terminal, req));
+        for action in actions {
+            match action {
+                IpcAction::SendText(bytes) => {
+                    let _ = state.pty.write_all(&bytes);
                 }
-                _ => None,
-            };
-            match bytes {
-                Some(b) => (Response::ok_empty(), IpcAction::SendText(b)),
-                None => (
-                    Response::err(format!("unknown key: {key}")),
-                    IpcAction::None,
-                ),
+                IpcAction::SetTitle(title) => {
+                    state.window.set_title(&title);
+                }
+                IpcAction::Close => {
+                    event_loop.exit();
+                }
+                IpcAction::None => {}
             }
         }
-        "get-cursor" => {
-            let (col, row) = state.terminal.grid.cursor_pos();
-            (
-                Response::ok(serde_json::json!({ "row": row, "col": col })),
-                IpcAction::None,
-            )
-        }
-        "get-size" => (
-            Response::ok(serde_json::json!({
-                "cols": state.terminal.cols,
-                "rows": state.terminal.rows,
-            })),
-            IpcAction::None,
-        ),
-        "set-title" => {
-            let title = req
-                .args
-                .as_object()
-                .and_then(|o| o.get("title"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("handterm")
-                .to_string();
-            (Response::ok_empty(), IpcAction::SetTitle(title))
-        }
-        "close" => (Response::ok_empty(), IpcAction::Close),
-        "ls" => (
-            Response::ok(serde_json::json!({
-                "commands": [
-                    "get-text", "send-text", "send-key",
-                    "get-cursor", "get-size", "set-title",
-                    "close", "ls"
-                ]
-            })),
-            IpcAction::None,
-        ),
-        _ => (
-            Response::err(format!("unknown command: {}", req.cmd)),
-            IpcAction::None,
-        ),
     }
+
+    needs_redraw
 }
 
 fn drain_pty(state: &mut AppState) -> usize {
@@ -577,127 +460,12 @@ fn drain_pty(state: &mut AppState) -> usize {
             state.window.set_title(&title);
         }
         if let Some(b64_data) = state.terminal.take_osc52_clipboard() {
-            use std::process::{Command, Stdio};
             if let Ok(decoded) = base64_decode(&b64_data) {
-                if let Ok(mut child) = Command::new("wl-copy").stdin(Stdio::piped()).spawn() {
-                    if let Some(ref mut stdin) = child.stdin {
-                        let _ = std::io::Write::write_all(stdin, &decoded);
-                    }
-                }
+                copy_to_clipboard(&decoded);
             }
         }
     }
     total
-}
-
-fn key_to_bytes(key: &Key, _physical: &PhysicalKey, app_cursor: bool, ctrl: bool) -> Option<Vec<u8>> {
-    if ctrl {
-        if let Key::Character(s) = key {
-            let ch = s.chars().next()?;
-            if ch.is_ascii_alphabetic() {
-                return Some(vec![ch.to_ascii_lowercase() as u8 - b'a' + 1]);
-            }
-            match ch {
-                '@' | ' ' | '`' => return Some(vec![0]),
-                '[' | '\x1b' => return Some(vec![0x1b]),
-                '\\' => return Some(vec![0x1c]),
-                ']' => return Some(vec![0x1d]),
-                '^' | '~' => return Some(vec![0x1e]),
-                '_' | '/' => return Some(vec![0x1f]),
-                _ => {}
-            }
-        }
-    }
-    match key {
-        Key::Character(s) => Some(s.as_bytes().to_vec()),
-        Key::Named(named) => match named {
-            NamedKey::Enter => Some(b"\r".to_vec()),
-            NamedKey::Backspace => Some(b"\x7f".to_vec()),
-            NamedKey::Tab => Some(b"\t".to_vec()),
-            NamedKey::Escape => Some(b"\x1b".to_vec()),
-            NamedKey::ArrowUp if app_cursor => Some(b"\x1bOA".to_vec()),
-            NamedKey::ArrowDown if app_cursor => Some(b"\x1bOB".to_vec()),
-            NamedKey::ArrowRight if app_cursor => Some(b"\x1bOC".to_vec()),
-            NamedKey::ArrowLeft if app_cursor => Some(b"\x1bOD".to_vec()),
-            NamedKey::Home if app_cursor => Some(b"\x1bOH".to_vec()),
-            NamedKey::End if app_cursor => Some(b"\x1bOF".to_vec()),
-            NamedKey::ArrowUp => Some(b"\x1b[A".to_vec()),
-            NamedKey::ArrowDown => Some(b"\x1b[B".to_vec()),
-            NamedKey::ArrowRight => Some(b"\x1b[C".to_vec()),
-            NamedKey::ArrowLeft => Some(b"\x1b[D".to_vec()),
-            NamedKey::Home => Some(b"\x1b[H".to_vec()),
-            NamedKey::End => Some(b"\x1b[F".to_vec()),
-            NamedKey::Delete => Some(b"\x1b[3~".to_vec()),
-            NamedKey::PageUp => Some(b"\x1b[5~".to_vec()),
-            NamedKey::PageDown => Some(b"\x1b[6~".to_vec()),
-            NamedKey::Space => {
-                if ctrl {
-                    Some(vec![0])
-                } else {
-                    Some(b" ".to_vec())
-                }
-            }
-            NamedKey::Insert => Some(b"\x1b[2~".to_vec()),
-            NamedKey::F1 => Some(b"\x1bOP".to_vec()),
-            NamedKey::F2 => Some(b"\x1bOQ".to_vec()),
-            NamedKey::F3 => Some(b"\x1bOR".to_vec()),
-            NamedKey::F4 => Some(b"\x1bOS".to_vec()),
-            NamedKey::F5 => Some(b"\x1b[15~".to_vec()),
-            NamedKey::F6 => Some(b"\x1b[17~".to_vec()),
-            NamedKey::F7 => Some(b"\x1b[18~".to_vec()),
-            NamedKey::F8 => Some(b"\x1b[19~".to_vec()),
-            NamedKey::F9 => Some(b"\x1b[20~".to_vec()),
-            NamedKey::F10 => Some(b"\x1b[21~".to_vec()),
-            NamedKey::F11 => Some(b"\x1b[23~".to_vec()),
-            NamedKey::F12 => Some(b"\x1b[24~".to_vec()),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn base64_decode(input: &[u8]) -> Result<Vec<u8>, ()> {
-    const TABLE: [u8; 256] = {
-        let mut t = [0xffu8; 256];
-        let mut i = 0u8;
-        while i < 26 {
-            t[(b'A' + i) as usize] = i;
-            t[(b'a' + i) as usize] = i + 26;
-            i += 1;
-        }
-        let mut d = 0u8;
-        while d < 10 {
-            t[(b'0' + d) as usize] = d + 52;
-            d += 1;
-        }
-        t[b'+' as usize] = 62;
-        t[b'/' as usize] = 63;
-        t
-    };
-    let mut out = Vec::with_capacity(input.len() * 3 / 4);
-    let mut buf = 0u32;
-    let mut bits = 0u32;
-    for &b in input {
-        if b == b'=' || b == b'\n' || b == b'\r' {
-            continue;
-        }
-        let val = TABLE[b as usize];
-        if val == 0xff {
-            return Err(());
-        }
-        buf = (buf << 6) | val as u32;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buf >> bits) as u8);
-            buf &= (1 << bits) - 1;
-        }
-    }
-    Ok(out)
-}
-
-fn color_to_rgb(c: u32) -> u32 {
-    crate::color::to_rgb(c)
 }
 
 fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
@@ -719,513 +487,18 @@ fn render_grid(state: &mut AppState, config: &AppConfig) -> Result<()> {
 
     let buf_w = buffer.width().get() as usize;
     let buf_h = buffer.height().get() as usize;
-
-    let base_bg = config.style.background.as_u32_rgb();
-    let base_fg = config.style.foreground.as_u32_rgb();
-
-    let grid = &state.terminal.grid;
-    let atlas = &mut state.atlas;
-
-    let has_selection = grid.selection.is_some();
-    let scrolled = grid.scroll_offset > 0;
-    let full_redraw = grid.all_dirty || has_selection || scrolled;
-    if full_redraw {
-        buffer.fill(base_bg);
-    }
-
-    let (cursor_col, cursor_row) = grid.cursor_pos();
-    let show_cursor = state.terminal.cursor_visible && grid.scroll_offset == 0;
-    let cursor_style = state.terminal.cursor_style;
-
-    let selection = grid.selection;
-
-    let cell_w = atlas.cell_width;
-    let cell_h = atlas.cell_height;
-
-    // Helper closure: compute fg/bg for a cell
-    #[inline]
-    fn cell_colors(
-        cell: &crate::grid::Cell,
-        base_fg: u32,
-        base_bg: u32,
-        is_cursor_block: bool,
-        is_selected: bool,
-    ) -> (u32, u32) {
-        let mut fg = if cell.fg == crate::grid::COLOR_DEFAULT {
-            base_fg
-        } else {
-            color_to_rgb(cell.fg)
-        };
-        let mut bg = if cell.bg == crate::grid::COLOR_DEFAULT {
-            base_bg
-        } else {
-            color_to_rgb(cell.bg)
-        };
-
-        if cell.attrs != 0 {
-            use crate::grid::*;
-            if cell.attrs & ATTR_BOLD != 0
-                && cell.fg != COLOR_DEFAULT
-                && (cell.fg & COLOR_FLAG_RGB == 0)
-                && (cell.fg as u8) < 8
-            {
-                fg = color_to_rgb(cell.fg + 8);
-            }
-            if cell.attrs & ATTR_DIM != 0 {
-                let r = ((fg >> 16) & 0xff) * 2 / 3;
-                let g = ((fg >> 8) & 0xff) * 2 / 3;
-                let b = (fg & 0xff) * 2 / 3;
-                fg = (r << 16) | (g << 8) | b;
-            }
-            if cell.attrs & ATTR_INVERSE != 0 {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-        }
-
-        let invert = is_cursor_block || is_selected;
-        if invert {
-            (bg, fg)
-        } else {
-            (fg, bg)
-        }
-    }
-
-    #[inline]
-    fn is_in_selection(
-        selection: Option<crate::grid::Selection>,
-        row: usize,
-        col: usize,
-    ) -> bool {
-        let Some(sel) = selection else {
-            return false;
-        };
-        let (sr, sc, er, ec) = if sel.start_row < sel.end_row
-            || (sel.start_row == sel.end_row && sel.start_col <= sel.end_col)
-        {
-            (sel.start_row, sel.start_col, sel.end_row, sel.end_col)
-        } else {
-            (sel.end_row, sel.end_col, sel.start_row, sel.start_col)
-        };
-        if row < sr || row > er {
-            false
-        } else if row == sr && row == er {
-            col >= sc && col <= ec
-        } else if row == sr {
-            col >= sc
-        } else if row == er {
-            col <= ec
-        } else {
-            true
-        }
-    }
-
-    // Pass 1: Draw all backgrounds
-    for row in 0..grid.rows {
-        for col in 0..grid.cols {
-            let is_cursor = show_cursor && row == cursor_row && col == cursor_col;
-
-            if !full_redraw && !is_cursor && !grid.is_cell_dirty(row, col) {
-                continue;
-            }
-
-            let cell = grid.cell_at_scroll(row, col);
-            let has_custom_bg = cell.bg != crate::grid::COLOR_DEFAULT;
-            let is_dirty = grid.is_cell_dirty(row, col);
-
-            if !full_redraw && !is_cursor && !has_custom_bg && !is_dirty {
-                continue;
-            }
-
-            let is_cursor_block =
-                is_cursor && cursor_style == crate::terminal::CursorStyle::Block;
-            let selected = is_in_selection(selection, row, col);
-            let (_, actual_bg) = cell_colors(cell, base_fg, base_bg, is_cursor_block, selected);
-
-            atlas.draw_bg(&mut buffer, buf_w, buf_h, col, row, actual_bg);
-        }
-    }
-
-    // Pass 2: Draw all glyphs, underlines, cursors
-    #[cfg(feature = "ligatures")]
-    {
-        let mut run_text = String::with_capacity(grid.cols);
-        let mut run_start: usize = 0;
-        let mut run_fg: u32 = 0;
-        let mut run_attrs: u8 = 0;
-
-        for row in 0..grid.rows {
-            let any_dirty = full_redraw || (0..grid.cols).any(|c| grid.is_cell_dirty(row, c))
-                || (show_cursor && row == cursor_row);
-            if !any_dirty {
-                continue;
-            }
-
-            run_text.clear();
-
-            let flush_run = |atlas: &mut crate::font::GlyphAtlas,
-                                  buffer: &mut [u32],
-                                  buf_w: usize, buf_h: usize,
-                                  text: &str, start_col: usize, row: usize, fg: u32| {
-                if text.is_empty() {
-                    return;
-                }
-                let shaped = atlas.shape_run(text);
-                let char_count = text.chars().count();
-                let is_ligature = shaped.len() < char_count;
-
-                if is_ligature {
-                    let mut col = start_col;
-                    for sg in &shaped {
-                        atlas.draw_shaped_glyph(buffer, buf_w, buf_h, col, row, sg.codepoint, sg.cells, fg);
-                        col += sg.cells;
-                    }
-                } else {
-                    let mut col = start_col;
-                    for ch in text.chars() {
-                        if ch as u32 > 0x20 {
-                            atlas.draw_glyph(buffer, buf_w, buf_h, col, row, ch as u32, fg);
-                        }
-                        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
-                        col += w;
-                    }
-                }
-            };
-
-            for col in 0..grid.cols {
-                let cell = grid.cell_at_scroll(row, col);
-                if cell.flags & crate::grid::FLAG_WIDE_CONT != 0 {
-                    continue;
-                }
-
-                let is_cursor_here = show_cursor && row == cursor_row && col == cursor_col;
-                let is_cursor_block =
-                    is_cursor_here && cursor_style == crate::terminal::CursorStyle::Block;
-                let selected = is_in_selection(selection, row, col);
-                let (actual_fg, _) = cell_colors(cell, base_fg, base_bg, is_cursor_block, selected);
-                let has_content = cell.ch > 0x20;
-
-                let same_run = has_content
-                    && !run_text.is_empty()
-                    && actual_fg == run_fg
-                    && cell.attrs == run_attrs;
-
-                if !same_run && !run_text.is_empty() {
-                    flush_run(atlas, &mut buffer, buf_w, buf_h, &run_text, run_start, row, run_fg);
-                    run_text.clear();
-                }
-
-                if has_content {
-                    if run_text.is_empty() {
-                        run_start = col;
-                        run_fg = actual_fg;
-                        run_attrs = cell.attrs;
-                    }
-                    if let Some(ch) = char::from_u32(cell.ch) {
-                        run_text.push(ch);
-                    }
-                }
-
-                if is_cursor_here && cursor_style != crate::terminal::CursorStyle::Block {
-                    let px_x = col * cell_w;
-                    let px_y = row * cell_h;
-                    match cursor_style {
-                        crate::terminal::CursorStyle::Bar => {
-                            let bar_w = 2.min(cell_w);
-                            for y in px_y..(px_y + cell_h).min(buf_h) {
-                                for x in px_x..(px_x + bar_w).min(buf_w) {
-                                    buffer[y * buf_w + x] = base_fg;
-                                }
-                            }
-                        }
-                        crate::terminal::CursorStyle::Underline => {
-                            let ul_h = 2.min(cell_h);
-                            let y_start = (px_y + cell_h).saturating_sub(ul_h);
-                            for y in y_start..(px_y + cell_h).min(buf_h) {
-                                for x in px_x..(px_x + cell_w).min(buf_w) {
-                                    buffer[y * buf_w + x] = base_fg;
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            if !run_text.is_empty() {
-                flush_run(atlas, &mut buffer, buf_w, buf_h, &run_text, run_start, row, run_fg);
-            }
-
-            // Still need underlines/strikethrough per-cell
-            for col in 0..grid.cols {
-                let cell = grid.cell_at_scroll(row, col);
-                if cell.attrs == 0 {
-                    continue;
-                }
-                if !full_redraw && !grid.is_cell_dirty(row, col) {
-                    continue;
-                }
-                let is_cursor_here = show_cursor && row == cursor_row && col == cursor_col;
-                let is_cursor_block =
-                    is_cursor_here && cursor_style == crate::terminal::CursorStyle::Block;
-                let selected = is_in_selection(selection, row, col);
-                let (actual_fg, _) = cell_colors(cell, base_fg, base_bg, is_cursor_block, selected);
-
-                use crate::grid::*;
-                let px_x = col * cell_w;
-                let px_y = row * cell_h;
-
-                if cell.attrs & ATTR_UNDERLINE != 0 {
-                    let ul_color = if cell.attrs & ATTR_HAS_UCOLOR != 0 {
-                        color_to_rgb(cell.underline_color)
-                    } else {
-                        actual_fg
-                    };
-                    let y_base = (px_y + cell_h).saturating_sub(2);
-                    match cell.underline_style {
-                        UnderlineStyle::Single | UnderlineStyle::None => {
-                            if y_base < buf_h {
-                                for x in px_x..(px_x + cell_w).min(buf_w) {
-                                    buffer[y_base * buf_w + x] = ul_color;
-                                }
-                            }
-                        }
-                        UnderlineStyle::Double => {
-                            let y1 = y_base;
-                            let y2 = y_base.saturating_sub(2);
-                            for &y in &[y1, y2] {
-                                if y < buf_h {
-                                    for x in px_x..(px_x + cell_w).min(buf_w) {
-                                        buffer[y * buf_w + x] = ul_color;
-                                    }
-                                }
-                            }
-                        }
-                        UnderlineStyle::Curly => {
-                            let x_start = px_x;
-                            let x_end = (px_x + cell_w).min(buf_w);
-                            let amplitude = 2.0_f32;
-                            let period = cell_w as f32;
-                            for x in x_start..x_end {
-                                let phase = (x - px_x) as f32 / period * std::f32::consts::TAU;
-                                let dy = (phase.sin() * amplitude) as i32;
-                                let y = (y_base as i32 + dy).max(0) as usize;
-                                if y < buf_h {
-                                    buffer[y * buf_w + x] = ul_color;
-                                    if y + 1 < buf_h {
-                                        buffer[(y + 1) * buf_w + x] = ul_color;
-                                    }
-                                }
-                            }
-                        }
-                        UnderlineStyle::Dotted => {
-                            if y_base < buf_h {
-                                for x in px_x..(px_x + cell_w).min(buf_w) {
-                                    if (x - px_x) % 3 == 0 {
-                                        buffer[y_base * buf_w + x] = ul_color;
-                                    }
-                                }
-                            }
-                        }
-                        UnderlineStyle::Dashed => {
-                            if y_base < buf_h {
-                                let dash = cell_w / 3;
-                                for x in px_x..(px_x + cell_w).min(buf_w) {
-                                    let offset = x - px_x;
-                                    if offset < dash || (offset >= dash * 2 && offset < dash * 3) {
-                                        buffer[y_base * buf_w + x] = ul_color;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if cell.attrs & ATTR_STRIKETHROUGH != 0 {
-                    let y = px_y + cell_h / 2;
-                    if y < buf_h {
-                        for x in px_x..(px_x + cell_w).min(buf_w) {
-                            buffer[y * buf_w + x] = actual_fg;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(not(feature = "ligatures"))]
-    {
-    for row in 0..grid.rows {
-        for col in 0..grid.cols {
-            let is_cursor = show_cursor && row == cursor_row && col == cursor_col;
-
-            if !full_redraw && !is_cursor && !grid.is_cell_dirty(row, col) {
-                continue;
-            }
-
-            let cell = grid.cell_at_scroll(row, col);
-
-            if cell.flags & crate::grid::FLAG_WIDE_CONT != 0 && !is_cursor {
-                continue;
-            }
-
-            let has_content = cell.ch > 0x20;
-            let is_cursor_block =
-                is_cursor && cursor_style == crate::terminal::CursorStyle::Block;
-            let selected = is_in_selection(selection, row, col);
-            let (actual_fg, _) = cell_colors(cell, base_fg, base_bg, is_cursor_block, selected);
-
-            if has_content {
-                atlas.draw_glyph(&mut buffer, buf_w, buf_h, col, row, cell.ch, actual_fg);
-            }
-
-            if cell.attrs != 0 {
-                use crate::grid::*;
-                let px_x = col * cell_w;
-                let px_y = row * cell_h;
-
-                if cell.attrs & ATTR_UNDERLINE != 0 {
-                    let ul_color = if cell.attrs & ATTR_HAS_UCOLOR != 0 {
-                        color_to_rgb(cell.underline_color)
-                    } else {
-                        actual_fg
-                    };
-                    let y_base = (px_y + cell_h).saturating_sub(2);
-                    match cell.underline_style {
-                        UnderlineStyle::Single | UnderlineStyle::None => {
-                            if y_base < buf_h {
-                                for x in px_x..(px_x + cell_w).min(buf_w) {
-                                    buffer[y_base * buf_w + x] = ul_color;
-                                }
-                            }
-                        }
-                        UnderlineStyle::Double => {
-                            let y1 = y_base;
-                            let y2 = y_base.saturating_sub(2);
-                            for &y in &[y1, y2] {
-                                if y < buf_h {
-                                    for x in px_x..(px_x + cell_w).min(buf_w) {
-                                        buffer[y * buf_w + x] = ul_color;
-                                    }
-                                }
-                            }
-                        }
-                        UnderlineStyle::Curly => {
-                            let x_start = px_x;
-                            let x_end = (px_x + cell_w).min(buf_w);
-                            let amplitude = 2.0_f32;
-                            let period = cell_w as f32;
-                            for x in x_start..x_end {
-                                let phase = (x - px_x) as f32 / period * std::f32::consts::TAU;
-                                let dy = (phase.sin() * amplitude) as i32;
-                                let y = (y_base as i32 + dy).max(0) as usize;
-                                if y < buf_h {
-                                    buffer[y * buf_w + x] = ul_color;
-                                    if y + 1 < buf_h {
-                                        buffer[(y + 1) * buf_w + x] = ul_color;
-                                    }
-                                }
-                            }
-                        }
-                        UnderlineStyle::Dotted => {
-                            if y_base < buf_h {
-                                for x in px_x..(px_x + cell_w).min(buf_w) {
-                                    if (x - px_x) % 3 == 0 {
-                                        buffer[y_base * buf_w + x] = ul_color;
-                                    }
-                                }
-                            }
-                        }
-                        UnderlineStyle::Dashed => {
-                            if y_base < buf_h {
-                                let dash = cell_w / 3;
-                                for x in px_x..(px_x + cell_w).min(buf_w) {
-                                    let offset = x - px_x;
-                                    if offset < dash || (offset >= dash * 2 && offset < dash * 3) {
-                                        buffer[y_base * buf_w + x] = ul_color;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if cell.attrs & ATTR_STRIKETHROUGH != 0 {
-                    let y = px_y + cell_h / 2;
-                    if y < buf_h {
-                        for x in px_x..(px_x + cell_w).min(buf_w) {
-                            buffer[y * buf_w + x] = actual_fg;
-                        }
-                    }
-                }
-            }
-
-            if is_cursor && cursor_style != crate::terminal::CursorStyle::Block {
-                let px_x = col * cell_w;
-                let px_y = row * cell_h;
-
-                match cursor_style {
-                    crate::terminal::CursorStyle::Bar => {
-                        let bar_w = 2.min(cell_w);
-                        for y in px_y..(px_y + cell_h).min(buf_h) {
-                            for x in px_x..(px_x + bar_w).min(buf_w) {
-                                buffer[y * buf_w + x] = base_fg;
-                            }
-                        }
-                    }
-                    crate::terminal::CursorStyle::Underline => {
-                        let ul_h = 2.min(cell_h);
-                        let y_start = (px_y + cell_h).saturating_sub(ul_h);
-                        for y in y_start..(px_y + cell_h).min(buf_h) {
-                            for x in px_x..(px_x + cell_w).min(buf_w) {
-                                buffer[y * buf_w + x] = base_fg;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-    }
+    render_terminal_to_buffer(
+        &mut buffer,
+        buf_w,
+        buf_h,
+        &mut state.terminal,
+        &mut state.atlas,
+        config,
+        &mut state.last_visual_state,
+    );
 
     buffer
         .present()
         .map_err(|e| anyhow::anyhow!("failed presenting frame: {e}"))?;
-    state.terminal.grid.clear_dirty();
     Ok(())
-}
-
-fn pty_watcher_thread(
-    pty_fd: i32,
-    ipc_fd: i32,
-    proxy: EventLoopProxy<AppEvent>,
-    stop: Arc<AtomicBool>,
-) {
-    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
-    use std::os::fd::BorrowedFd;
-
-    let mut fds = Vec::with_capacity(2);
-    fds.push(PollFd::new(
-        unsafe { BorrowedFd::borrow_raw(pty_fd) },
-        PollFlags::POLLIN | PollFlags::POLLHUP,
-    ));
-    if ipc_fd >= 0 {
-        fds.push(PollFd::new(
-            unsafe { BorrowedFd::borrow_raw(ipc_fd) },
-            PollFlags::POLLIN,
-        ));
-    }
-
-    while !stop.load(Ordering::Relaxed) {
-        match poll(&mut fds, PollTimeout::from(100u16)) {
-            Ok(0) => continue,
-            Ok(_) => {
-                if fds[0].revents().map_or(false, |r| r.contains(PollFlags::POLLHUP)) {
-                    let _ = proxy.send_event(AppEvent::PtyReadable);
-                    break;
-                }
-                let _ = proxy.send_event(AppEvent::PtyReadable);
-            }
-            Err(nix::errno::Errno::EINTR) => continue,
-            Err(_) => break,
-        }
-    }
 }

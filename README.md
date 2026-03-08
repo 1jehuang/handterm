@@ -22,30 +22,52 @@ Each layer of the pipeline is independently benchmarked against its theoretical 
 
 Handterm has both a CPU renderer (softbuffer) and a GPU renderer (wgpu), with a [roadmap to server/client architecture](OPTIMIZATION.md) that targets **<1 MB RSS per window** - roughly 3x less memory than foot's daemon mode.
 
-## Performance
+## Benchmarks
 
-All numbers measured on an Intel Core Ultra 7 256V, Arch Linux, niri Wayland compositor.
-Full methodology and reproduction steps in [BENCHMARKS.md](BENCHMARKS.md).
+All measurements taken on the same machine, same session, no other GPU-intensive work running.
 
-### Startup time (to window visible)
+**Test system:** Intel Core Ultra 7 256V, 15 GB RAM, Arch Linux, niri Wayland compositor, 2560x1600 @ 120 Hz.
 
-| Terminal | Time | vs handterm |
-|----------|-----:|------------:|
-| **handterm** | **28 ms** | - |
-| foot | 33 ms | 1.2x slower |
-| alacritty | 91 ms | 3.3x slower |
-| kitty | 186 ms | 6.6x slower |
-| ghostty | 641 ms | 22.9x slower |
+**Methodology:** Each terminal launched 3 times. Startup measured by polling `niri msg windows` at 2ms intervals. Memory from `/proc/<pid>/status` after 1s idle. Binary size is the on-disk ELF.
 
-### Memory (single idle window)
+### Startup time
 
-| Terminal | RSS | Threads | Shared libs |
-|----------|----:|--------:|------------:|
-| **handterm** | **23 MB** | **2** | **24** |
-| foot | 24 MB | 9 | 22 |
-| alacritty | 84 MB | 10 | 52 |
-| kitty | 117 MB | 7 | 85 |
-| ghostty | 154 MB | 25 | 163 |
+Time from `exec()` to window visible on the Wayland compositor.
+
+| Terminal | Best | Median | Worst |
+|----------|-----:|-------:|------:|
+| **handterm** | **28 ms** | **30 ms** | **31 ms** |
+| foot | 33 ms | 41 ms | 42 ms |
+| alacritty | 91 ms | 128 ms | 145 ms |
+| kitty | 186 ms | 247 ms | 247 ms |
+| ghostty | 641 ms | 707 ms | 807 ms |
+
+handterm starts ~1.4x faster than foot, ~4x faster than alacritty, ~8x faster than kitty, and ~24x faster than ghostty.
+
+### Memory usage (single idle window)
+
+| Terminal | RSS | vs handterm |
+|----------|----:|------------:|
+| **handterm** | **23 MB** | 1.0x |
+| foot | 24 MB | 1.04x |
+| footclient | 1.6 MB\* | 0.07x |
+| alacritty | 84 MB | 3.7x |
+| kitty | 117 MB | 5.1x |
+| ghostty | 154 MB | 6.7x |
+
+\*footclient shares a server process (25 MB). Total for first window is ~27 MB; each additional adds ~1.6 MB.
+
+#### Memory breakdown
+
+| Component | handterm | foot | alacritty | kitty | ghostty |
+|-----------|--------:|-----:|----------:|------:|--------:|
+| Framebuffers (SHM) | ~20 MB | ~20 MB | - | - | - |
+| GPU context | - | - | ~50 MB | ~80 MB | ~100 MB |
+| Font cache + heap | ~1 MB | ~1 MB | ~5 MB | ~10 MB | ~10 MB |
+| Binary code pages | ~3 MB | ~0.5 MB | ~9 MB | ~18 MB | ~26 MB |
+| Shared libs | varies | varies | varies | varies | varies |
+
+CPU renderers (handterm, foot) pay for framebuffers in RSS. GPU renderers pay for driver context, shader compilation, and texture atlases.
 
 ### Binary and install size
 
@@ -57,7 +79,83 @@ Full methodology and reproduction steps in [BENCHMARKS.md](BENCHMARKS.md).
 | kitty | 88 KB\* | ~18 MB | C + Python |
 | ghostty | 26 MB | ~29 MB | Zig |
 
-\*kitty's binary is a Python launcher; the real code lives in `/usr/lib/kitty/` (18 MB).
+\*kitty's binary is a Python launcher; the real code lives in `/usr/lib/kitty/` (18 MB of `.so` files and Python).
+
+### Thread count
+
+| Terminal | Threads |
+|----------|---------:|
+| **handterm** | **2** |
+| kitty | 7 |
+| foot | 9 |
+| alacritty | 10 |
+| ghostty | 25 |
+
+### Shared library dependencies
+
+Number of unique `.so` files mapped into the process.
+
+| Terminal | Shared libs |
+|----------|------------:|
+| foot | 22 |
+| **handterm** | **24** |
+| alacritty | 52 |
+| kitty | 85 |
+| ghostty | 163 |
+
+### Virtual memory (VSZ)
+
+Total virtual address space mapped (not all resident).
+
+| Terminal | VSZ |
+|----------|----:|
+| **handterm** | **119 MB** |
+| kitty | 463 MB |
+| alacritty | 726 MB |
+| foot | 1,529 MB |
+| ghostty | 2,000 MB |
+
+foot's high VSZ is from mmap'd font files and Wayland protocol buffers; most is not resident. GPU terminals reserve large virtual ranges for driver allocations.
+
+### Daemon mode (multi-window efficiency)
+
+| Setup | First window | Each additional |
+|-------|-------------:|----------------:|
+| foot standalone | 24 MB | +24 MB |
+| foot --server + footclient | 25 MB (server) + 1.6 MB | +1.6 MB |
+| **handterm** (planned server mode) | ~13 MB (server) | **<1 MB** |
+
+handterm's planned daemon mode (see [OPTIMIZATION.md](OPTIMIZATION.md)) targets <1 MB per additional window by sharing the font cache, GPU context, and grid memory across a thin client/server split.
+
+| Windows | foot standalone | foot daemon | handterm daemon (target) |
+|--------:|---------------:|------------:|-------------------------:|
+| 1 | 24 MB | 27 MB | 13 MB |
+| 5 | 120 MB | 33 MB | 17 MB |
+| 10 | 240 MB | 41 MB | 22 MB |
+
+### Feature comparison
+
+| Feature | handterm | foot | alacritty | kitty | ghostty |
+|---------|:--------:|:----:|:---------:|:-----:|:-------:|
+| GPU rendering | ✅ | - | ✅ | ✅ | ✅ |
+| CPU rendering | ✅ | ✅ | - | - | - |
+| True color (24-bit) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Ligatures | ✅ | ✅ | - | ✅ | ✅ |
+| Sixel graphics | - | ✅ | - | - | ✅ |
+| Kitty image protocol | - | - | - | ✅ | ✅ |
+| Daemon mode | planned | ✅ | - | - | - |
+| Tabs | - | - | - | ✅ | ✅ |
+| Splits/panes | - | - | - | ✅ | ✅ |
+| Bracketed paste | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Mouse reporting | ✅ | ✅ | ✅ | ✅ | ✅ |
+| OSC 52 clipboard | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Kitty keyboard protocol | partial | ✅ | - | ✅ | ✅ |
+| IPC / remote control | ✅ | - | - | ✅ | - |
+| X11 support | - | - | ✅ | ✅ | ✅ |
+| macOS support | - | - | ✅ | ✅ | ✅ |
+| Font shaping engine | rustybuzz | harfbuzz | built-in | harfbuzz | harfbuzz |
+| Config format | TOML | INI | TOML | conf | custom |
+| Scrollback (default) | 10,000 | 10,000 | 10,000 | 2,000 | 10,000 |
 
 ### Pipeline throughput
 
@@ -66,12 +164,45 @@ From `handterm bench`. Internal processing speed, not rendering.
 | Stage | ASCII | SGR color | Mixed |
 |-------|------:|----------:|------:|
 | Theoretical floor (memcpy) | 5,944 MB/s | - | - |
+| Theoretical floor (byte scan) | 2,088 MB/s | - | - |
 | Parser (state machine) | 279 MB/s | 362 MB/s | 339 MB/s |
-| Full pipeline (parser + grid + state) | 330 MB/s | 174 MB/s | 209 MB/s |
+| Grid write (parser + cells) | 363 MB/s | 328 MB/s | 259 MB/s |
+| Full pipeline | 330 MB/s | 174 MB/s | 209 MB/s |
 
-At 120x72 (HiDPI fullscreen), the pipeline can repaint the entire screen **2,507 times per second**.
+At 120x72 (HiDPI fullscreen), the pipeline can repaint the entire screen **2,507 times per second**. A 120 Hz display needs 1.
 
-See [BENCHMARKS.md](BENCHMARKS.md) for the complete comparison: feature matrix, daemon mode projections, codebase size, virtual memory, and memory breakdowns.
+### Codebase size
+
+| Terminal | Lines of code | Language | Dependencies |
+|----------|-------------:|:--------:|:------------:|
+| **handterm** | **~8,300** | Rust | 16 direct, ~290 total |
+| foot | ~30,000 | C | system libs only |
+| alacritty | ~30,000 | Rust | ~100+ crates |
+| kitty | ~60,000 | C + Python | system libs + Python stdlib |
+| ghostty | ~100,000+ | Zig | vendored deps |
+
+### How to reproduce
+
+```bash
+# Startup time (requires niri compositor)
+before=$(niri msg windows | grep -c "Window ID")
+start=$(date +%s%N)
+<terminal> &
+pid=$!
+while [ $(niri msg windows | grep -c "Window ID") -eq $before ]; do sleep 0.002; done
+end=$(date +%s%N)
+echo "$(( (end - start) / 1000000 )) ms"
+kill $pid
+
+# Memory
+<terminal> &
+pid=$!
+sleep 1
+grep VmRSS /proc/$pid/status
+
+# Pipeline throughput
+handterm bench
+```
 
 ## Features
 

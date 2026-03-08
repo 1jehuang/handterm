@@ -1,9 +1,15 @@
 use crate::config::AppConfig;
-use crate::font::GlyphAtlas;
-use crate::ipc::{IpcAction, IpcServer, Request, Response};
+use crate::font::{GlyphAtlas, GlyphFormat};
+use crate::frontend::{
+    FrameScheduler, VisualState, base64_decode, copy_to_clipboard, handle_ipc_request,
+    key_to_bytes, open_url, paste_from_clipboard, scroll_to_bytes, spawn_pty_watcher,
+};
+use crate::ipc::{IpcAction, IpcServer};
 use crate::pty::PtyChild;
 use crate::terminal::Terminal;
+use crate::visual::{is_in_selection, resolve_cell_colors, resolve_underline_color};
 use anyhow::{Context, Result};
+use std::time::{Duration, Instant};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use wgpu::util::DeviceExt;
@@ -11,19 +17,31 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, Size};
 use winit::event::{ElementState, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::{Key, NamedKey, PhysicalKey};
+use winit::keyboard::{Key, NamedKey};
+use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Window, WindowAttributes, WindowId};
 
 #[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 struct CellInstance {
     pos: [f32; 2],
+    size: [f32; 2],
     uv_offset: [f32; 2],
     uv_size: [f32; 2],
     fg: [f32; 4],
     bg: [f32; 4],
+    deco: [f32; 4],
     flags: u32,
-    _pad: [u32; 3],
+    _pad: [u32; 2],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+struct ImageInstance {
+    pos: [f32; 2],
+    size: [f32; 2],
+    uv_offset: [f32; 2],
+    uv_size: [f32; 2],
 }
 
 #[repr(C)]
@@ -45,20 +63,49 @@ const FLAG_CURLY_UL: u32 = 8;
 const FLAG_DOUBLE_UL: u32 = 16;
 const FLAG_DOTTED_UL: u32 = 32;
 const FLAG_DASHED_UL: u32 = 64;
+const FLAG_COLOR_GLYPH: u32 = 128;
+const FLAG_CURSOR_BAR: u32 = 256;
+const FLAG_CURSOR_UNDERLINE: u32 = 512;
 
 struct GpuGlyphEntry {
     x: u32,
     y: u32,
     width: u32,
     height: u32,
-    bearing_x: i32,
-    bearing_y: i32,
+    is_color: bool,
+}
+
+struct GpuImageEntry {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CellInfo {
+    row: usize,
+    col: usize,
+    ch: u32,
+    cells: usize,
+    cell: crate::grid::Cell,
+    selected: bool,
+    is_cursor_block: bool,
+    cursor_style: Option<crate::terminal::CursorStyle>,
+}
+
+#[derive(Debug, Default)]
+struct FramePlan {
+    cell_infos: Vec<CellInfo>,
+    image_placements: Vec<crate::terminal::KittyPlacement>,
 }
 
 #[derive(Debug, Clone)]
 enum GpuAppEvent {
     PtyReadable,
 }
+
+const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 
 pub fn run(config: AppConfig) -> Result<()> {
     let event_loop = EventLoop::<GpuAppEvent>::with_user_event()
@@ -87,6 +134,7 @@ struct GpuApp {
     proxy: EventLoopProxy<GpuAppEvent>,
     watcher_started: bool,
     watcher_stop: Option<Arc<AtomicBool>>,
+    scheduler: FrameScheduler,
 }
 
 struct GpuState {
@@ -96,12 +144,17 @@ struct GpuState {
     queue: wgpu::Queue,
     surface_config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    image_pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniform_buffer: wgpu::Buffer,
-    instance_buffer: wgpu::Buffer,
+    bg_instance_buffer: wgpu::Buffer,
+    fg_instance_buffer: wgpu::Buffer,
+    image_instance_buffer: wgpu::Buffer,
     max_instances: usize,
+    max_image_instances: usize,
     atlas_texture: wgpu::Texture,
     glyph_map: std::collections::HashMap<u32, GpuGlyphEntry>,
+    image_map: std::collections::HashMap<u32, GpuImageEntry>,
     atlas_cursor_x: u32,
     atlas_cursor_y: u32,
     atlas_row_height: u32,
@@ -114,6 +167,8 @@ struct GpuState {
     mouse_col: usize,
     mouse_row: usize,
     selecting: bool,
+    last_visual_state: Option<VisualState>,
+    last_kitty_generation: u64,
 }
 
 impl GpuApp {
@@ -125,6 +180,7 @@ impl GpuApp {
             proxy,
             watcher_started: false,
             watcher_stop: None,
+            scheduler: FrameScheduler::default(),
         }
     }
 
@@ -141,12 +197,14 @@ impl GpuApp {
         self.watcher_stop = Some(stop.clone());
         self.watcher_started = true;
 
-        std::thread::Builder::new()
-            .name("pty-watcher-gpu".into())
-            .spawn(move || {
-                gpu_pty_watcher_thread(pty_fd, ipc_fd, proxy, stop);
-            })
-            .expect("failed to spawn pty watcher thread");
+        spawn_pty_watcher(
+            "pty-watcher-gpu",
+            pty_fd,
+            ipc_fd,
+            proxy,
+            GpuAppEvent::PtyReadable,
+            stop,
+        );
     }
 
     fn create_window_attributes(&self, atlas: &GlyphAtlas) -> WindowAttributes {
@@ -155,7 +213,8 @@ impl GpuApp {
 
         Window::default_attributes()
             .with_title("handterm [gpu]")
-            .with_transparent(self.config.style.background_opacity < 1.0)
+            .with_name("handterm", "handterm")
+            .with_transparent(false)
             .with_inner_size(Size::Logical(LogicalSize::new(width, height)))
     }
 }
@@ -170,11 +229,13 @@ struct Uniforms {
 
 struct CellInstance {
     @location(0) pos: vec2<f32>,
-    @location(1) uv_offset: vec2<f32>,
-    @location(2) uv_size: vec2<f32>,
-    @location(3) fg: vec4<f32>,
-    @location(4) bg: vec4<f32>,
-    @location(5) flags: u32,
+    @location(1) size: vec2<f32>,
+    @location(2) uv_offset: vec2<f32>,
+    @location(3) uv_size: vec2<f32>,
+    @location(4) fg: vec4<f32>,
+    @location(5) bg: vec4<f32>,
+    @location(6) deco: vec4<f32>,
+    @location(7) flags: u32,
 };
 
 struct VertexOutput {
@@ -182,9 +243,10 @@ struct VertexOutput {
     @location(0) uv: vec2<f32>,
     @location(1) fg: vec4<f32>,
     @location(2) bg: vec4<f32>,
-    @location(3) flags: u32,
-    @location(4) local_pos: vec2<f32>,
-    @location(5) cell_size: vec2<f32>,
+    @location(3) deco: vec4<f32>,
+    @location(4) flags: u32,
+    @location(5) local_pos: vec2<f32>,
+    @location(6) cell_size: vec2<f32>,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -199,7 +261,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, instance: CellInstance) -> VertexOutp
     );
     let corner = corners[vi];
 
-    let pixel_pos = instance.pos + corner * uniforms.cell_size;
+    let pixel_pos = instance.pos + corner * instance.size;
     let ndc = vec2<f32>(
         pixel_pos.x / uniforms.screen_size.x * 2.0 - 1.0,
         1.0 - pixel_pos.y / uniforms.screen_size.y * 2.0,
@@ -210,9 +272,10 @@ fn vs_main(@builtin(vertex_index) vi: u32, instance: CellInstance) -> VertexOutp
     out.uv = (instance.uv_offset + corner * instance.uv_size) / uniforms.atlas_size;
     out.fg = instance.fg;
     out.bg = instance.bg;
+    out.deco = instance.deco;
     out.flags = instance.flags;
-    out.local_pos = corner * uniforms.cell_size;
-    out.cell_size = uniforms.cell_size;
+    out.local_pos = corner * instance.size;
+    out.cell_size = instance.size;
     return out;
 }
 
@@ -221,8 +284,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var color = in.bg;
 
     if (in.flags & 1u) != 0u {
-        let alpha = textureSample(atlas_tex, atlas_sampler, in.uv).r;
-        color = mix(color, in.fg, alpha);
+        let glyph = textureSample(atlas_tex, atlas_sampler, in.uv);
+        if (in.flags & 128u) != 0u {
+            color = glyph + color * (1.0 - glyph.a);
+        } else {
+            color = mix(color, in.fg, glyph.a);
+        }
     }
 
     let y = in.local_pos.y;
@@ -234,7 +301,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (in.flags & 2u) != 0u {
         let ul_y = h - 2.0;
         if y >= ul_y && y < ul_y + 1.0 {
-            color = in.fg;
+            color = in.deco;
         }
     }
     if (in.flags & 8u) != 0u {
@@ -242,20 +309,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let phase = x / w * 6.28318530718;
         let wave = sin(phase) * 2.0;
         if abs(y - (ul_y + wave)) < 1.5 {
-            color = in.fg;
+            color = in.deco;
         }
     }
     if (in.flags & 16u) != 0u {
         let ul_y1 = h - 2.0;
         let ul_y2 = h - 4.0;
         if (y >= ul_y1 && y < ul_y1 + 1.0) || (y >= ul_y2 && y < ul_y2 + 1.0) {
-            color = in.fg;
+            color = in.deco;
         }
     }
     if (in.flags & 32u) != 0u {
         let ul_y = h - 2.0;
         if y >= ul_y && y < ul_y + 1.0 && u32(x) % 3u == 0u {
-            color = in.fg;
+            color = in.deco;
         }
     }
     if (in.flags & 64u) != 0u {
@@ -263,7 +330,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let dash = u32(w) / 3u;
         let offset = u32(x);
         if y >= ul_y && y < ul_y + 1.0 && (offset < dash || (offset >= dash * 2u && offset < dash * 3u)) {
-            color = in.fg;
+            color = in.deco;
         }
     }
 
@@ -275,7 +342,66 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
+    if (in.flags & 256u) != 0u && x < min(2.0, w) {
+        color = in.fg;
+    }
+    if (in.flags & 512u) != 0u {
+        let cursor_y = h - min(2.0, h);
+        if y >= cursor_y {
+            color = in.fg;
+        }
+    }
+
     return color;
+}
+"#;
+
+const IMAGE_SHADER: &str = r#"
+struct Uniforms {
+    screen_size: vec2<f32>,
+    cell_size: vec2<f32>,
+    atlas_size: vec2<f32>,
+    _pad: vec2<f32>,
+};
+
+struct ImageInstance {
+    @location(0) pos: vec2<f32>,
+    @location(1) size: vec2<f32>,
+    @location(2) uv_offset: vec2<f32>,
+    @location(3) uv_size: vec2<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+@group(0) @binding(1) var atlas_tex: texture_2d<f32>;
+@group(0) @binding(2) var atlas_sampler: sampler;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32, instance: ImageInstance) -> VertexOutput {
+    let corners = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
+    );
+    let corner = corners[vi];
+    let pixel_pos = instance.pos + corner * instance.size;
+    let ndc = vec2<f32>(
+        pixel_pos.x / uniforms.screen_size.x * 2.0 - 1.0,
+        1.0 - pixel_pos.y / uniforms.screen_size.y * 2.0,
+    );
+
+    var out: VertexOutput;
+    out.clip_position = vec4<f32>(ndc, 0.0, 1.0);
+    out.uv = (instance.uv_offset + corner * instance.uv_size) / uniforms.atlas_size;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return textureSample(atlas_tex, atlas_sampler, in.uv);
 }
 "#;
 
@@ -352,15 +478,16 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
+            format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
 
         let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -377,9 +504,22 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
         });
 
         let max_instances = (cols as usize) * (rows as usize) * 2;
-        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("instances"),
+        let bg_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bg_instances"),
             size: (max_instances * std::mem::size_of::<CellInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let fg_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fg_instances"),
+            size: (max_instances * std::mem::size_of::<CellInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let max_image_instances = (cols as usize) * (rows as usize);
+        let image_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("image_instances"),
+            size: (max_image_instances * std::mem::size_of::<ImageInstance>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -440,6 +580,10 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
             label: Some("shader"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
+        let image_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("image_shader"),
+            source: wgpu::ShaderSource::Wgsl(IMAGE_SHADER.into()),
+        });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipeline_layout"),
@@ -469,16 +613,26 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                 wgpu::VertexAttribute {
                     offset: 24,
                     shader_location: 3,
-                    format: wgpu::VertexFormat::Float32x4,
+                    format: wgpu::VertexFormat::Float32x2,
                 },
                 wgpu::VertexAttribute {
-                    offset: 40,
+                    offset: 32,
                     shader_location: 4,
                     format: wgpu::VertexFormat::Float32x4,
                 },
                 wgpu::VertexAttribute {
-                    offset: 56,
+                    offset: 48,
                     shader_location: 5,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 64,
+                    shader_location: 6,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 80,
+                    shader_location: 7,
                     format: wgpu::VertexFormat::Uint32,
                 },
             ],
@@ -513,6 +667,62 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
             cache: None,
         });
 
+        let image_instance_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<ImageInstance>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 8,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 16,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 24,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+            ],
+        };
+
+        let image_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("image_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &image_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[image_instance_layout],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &image_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let terminal = Terminal::new(cols, rows);
         let pty = PtyChild::spawn_default_shell(cols, rows).expect("pty should spawn");
 
@@ -523,12 +733,17 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
             queue,
             surface_config,
             pipeline,
+            image_pipeline,
             bind_group,
             uniform_buffer,
-            instance_buffer,
+            bg_instance_buffer,
+            fg_instance_buffer,
+            image_instance_buffer,
             max_instances,
+            max_image_instances,
             atlas_texture,
             glyph_map: std::collections::HashMap::with_capacity(256),
+            image_map: std::collections::HashMap::with_capacity(32),
             atlas_cursor_x: 0,
             atlas_cursor_y: 0,
             atlas_row_height: 0,
@@ -541,6 +756,8 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
             mouse_col: 0,
             mouse_row: 0,
             selecting: false,
+            last_visual_state: None,
+            last_kitty_generation: 0,
         });
 
         if let Some(s) = &self.state {
@@ -553,29 +770,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: GpuAppEvent) {
         match event {
             GpuAppEvent::PtyReadable => {
-                if let Some(state) = &mut self.state {
-                    let n = drain_pty(state);
-                    if n > 0 {
-                        state.window.request_redraw();
-                    }
-                }
-                if let (Some(ipc), Some(state)) = (&mut self.ipc, &mut self.state) {
-                    let actions = ipc.poll(&mut |req| handle_ipc_request(req, state));
-                    for action in actions {
-                        match action {
-                            IpcAction::SendText(bytes) => {
-                                let _ = state.pty.write_all(&bytes);
-                            }
-                            IpcAction::SetTitle(title) => {
-                                state.window.set_title(&title);
-                            }
-                            IpcAction::Close => {
-                                _event_loop.exit();
-                            }
-                            IpcAction::None => {}
-                        }
-                    }
-                }
+                self.scheduler.mark_io_ready(Instant::now(), FRAME_INTERVAL);
             }
         }
     }
@@ -613,10 +808,30 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                     let needed = (new_cols as usize) * (new_rows as usize) * 2;
                     if needed > state.max_instances {
                         state.max_instances = needed;
-                        state.instance_buffer =
+                        state.bg_instance_buffer =
                             state.device.create_buffer(&wgpu::BufferDescriptor {
-                                label: Some("instances"),
+                                label: Some("bg_instances"),
                                 size: (needed * std::mem::size_of::<CellInstance>()) as u64,
+                                usage: wgpu::BufferUsages::VERTEX
+                                    | wgpu::BufferUsages::COPY_DST,
+                                mapped_at_creation: false,
+                            });
+                        state.fg_instance_buffer =
+                            state.device.create_buffer(&wgpu::BufferDescriptor {
+                                label: Some("fg_instances"),
+                                size: (needed * std::mem::size_of::<CellInstance>()) as u64,
+                                usage: wgpu::BufferUsages::VERTEX
+                                    | wgpu::BufferUsages::COPY_DST,
+                                mapped_at_creation: false,
+                            });
+                    }
+                    let needed_images = (new_cols as usize) * (new_rows as usize);
+                    if needed_images > state.max_image_instances {
+                        state.max_image_instances = needed_images;
+                        state.image_instance_buffer =
+                            state.device.create_buffer(&wgpu::BufferDescriptor {
+                                label: Some("image_instances"),
+                                size: (needed_images * std::mem::size_of::<ImageInstance>()) as u64,
                                 usage: wgpu::BufferUsages::VERTEX
                                     | wgpu::BufferUsages::COPY_DST,
                                 mapped_at_creation: false,
@@ -651,35 +866,20 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                         if let Key::Character(s) = &event.logical_key {
                             let ch = s.chars().next().unwrap_or('\0').to_ascii_lowercase();
                             if ch == 'v' {
-                                if let Ok(output) = std::process::Command::new("wl-paste")
-                                    .arg("--no-newline")
-                                    .output()
-                                {
-                                    let text = output.stdout;
-                                    if !text.is_empty() {
-                                        if state.terminal.bracketed_paste_mode() {
-                                            let _ = state.pty.write_all(b"\x1b[200~");
-                                            let _ = state.pty.write_all(&text);
-                                            let _ = state.pty.write_all(b"\x1b[201~");
-                                        } else {
-                                            let _ = state.pty.write_all(&text);
-                                        }
+                                if let Some(text) = paste_from_clipboard() {
+                                    if state.terminal.bracketed_paste_mode() {
+                                        let _ = state.pty.write_all(b"\x1b[200~");
+                                        let _ = state.pty.write_all(&text);
+                                        let _ = state.pty.write_all(b"\x1b[201~");
+                                    } else {
+                                        let _ = state.pty.write_all(&text);
                                     }
                                 }
                                 return;
                             } else if ch == 'c' {
                                 let text = state.terminal.grid.get_selection_text();
                                 if !text.is_empty() {
-                                    let mut child = std::process::Command::new("wl-copy")
-                                        .stdin(std::process::Stdio::piped())
-                                        .spawn()
-                                        .ok();
-                                    if let Some(ref mut c) = child {
-                                        if let Some(ref mut stdin) = c.stdin {
-                                            let _ =
-                                                std::io::Write::write_all(stdin, text.as_bytes());
-                                        }
-                                    }
+                                    copy_to_clipboard(text.as_bytes());
                                 }
                                 return;
                             }
@@ -692,24 +892,21 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                             let half = state.terminal.rows as usize / 2;
                             state.terminal.grid.scroll_offset =
                                 (state.terminal.grid.scroll_offset + half).min(max);
-                            state.window.request_redraw();
+                            self.scheduler.mark_redraw_needed();
                             return;
                         }
                         if let Key::Named(NamedKey::PageDown) = &event.logical_key {
                             let half = state.terminal.rows as usize / 2;
                             state.terminal.grid.scroll_offset =
                                 state.terminal.grid.scroll_offset.saturating_sub(half);
-                            state.window.request_redraw();
+                            self.scheduler.mark_redraw_needed();
                             return;
                         }
                     }
 
-                    if let Some(bytes) = key_to_bytes(
-                        &event.logical_key,
-                        &event.physical_key,
-                        state.terminal.application_cursor_keys,
-                        ctrl,
-                    ) {
+                    if let Some(bytes) =
+                        key_to_bytes(&event.logical_key, state.terminal.application_cursor_keys, ctrl)
+                    {
                         let _ = state.pty.write_all(&bytes);
                         if state.terminal.grid.scroll_offset > 0 {
                             state.terminal.grid.scroll_offset = 0;
@@ -730,7 +927,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                         sel.end_col = state.mouse_col;
                         sel.end_row = state.mouse_row;
                     }
-                    state.window.request_redraw();
+                    self.scheduler.mark_redraw_needed();
                 }
             }
             WindowEvent::MouseInput {
@@ -758,9 +955,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                                 if let Some(url) =
                                     state.terminal.grid.hyperlink_url(cell.hyperlink_id)
                                 {
-                                    let _ = std::process::Command::new("xdg-open")
-                                        .arg(url)
-                                        .spawn();
+                                    open_url(url);
                                     return;
                                 }
                             }
@@ -772,20 +967,12 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                             end_row: state.mouse_row,
                         });
                         state.selecting = true;
-                        state.window.request_redraw();
+                        self.scheduler.mark_redraw_needed();
                     } else {
                         state.selecting = false;
                         let text = state.terminal.grid.get_selection_text();
                         if !text.is_empty() {
-                            let mut child = std::process::Command::new("wl-copy")
-                                .stdin(std::process::Stdio::piped())
-                                .spawn()
-                                .ok();
-                            if let Some(ref mut c) = child {
-                                if let Some(ref mut stdin) = c.stdin {
-                                    let _ = std::io::Write::write_all(stdin, text.as_bytes());
-                                }
-                            }
+                            copy_to_clipboard(text.as_bytes());
                         }
                     }
                 }
@@ -819,6 +1006,11 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                             let _ = state.pty.write_all(&bytes);
                         }
                     }
+                } else if state.terminal.alternate_scroll_mode() && state.terminal.in_alt_screen() {
+                    let bytes = scroll_to_bytes(up, state.terminal.application_cursor_keys);
+                    for _ in 0..lines {
+                        let _ = state.pty.write_all(&bytes);
+                    }
                 } else {
                     let max = state.terminal.grid.scrollback_len();
                     if up {
@@ -831,7 +1023,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                             .scroll_offset
                             .saturating_sub(lines * 3);
                     }
-                    state.window.request_redraw();
+                    self.scheduler.mark_redraw_needed();
                 }
             }
             WindowEvent::Focused(focused) => {
@@ -844,7 +1036,6 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                 }
             }
             WindowEvent::RedrawRequested => {
-                drain_pty(state);
                 render_gpu(state, &self.config);
             }
             _ => {}
@@ -852,7 +1043,18 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(state) = &self.state {
+        if let Some(state) = &mut self.state {
+            let decision = self.scheduler.prepare_redraw(Instant::now(), || {
+                process_pending_io(state, self.ipc.as_mut(), event_loop)
+            });
+            if let Some(deadline) = decision.wait_until {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+            } else {
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
+            if decision.request_redraw {
+                state.window.request_redraw();
+            }
             if state.pty_closed {
                 if let Some(stop) = &self.watcher_stop {
                     stop.store(true, Ordering::Relaxed);
@@ -863,25 +1065,32 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
     }
 }
 
-fn handle_ipc_request(req: &Request, state: &mut GpuState) -> (Response, IpcAction) {
-    match req.cmd.as_str() {
-        "get-text" => {
-            let text = state.terminal.grid.get_all_text();
-            (Response::ok(serde_json::json!({ "text": text })), IpcAction::None)
-        }
-        "send-text" => {
-            let text = req.args.as_object()
-                .and_then(|o| o.get("text"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if text.is_empty() {
-                (Response::err("missing 'text' argument"), IpcAction::None)
-            } else {
-                (Response::ok_empty(), IpcAction::SendText(text.as_bytes().to_vec()))
+fn process_pending_io(
+    state: &mut GpuState,
+    ipc: Option<&mut IpcServer>,
+    event_loop: &ActiveEventLoop,
+) -> bool {
+    let needs_redraw = drain_pty(state) > 0;
+
+    if let Some(ipc) = ipc {
+        let actions = ipc.poll(&mut |req| handle_ipc_request(&mut state.terminal, req));
+        for action in actions {
+            match action {
+                IpcAction::SendText(bytes) => {
+                    let _ = state.pty.write_all(&bytes);
+                }
+                IpcAction::SetTitle(title) => {
+                    state.window.set_title(&title);
+                }
+                IpcAction::Close => {
+                    event_loop.exit();
+                }
+                IpcAction::None => {}
             }
         }
-        _ => (Response::err(format!("unknown command: {}", req.cmd)), IpcAction::None),
     }
+
+    needs_redraw
 }
 
 fn drain_pty(state: &mut GpuState) -> usize {
@@ -911,22 +1120,61 @@ fn drain_pty(state: &mut GpuState) -> usize {
         }
         if let Some(b64_data) = state.terminal.take_osc52_clipboard() {
             if let Ok(decoded) = base64_decode(&b64_data) {
-                let mut child = std::process::Command::new("wl-copy")
-                    .stdin(std::process::Stdio::piped())
-                    .spawn()
-                    .ok();
-                if let Some(ref mut c) = child {
-                    if let Some(ref mut stdin) = c.stdin {
-                        let _ = std::io::Write::write_all(stdin, &decoded);
-                    }
-                }
+                copy_to_clipboard(&decoded);
             }
         }
     }
     total
 }
 
-fn ensure_glyph_in_atlas(state: &mut GpuState, ch: u32) -> Option<&GpuGlyphEntry> {
+fn build_gpu_glyph_tile(
+    glyph: &crate::font::GlyphData<'_>,
+    cells: usize,
+    cell_width: usize,
+    cell_height: usize,
+    baseline: usize,
+) -> (Vec<u8>, u32, u32) {
+    let tile_width = (cells.max(1) * cell_width) as u32;
+    let tile_height = cell_height as u32;
+    let mut tile = vec![0u8; tile_width as usize * tile_height as usize * 4];
+    let origin_y = cell_height as i32 - baseline as i32;
+    let glyph_top = origin_y - glyph.bearing_y;
+    let glyph_left = glyph.bearing_x;
+
+    for gy in 0..glyph.height {
+        let dst_y = glyph_top + gy as i32;
+        if !(0..tile_height as i32).contains(&dst_y) {
+            continue;
+        }
+        let dst_row = dst_y as usize * tile_width as usize * 4;
+
+        for gx in 0..glyph.width {
+            let dst_x = glyph_left + gx as i32;
+            if !(0..tile_width as i32).contains(&dst_x) {
+                continue;
+            }
+            let dst_offset = dst_row + dst_x as usize * 4;
+            match glyph.format {
+                GlyphFormat::Alpha => {
+                    let alpha = glyph.pixels[gy * glyph.width + gx];
+                    tile[dst_offset] = 0xff;
+                    tile[dst_offset + 1] = 0xff;
+                    tile[dst_offset + 2] = 0xff;
+                    tile[dst_offset + 3] = alpha;
+                }
+                GlyphFormat::Rgba => {
+                    let src_offset = (gy * glyph.width + gx) * 4;
+                    tile[dst_offset..dst_offset + 4]
+                        .copy_from_slice(&glyph.pixels[src_offset..src_offset + 4]);
+                }
+            }
+        }
+    }
+
+    (tile, tile_width, tile_height)
+}
+
+fn ensure_glyph_in_atlas(state: &mut GpuState, ch: u32, cells: usize) -> Option<&GpuGlyphEntry> {
     if state.glyph_map.contains_key(&ch) {
         return state.glyph_map.get(&ch);
     }
@@ -945,20 +1193,28 @@ fn ensure_glyph_in_atlas(state: &mut GpuState, ch: u32) -> Option<&GpuGlyphEntry
                 y: 0,
                 width: 0,
                 height: 0,
-                bearing_x: glyph.bearing_x,
-                bearing_y: glyph.bearing_y,
+                is_color: glyph.format == GlyphFormat::Rgba,
             },
         );
         return state.glyph_map.get(&ch);
     }
 
-    if state.atlas_cursor_x + glyph.width as u32 > ATLAS_WIDTH {
+    let is_color = glyph.format == GlyphFormat::Rgba;
+    let (upload, upload_width, upload_height) = build_gpu_glyph_tile(
+        &glyph,
+        cells,
+        state.atlas.cell_width,
+        state.atlas.cell_height,
+        state.atlas.baseline,
+    );
+
+    if state.atlas_cursor_x + upload_width > ATLAS_WIDTH {
         state.atlas_cursor_x = 0;
         state.atlas_cursor_y += state.atlas_row_height;
         state.atlas_row_height = 0;
     }
 
-    if state.atlas_cursor_y + glyph.height as u32 > ATLAS_HEIGHT {
+    if state.atlas_cursor_y + upload_height > ATLAS_HEIGHT {
         return None;
     }
 
@@ -973,15 +1229,15 @@ fn ensure_glyph_in_atlas(state: &mut GpuState, ch: u32) -> Option<&GpuGlyphEntry
             },
             aspect: wgpu::TextureAspect::All,
         },
-        &glyph.bitmap,
+        &upload,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(glyph.width as u32),
+            bytes_per_row: Some(upload_width * 4),
             rows_per_image: None,
         },
         wgpu::Extent3d {
-            width: glyph.width as u32,
-            height: glyph.height as u32,
+            width: upload_width,
+            height: upload_height,
             depth_or_array_layers: 1,
         },
     );
@@ -989,21 +1245,85 @@ fn ensure_glyph_in_atlas(state: &mut GpuState, ch: u32) -> Option<&GpuGlyphEntry
     let entry = GpuGlyphEntry {
         x: state.atlas_cursor_x,
         y: state.atlas_cursor_y,
-        width: glyph.width as u32,
-        height: glyph.height as u32,
-        bearing_x: glyph.bearing_x,
-        bearing_y: glyph.bearing_y,
+        width: upload_width,
+        height: upload_height,
+        is_color,
     };
 
-    state.atlas_cursor_x += glyph.width as u32 + 1;
-    state.atlas_row_height = state.atlas_row_height.max(glyph.height as u32 + 1);
+    state.atlas_cursor_x += upload_width + 1;
+    state.atlas_row_height = state.atlas_row_height.max(upload_height + 1);
 
     state.glyph_map.insert(ch, entry);
     state.glyph_map.get(&ch)
 }
 
-fn color_to_rgb_f32(c: u32) -> [f32; 4] {
-    let rgb = crate::color::to_rgb(c);
+fn ensure_kitty_image_in_atlas(state: &mut GpuState, image_id: u32) -> Option<&GpuImageEntry> {
+    if state.last_kitty_generation != state.terminal.kitty_generation() {
+        state.image_map.clear();
+        state.last_kitty_generation = state.terminal.kitty_generation();
+    }
+
+    if state.image_map.contains_key(&image_id) {
+        return state.image_map.get(&image_id);
+    }
+
+    let image = state.terminal.kitty_image(image_id)?;
+    if image.width == 0 || image.height == 0 {
+        return None;
+    }
+    if image.data.len() != (image.width as usize) * (image.height as usize) * 4 {
+        return None;
+    }
+
+    if state.atlas_cursor_x + image.width > ATLAS_WIDTH {
+        state.atlas_cursor_x = 0;
+        state.atlas_cursor_y += state.atlas_row_height;
+        state.atlas_row_height = 0;
+    }
+
+    if state.atlas_cursor_y + image.height > ATLAS_HEIGHT {
+        return None;
+    }
+
+    state.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &state.atlas_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d {
+                x: state.atlas_cursor_x,
+                y: state.atlas_cursor_y,
+                z: 0,
+            },
+            aspect: wgpu::TextureAspect::All,
+        },
+        &image.data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(image.width * 4),
+            rows_per_image: None,
+        },
+        wgpu::Extent3d {
+            width: image.width,
+            height: image.height,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    let entry = GpuImageEntry {
+        x: state.atlas_cursor_x,
+        y: state.atlas_cursor_y,
+        width: image.width,
+        height: image.height,
+    };
+
+    state.atlas_cursor_x += image.width + 1;
+    state.atlas_row_height = state.atlas_row_height.max(image.height + 1);
+
+    state.image_map.insert(image_id, entry);
+    state.image_map.get(&image_id)
+}
+
+fn rgb_to_f32(rgb: u32) -> [f32; 4] {
     [
         ((rgb >> 16) & 0xff) as f32 / 255.0,
         ((rgb >> 8) & 0xff) as f32 / 255.0,
@@ -1012,7 +1332,182 @@ fn color_to_rgb_f32(c: u32) -> [f32; 4] {
     ]
 }
 
+fn image_instance_for_placement(
+    placement: &crate::terminal::KittyPlacement,
+    entry: &GpuImageEntry,
+    cell_w: f32,
+    cell_h: f32,
+) -> ImageInstance {
+    ImageInstance {
+        pos: [placement.col as f32 * cell_w, placement.row as f32 * cell_h],
+        size: [
+            placement.cols.max(1) as f32 * cell_w,
+            placement.rows.max(1) as f32 * cell_h,
+        ],
+        uv_offset: [entry.x as f32, entry.y as f32],
+        uv_size: [entry.width as f32, entry.height as f32],
+    }
+}
+
+fn cell_span(cell: &crate::grid::Cell) -> usize {
+    if cell.flags & crate::grid::FLAG_WIDE != 0 {
+        2
+    } else {
+        1
+    }
+}
+
+fn build_frame_plan(terminal: &Terminal) -> FramePlan {
+    let grid = &terminal.grid;
+    let (cursor_col, cursor_row) = grid.cursor_pos();
+    let show_cursor = terminal.cursor_visible && grid.scroll_offset == 0;
+    let cursor_style = terminal.cursor_style;
+    let selection = grid.selection;
+
+    let mut cell_infos = Vec::with_capacity(grid.rows * grid.cols);
+    for row in 0..grid.rows {
+        for col in 0..grid.cols {
+            let cell = grid.cell_at_scroll(row, col);
+            if cell.flags & crate::grid::FLAG_WIDE_CONT != 0 {
+                continue;
+            }
+
+            let is_cursor = show_cursor && row == cursor_row && col == cursor_col;
+            let is_cursor_block = is_cursor && cursor_style == crate::terminal::CursorStyle::Block;
+            let cursor_overlay = if is_cursor && !is_cursor_block {
+                Some(cursor_style)
+            } else {
+                None
+            };
+
+            cell_infos.push(CellInfo {
+                row,
+                col,
+                ch: cell.ch,
+                cells: cell_span(cell),
+                cell: *cell,
+                selected: is_in_selection(selection, row, col),
+                is_cursor_block,
+                cursor_style: cursor_overlay,
+            });
+        }
+    }
+
+    FramePlan {
+        cell_infos,
+        image_placements: terminal.kitty_placements.clone(),
+    }
+}
+
+fn build_cell_instances(
+    ci: &CellInfo,
+    base_fg: u32,
+    base_bg: u32,
+    base_fg_f: [f32; 4],
+    glyph_entry: Option<&GpuGlyphEntry>,
+    cell_w: f32,
+    cell_h: f32,
+) -> (CellInstance, Option<CellInstance>, Option<CellInstance>) {
+    let colors = resolve_cell_colors(
+        &ci.cell,
+        base_fg,
+        base_bg,
+        ci.is_cursor_block,
+        ci.selected,
+    );
+    let fg = rgb_to_f32(colors.fg);
+    let bg = rgb_to_f32(colors.bg);
+    let deco = rgb_to_f32(resolve_underline_color(&ci.cell, colors.fg));
+
+    let mut flags = 0u32;
+    let mut uv_offset = [0.0, 0.0];
+    let mut uv_size = [0.0, 0.0];
+
+    if ci.ch > 0x20
+        && let Some(entry) = glyph_entry
+        && entry.width > 0
+    {
+        flags |= FLAG_HAS_GLYPH;
+        if entry.is_color {
+            flags |= FLAG_COLOR_GLYPH;
+        }
+        uv_offset = [entry.x as f32, entry.y as f32];
+        uv_size = [entry.width as f32, entry.height as f32];
+    }
+
+    if ci.cell.attrs & crate::grid::ATTR_UNDERLINE != 0 {
+        use crate::grid::UnderlineStyle;
+        match ci.cell.underline_style {
+            UnderlineStyle::None | UnderlineStyle::Single => flags |= FLAG_UNDERLINE,
+            UnderlineStyle::Double => flags |= FLAG_DOUBLE_UL,
+            UnderlineStyle::Curly => flags |= FLAG_CURLY_UL,
+            UnderlineStyle::Dotted => flags |= FLAG_DOTTED_UL,
+            UnderlineStyle::Dashed => flags |= FLAG_DASHED_UL,
+        }
+    }
+    if ci.cell.attrs & crate::grid::ATTR_STRIKETHROUGH != 0 {
+        flags |= FLAG_STRIKETHROUGH;
+    }
+
+    let bg_instance = CellInstance {
+        pos: [ci.col as f32 * cell_w, ci.row as f32 * cell_h],
+        size: [cell_w * ci.cells as f32, cell_h],
+        uv_offset: [0.0, 0.0],
+        uv_size: [0.0, 0.0],
+        fg: [0.0, 0.0, 0.0, 0.0],
+        bg,
+        deco: [0.0, 0.0, 0.0, 0.0],
+        flags: 0,
+        _pad: [0; 2],
+    };
+
+    let fg_instance = if flags != 0 {
+        Some(CellInstance {
+            pos: [ci.col as f32 * cell_w, ci.row as f32 * cell_h],
+            size: [cell_w * ci.cells as f32, cell_h],
+            uv_offset,
+            uv_size,
+            fg,
+            bg: [0.0, 0.0, 0.0, 0.0],
+            deco,
+            flags,
+            _pad: [0; 2],
+        })
+    } else {
+        None
+    };
+
+    let overlay = match ci.cursor_style {
+        Some(crate::terminal::CursorStyle::Bar) => Some(CellInstance {
+            pos: [ci.col as f32 * cell_w, ci.row as f32 * cell_h],
+            size: [cell_w, cell_h],
+            uv_offset: [0.0, 0.0],
+            uv_size: [0.0, 0.0],
+            fg: base_fg_f,
+            bg: [0.0, 0.0, 0.0, 0.0],
+            deco: [0.0, 0.0, 0.0, 0.0],
+            flags: FLAG_CURSOR_BAR,
+            _pad: [0; 2],
+        }),
+        Some(crate::terminal::CursorStyle::Underline) => Some(CellInstance {
+            pos: [ci.col as f32 * cell_w, ci.row as f32 * cell_h],
+            size: [cell_w, cell_h],
+            uv_offset: [0.0, 0.0],
+            uv_size: [0.0, 0.0],
+            fg: base_fg_f,
+            bg: [0.0, 0.0, 0.0, 0.0],
+            deco: [0.0, 0.0, 0.0, 0.0],
+            flags: FLAG_CURSOR_UNDERLINE,
+            _pad: [0; 2],
+        }),
+        _ => None,
+    };
+
+    (bg_instance, fg_instance, overlay)
+}
+
 fn render_gpu(state: &mut GpuState, config: &AppConfig) {
+    let current_visual = VisualState::capture(&state.terminal);
     let output = match state.surface.get_current_texture() {
         Ok(t) => t,
         Err(wgpu::SurfaceError::Lost) => {
@@ -1043,119 +1538,64 @@ fn render_gpu(state: &mut GpuState, config: &AppConfig) {
 
     let cell_w = state.atlas.cell_width as f32;
     let cell_h = state.atlas.cell_height as f32;
-    let grid_rows = state.terminal.grid.rows;
-    let grid_cols = state.terminal.grid.cols;
-    let (cursor_col, cursor_row) = state.terminal.grid.cursor_pos();
-    let show_cursor = state.terminal.cursor_visible && state.terminal.grid.scroll_offset == 0;
-    let cursor_style = state.terminal.cursor_style;
+    let frame_plan = build_frame_plan(&state.terminal);
+    let cell_infos = frame_plan.cell_infos;
 
-    struct CellInfo {
-        row: usize,
-        col: usize,
-        ch: u32,
-        fg: u32,
-        bg: u32,
-        attrs: u8,
-        underline_style: crate::grid::UnderlineStyle,
-        is_cursor_block: bool,
-    }
-
-    let mut cell_infos: Vec<CellInfo> = Vec::with_capacity(grid_rows * grid_cols);
-
-    for row in 0..grid_rows {
-        for col in 0..grid_cols {
-            let cell = state.terminal.grid.cell_at_scroll(row, col);
-            if cell.flags & crate::grid::FLAG_WIDE_CONT != 0 {
-                continue;
-            }
-
-            let is_cursor = show_cursor && row == cursor_row && col == cursor_col;
-            let is_cursor_block = is_cursor && cursor_style == crate::terminal::CursorStyle::Block;
-
-            cell_infos.push(CellInfo {
-                row,
-                col,
-                ch: cell.ch,
-                fg: cell.fg,
-                bg: cell.bg,
-                attrs: cell.attrs,
-                underline_style: cell.underline_style,
-                is_cursor_block,
-            });
-        }
-    }
-
-    let mut instances: Vec<CellInstance> = Vec::with_capacity(cell_infos.len());
+    let mut bg_instances: Vec<CellInstance> = Vec::with_capacity(cell_infos.len());
+    let mut fg_instances: Vec<CellInstance> = Vec::with_capacity(cell_infos.len());
+    let mut overlay_instances: Vec<CellInstance> = Vec::with_capacity(1);
 
     for ci in &cell_infos {
-        let mut fg = if ci.fg == crate::grid::COLOR_DEFAULT {
-            base_fg_f
+        let glyph_entry = if ci.ch > 0x20 {
+            ensure_glyph_in_atlas(state, ci.ch, ci.cells)
         } else {
-            color_to_rgb_f32(ci.fg)
+            None
         };
-        let mut bg = if ci.bg == crate::grid::COLOR_DEFAULT {
-            base_bg_f
-        } else {
-            color_to_rgb_f32(ci.bg)
-        };
+        let (bg_instance, fg_instance, overlay_instance) =
+            build_cell_instances(ci, base_fg, base_bg, base_fg_f, glyph_entry, cell_w, cell_h);
 
-        if ci.attrs & crate::grid::ATTR_INVERSE != 0 {
-            std::mem::swap(&mut fg, &mut bg);
+        bg_instances.push(bg_instance);
+        if let Some(fg_instance) = fg_instance {
+            fg_instances.push(fg_instance);
         }
-        if ci.is_cursor_block {
-            std::mem::swap(&mut fg, &mut bg);
+        if let Some(overlay_instance) = overlay_instance {
+            overlay_instances.push(overlay_instance);
         }
-
-        let mut flags = 0u32;
-        let has_glyph = ci.ch > 0x20;
-
-        let (uv_offset, uv_size) = if has_glyph {
-            if let Some(entry) = ensure_glyph_in_atlas(state, ci.ch) {
-                if entry.width > 0 {
-                    flags |= FLAG_HAS_GLYPH;
-                    (
-                        [entry.x as f32, entry.y as f32],
-                        [entry.width as f32, entry.height as f32],
-                    )
-                } else {
-                    ([0.0, 0.0], [0.0, 0.0])
-                }
-            } else {
-                ([0.0, 0.0], [0.0, 0.0])
-            }
-        } else {
-            ([0.0, 0.0], [0.0, 0.0])
-        };
-
-        if ci.attrs & crate::grid::ATTR_UNDERLINE != 0 {
-            use crate::grid::UnderlineStyle;
-            match ci.underline_style {
-                UnderlineStyle::None | UnderlineStyle::Single => flags |= FLAG_UNDERLINE,
-                UnderlineStyle::Double => flags |= FLAG_DOUBLE_UL,
-                UnderlineStyle::Curly => flags |= FLAG_CURLY_UL,
-                UnderlineStyle::Dotted => flags |= FLAG_DOTTED_UL,
-                UnderlineStyle::Dashed => flags |= FLAG_DASHED_UL,
-            }
-        }
-        if ci.attrs & crate::grid::ATTR_STRIKETHROUGH != 0 {
-            flags |= FLAG_STRIKETHROUGH;
-        }
-
-        instances.push(CellInstance {
-            pos: [ci.col as f32 * cell_w, ci.row as f32 * cell_h],
-            uv_offset,
-            uv_size,
-            fg,
-            bg,
-            flags,
-            _pad: [0; 3],
-        });
     }
 
-    let instance_data = bytemuck::cast_slice(&instances);
-    state
-        .queue
-        .write_buffer(&state.instance_buffer, 0, instance_data);
+    let mut image_instances: Vec<ImageInstance> =
+        Vec::with_capacity(frame_plan.image_placements.len());
+    for placement in &frame_plan.image_placements {
+        if let Some(entry) = ensure_kitty_image_in_atlas(state, placement.image_id) {
+            image_instances.push(image_instance_for_placement(placement, entry, cell_w, cell_h));
+        }
+    }
+
+    state.queue.write_buffer(
+        &state.bg_instance_buffer,
+        0,
+        bytemuck::cast_slice(&bg_instances),
+    );
+    state.queue.write_buffer(
+        &state.fg_instance_buffer,
+        0,
+        bytemuck::cast_slice(&fg_instances),
+    );
+    if !overlay_instances.is_empty() {
+        let offset = (fg_instances.len() * std::mem::size_of::<CellInstance>()) as u64;
+        state.queue.write_buffer(
+            &state.fg_instance_buffer,
+            offset,
+            bytemuck::cast_slice(&overlay_instances),
+        );
+    }
+    if !image_instances.is_empty() {
+        state.queue.write_buffer(
+            &state.image_instance_buffer,
+            0,
+            bytemuck::cast_slice(&image_instances),
+        );
+    }
 
     let mut encoder = state
         .device
@@ -1184,161 +1624,190 @@ fn render_gpu(state: &mut GpuState, config: &AppConfig) {
             ..Default::default()
         });
 
-        pass.set_pipeline(&state.pipeline);
         pass.set_bind_group(0, &state.bind_group, &[]);
-        pass.set_vertex_buffer(0, state.instance_buffer.slice(..));
-        pass.draw(0..6, 0..instances.len() as u32);
+        pass.set_pipeline(&state.pipeline);
+        pass.set_vertex_buffer(0, state.bg_instance_buffer.slice(..));
+        pass.draw(0..6, 0..bg_instances.len() as u32);
+
+        if !image_instances.is_empty() {
+            pass.set_pipeline(&state.image_pipeline);
+            pass.set_vertex_buffer(0, state.image_instance_buffer.slice(..));
+            pass.draw(0..6, 0..image_instances.len() as u32);
+        }
+
+        if !fg_instances.is_empty() {
+            pass.set_pipeline(&state.pipeline);
+            pass.set_vertex_buffer(0, state.fg_instance_buffer.slice(..));
+            pass.draw(0..6, 0..fg_instances.len() as u32);
+        }
+        if !overlay_instances.is_empty() {
+            pass.set_pipeline(&state.pipeline);
+            pass.set_vertex_buffer(0, state.fg_instance_buffer.slice(..));
+            let start = fg_instances.len() as u32;
+            let end = (fg_instances.len() + overlay_instances.len()) as u32;
+            pass.draw(0..6, start..end);
+        }
     }
 
     state.queue.submit(std::iter::once(encoder.finish()));
     output.present();
     state.terminal.grid.clear_dirty();
+    state.last_visual_state = Some(current_visual);
 }
 
-fn key_to_bytes(
-    key: &Key,
-    _physical: &PhysicalKey,
-    app_cursor: bool,
-    ctrl: bool,
-) -> Option<Vec<u8>> {
-    if ctrl {
-        if let Key::Character(s) = key {
-            let ch = s.chars().next()?;
-            if ch.is_ascii_alphabetic() {
-                return Some(vec![ch.to_ascii_lowercase() as u8 - b'a' + 1]);
-            }
-            match ch {
-                '@' | ' ' | '`' => return Some(vec![0]),
-                '[' | '\x1b' => return Some(vec![0x1b]),
-                '\\' => return Some(vec![0x1c]),
-                ']' => return Some(vec![0x1d]),
-                '^' | '~' => return Some(vec![0x1e]),
-                '_' | '/' => return Some(vec![0x1f]),
-                _ => {}
-            }
-        }
-    }
-    match key {
-        Key::Character(s) => Some(s.as_bytes().to_vec()),
-        Key::Named(named) => match named {
-            NamedKey::Enter => Some(b"\r".to_vec()),
-            NamedKey::Backspace => Some(b"\x7f".to_vec()),
-            NamedKey::Tab => Some(b"\t".to_vec()),
-            NamedKey::Escape => Some(b"\x1b".to_vec()),
-            NamedKey::ArrowUp if app_cursor => Some(b"\x1bOA".to_vec()),
-            NamedKey::ArrowDown if app_cursor => Some(b"\x1bOB".to_vec()),
-            NamedKey::ArrowRight if app_cursor => Some(b"\x1bOC".to_vec()),
-            NamedKey::ArrowLeft if app_cursor => Some(b"\x1bOD".to_vec()),
-            NamedKey::Home if app_cursor => Some(b"\x1bOH".to_vec()),
-            NamedKey::End if app_cursor => Some(b"\x1bOF".to_vec()),
-            NamedKey::ArrowUp => Some(b"\x1b[A".to_vec()),
-            NamedKey::ArrowDown => Some(b"\x1b[B".to_vec()),
-            NamedKey::ArrowRight => Some(b"\x1b[C".to_vec()),
-            NamedKey::ArrowLeft => Some(b"\x1b[D".to_vec()),
-            NamedKey::Home => Some(b"\x1b[H".to_vec()),
-            NamedKey::End => Some(b"\x1b[F".to_vec()),
-            NamedKey::Delete => Some(b"\x1b[3~".to_vec()),
-            NamedKey::PageUp => Some(b"\x1b[5~".to_vec()),
-            NamedKey::PageDown => Some(b"\x1b[6~".to_vec()),
-            NamedKey::Space => {
-                if ctrl {
-                    Some(vec![0])
-                } else {
-                    Some(b" ".to_vec())
-                }
-            }
-            NamedKey::Insert => Some(b"\x1b[2~".to_vec()),
-            NamedKey::F1 => Some(b"\x1bOP".to_vec()),
-            NamedKey::F2 => Some(b"\x1bOQ".to_vec()),
-            NamedKey::F3 => Some(b"\x1bOR".to_vec()),
-            NamedKey::F4 => Some(b"\x1bOS".to_vec()),
-            NamedKey::F5 => Some(b"\x1b[15~".to_vec()),
-            NamedKey::F6 => Some(b"\x1b[17~".to_vec()),
-            NamedKey::F7 => Some(b"\x1b[18~".to_vec()),
-            NamedKey::F8 => Some(b"\x1b[19~".to_vec()),
-            NamedKey::F9 => Some(b"\x1b[20~".to_vec()),
-            NamedKey::F10 => Some(b"\x1b[21~".to_vec()),
-            NamedKey::F11 => Some(b"\x1b[23~".to_vec()),
-            NamedKey::F12 => Some(b"\x1b[24~".to_vec()),
-            _ => None,
-        },
-        _ => None,
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn base64_decode(input: &[u8]) -> Result<Vec<u8>, ()> {
-    const TABLE: [u8; 256] = {
-        let mut t = [0xffu8; 256];
-        let mut i = 0u8;
-        while i < 26 {
-            t[(b'A' + i) as usize] = i;
-            t[(b'a' + i) as usize] = i + 26;
-            i += 1;
-        }
-        let mut d = 0u8;
-        while d < 10 {
-            t[(b'0' + d) as usize] = d + 52;
-            d += 1;
-        }
-        t[b'+' as usize] = 62;
-        t[b'/' as usize] = 63;
-        t
-    };
-    let mut out = Vec::with_capacity(input.len() * 3 / 4);
-    let mut buf = 0u32;
-    let mut bits = 0u32;
-    for &b in input {
-        if b == b'=' || b == b'\n' || b == b'\r' {
-            continue;
-        }
-        let val = TABLE[b as usize];
-        if val == 0xff {
-            return Err(());
-        }
-        buf = (buf << 6) | val as u32;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buf >> bits) as u8);
-            buf &= (1 << bits) - 1;
-        }
-    }
-    Ok(out)
-}
+    #[test]
+    fn kitty_placement_maps_to_image_instance_geometry() {
+        let placement = crate::terminal::KittyPlacement {
+            image_id: 7,
+            col: 2,
+            row: 1,
+            cols: 3,
+            rows: 2,
+        };
+        let entry = GpuImageEntry {
+            x: 10,
+            y: 20,
+            width: 30,
+            height: 40,
+        };
 
-fn gpu_pty_watcher_thread(
-    pty_fd: i32,
-    ipc_fd: i32,
-    proxy: EventLoopProxy<GpuAppEvent>,
-    stop: Arc<AtomicBool>,
-) {
-    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
-    use std::os::fd::BorrowedFd;
+        let instance = image_instance_for_placement(&placement, &entry, 8.0, 16.0);
 
-    let mut fds = Vec::with_capacity(2);
-    fds.push(PollFd::new(
-        unsafe { BorrowedFd::borrow_raw(pty_fd) },
-        PollFlags::POLLIN | PollFlags::POLLHUP,
-    ));
-    if ipc_fd >= 0 {
-        fds.push(PollFd::new(
-            unsafe { BorrowedFd::borrow_raw(ipc_fd) },
-            PollFlags::POLLIN,
-        ));
+        assert_eq!(
+            instance,
+            ImageInstance {
+                pos: [16.0, 16.0],
+                size: [24.0, 32.0],
+                uv_offset: [10.0, 20.0],
+                uv_size: [30.0, 40.0],
+            }
+        );
     }
 
-    while !stop.load(Ordering::Relaxed) {
-        match poll(&mut fds, PollTimeout::from(100u16)) {
-            Ok(0) => continue,
-            Ok(_) => {
-                if fds[0].revents().map_or(false, |r| r.contains(PollFlags::POLLHUP)) {
-                    let _ = proxy.send_event(GpuAppEvent::PtyReadable);
-                    break;
-                }
-                let _ = proxy.send_event(GpuAppEvent::PtyReadable);
-            }
-            Err(nix::errno::Errno::EINTR) => continue,
-            Err(_) => break,
-        }
+    #[test]
+    fn frame_plan_tracks_wide_cells_selection_and_cursor_overlay() {
+        let mut terminal = Terminal::new(4, 2);
+        terminal.process("a界".as_bytes());
+        terminal.grid.selection = Some(crate::grid::Selection {
+            start_col: 1,
+            start_row: 0,
+            end_col: 1,
+            end_row: 0,
+        });
+        terminal.cursor_style = crate::terminal::CursorStyle::Bar;
+        terminal.grid.set_cursor(0, 0);
+
+        let plan = build_frame_plan(&terminal);
+        assert_eq!(plan.cell_infos.len(), 7);
+
+        let ascii = plan
+            .cell_infos
+            .iter()
+            .find(|ci| ci.row == 0 && ci.col == 0)
+            .expect("ascii cell should exist");
+        assert_eq!(ascii.cells, 1);
+        assert_eq!(ascii.cursor_style, Some(crate::terminal::CursorStyle::Bar));
+
+        let wide = plan
+            .cell_infos
+            .iter()
+            .find(|ci| ci.row == 0 && ci.col == 1)
+            .expect("wide cell should exist");
+        assert_eq!(wide.cells, 2);
+        assert!(wide.selected);
+    }
+
+    #[test]
+    fn gpu_glyph_tile_spans_requested_cells() {
+        let pixels = [255u8, 128, 64, 32];
+        let glyph = crate::font::GlyphData {
+            pixels: &pixels,
+            width: 2,
+            height: 2,
+            format: GlyphFormat::Alpha,
+            bearing_x: 0,
+            bearing_y: 2,
+        };
+
+        let (tile, width, height) = build_gpu_glyph_tile(&glyph, 2, 8, 4, 2);
+
+        assert_eq!(width, 16);
+        assert_eq!(height, 4);
+        assert_eq!(tile.len(), 16 * 4 * 4);
+        assert_eq!(&tile[0..8], &[0xff, 0xff, 0xff, 255, 0xff, 0xff, 0xff, 128]);
+    }
+
+    #[test]
+    fn build_cell_instances_respects_selection_and_custom_underline_color() {
+        let mut cell = crate::grid::Cell::BLANK;
+        cell.ch = 'x' as u32;
+        cell.fg = 2;
+        cell.bg = 4;
+        cell.attrs = crate::grid::ATTR_UNDERLINE | crate::grid::ATTR_HAS_UCOLOR;
+        cell.underline_color = 0x8000_ff00;
+        cell.underline_style = crate::grid::UnderlineStyle::Single;
+
+        let ci = CellInfo {
+            row: 0,
+            col: 0,
+            ch: cell.ch,
+            cells: 1,
+            cell,
+            selected: true,
+            is_cursor_block: false,
+            cursor_style: None,
+        };
+
+        let (bg, fg, overlay) = build_cell_instances(
+            &ci,
+            0xffffff,
+            0x000000,
+            [1.0, 1.0, 1.0, 1.0],
+            None,
+            8.0,
+            16.0,
+        );
+
+        assert_eq!(bg.bg, rgb_to_f32(crate::color::to_rgb(2)));
+        assert_eq!(bg.size, [8.0, 16.0]);
+        let fg = fg.expect("underline pass should exist");
+        assert_eq!(fg.deco, rgb_to_f32(0x00ff00));
+        assert!(fg.flags & FLAG_UNDERLINE != 0);
+        assert!(overlay.is_none());
+    }
+
+    #[test]
+    fn build_cell_instances_emits_non_block_cursor_overlay() {
+        let ci = CellInfo {
+            row: 1,
+            col: 2,
+            ch: ' ' as u32,
+            cells: 1,
+            cell: crate::grid::Cell::BLANK,
+            selected: false,
+            is_cursor_block: false,
+            cursor_style: Some(crate::terminal::CursorStyle::Bar),
+        };
+
+        let (_, fg, overlay) = build_cell_instances(
+            &ci,
+            0xffffff,
+            0x000000,
+            [0.25, 0.5, 0.75, 1.0],
+            None,
+            8.0,
+            16.0,
+        );
+
+        assert!(fg.is_none());
+        let overlay = overlay.expect("bar cursor should render as overlay");
+        assert_eq!(overlay.pos, [16.0, 16.0]);
+        assert_eq!(overlay.size, [8.0, 16.0]);
+        assert!(overlay.flags & FLAG_CURSOR_BAR != 0);
+        assert_eq!(overlay.fg, [0.25, 0.5, 0.75, 1.0]);
     }
 }

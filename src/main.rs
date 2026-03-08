@@ -1,3 +1,4 @@
+#[cfg_attr(feature = "gpu", allow(dead_code))]
 #[cfg(feature = "cpu")]
 mod app;
 mod cli;
@@ -5,6 +6,7 @@ mod color;
 mod config;
 #[allow(dead_code)]
 mod font;
+mod frontend;
 #[cfg(feature = "gpu")]
 mod gpu_app;
 mod grid;
@@ -12,8 +14,10 @@ mod ipc;
 mod metrics;
 mod parser;
 mod pty;
+mod render;
 #[allow(dead_code)]
 mod terminal;
+mod visual;
 
 use anyhow::Result;
 use clap::Parser;

@@ -126,7 +126,7 @@ pub struct Grid {
     pub selection: Option<Selection>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
     pub start_col: usize,
     pub start_row: usize,
@@ -245,6 +245,15 @@ impl Grid {
     pub fn mark_all_dirty(&mut self) {
         self.dirty.fill(!0u64);
         self.all_dirty = true;
+    }
+
+    pub fn mark_cell_dirty(&mut self, row: usize, col: usize) {
+        if row >= self.rows || col >= self.cols {
+            return;
+        }
+
+        let phys = self.physical_row(row);
+        self.mark_dirty(phys * self.cols + col);
     }
 
     pub fn clear_dirty(&mut self) {

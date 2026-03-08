@@ -8,7 +8,7 @@ A Wayland-native terminal emulator focused on reaching the theoretical limits of
 [![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org)
 [![Wayland](https://img.shields.io/badge/wayland-native-green.svg)](https://wayland.freedesktop.org)
 
-~7,600 lines of Rust. 3.4 MB binary. 25ms to first frame.
+~8,300 lines of Rust. 3.4 MB binary. 28ms to first frame.
 
 ![handterm screenshot](assets/screenshot.png)
 
@@ -24,46 +24,54 @@ Handterm has both a CPU renderer (softbuffer) and a GPU renderer (wgpu), with a 
 
 ## Performance
 
-All numbers from `handterm bench` on an Intel Core Ultra 7 256V.
+All numbers measured on an Intel Core Ultra 7 256V, Arch Linux, niri Wayland compositor.
+Full methodology and reproduction steps in [BENCHMARKS.md](BENCHMARKS.md).
+
+### Startup time (to window visible)
+
+| Terminal | Time | vs handterm |
+|----------|-----:|------------:|
+| **handterm** | **28 ms** | - |
+| foot | 33 ms | 1.2x slower |
+| alacritty | 91 ms | 3.3x slower |
+| kitty | 186 ms | 6.6x slower |
+| ghostty | 641 ms | 22.9x slower |
+
+### Memory (single idle window)
+
+| Terminal | RSS | Threads | Shared libs |
+|----------|----:|--------:|------------:|
+| **handterm** | **23 MB** | **2** | **24** |
+| foot | 24 MB | 9 | 22 |
+| alacritty | 84 MB | 10 | 52 |
+| kitty | 117 MB | 7 | 85 |
+| ghostty | 154 MB | 25 | 163 |
+
+### Binary and install size
+
+| Terminal | Binary | Install total | Language |
+|----------|-------:|:-------------:|:--------:|
+| foot | 477 KB | ~1 MB | C |
+| **handterm** | **3.4 MB** | **3.4 MB** | Rust |
+| alacritty | 8.9 MB | ~9 MB | Rust |
+| kitty | 88 KB\* | ~18 MB | C + Python |
+| ghostty | 26 MB | ~29 MB | Zig |
+
+\*kitty's binary is a Python launcher; the real code lives in `/usr/lib/kitty/` (18 MB).
 
 ### Pipeline throughput
+
+From `handterm bench`. Internal processing speed, not rendering.
 
 | Stage | ASCII | SGR color | Mixed |
 |-------|------:|----------:|------:|
 | Theoretical floor (memcpy) | 5,944 MB/s | - | - |
-| Theoretical floor (byte scan) | 2,088 MB/s | - | - |
 | Parser (state machine) | 279 MB/s | 362 MB/s | 339 MB/s |
-| Grid write (parser + cells) | 363 MB/s | 328 MB/s | 259 MB/s |
 | Full pipeline (parser + grid + state) | 330 MB/s | 174 MB/s | 209 MB/s |
 
-### Frame budget
+At 120x72 (HiDPI fullscreen), the pipeline can repaint the entire screen **2,507 times per second**.
 
-| Grid size | Full-screen writes/sec | Time per write |
-|-----------|----------------------:|--------------:|
-| 80x24 (classic) | 11,279 | 89 us |
-| 120x72 (HiDPI fullscreen) | 2,507 | 399 us |
-
-At 120x72 the pipeline can repaint the entire screen 2,507 times per second. A 144 Hz display needs 1.
-
-### Startup
-
-| Phase | Time |
-|-------|-----:|
-| Window visible | ~25 ms |
-| PTY spawn (forkpty + exec) | 266 us |
-| Grid alloc | 9 us |
-
-### Resource usage (single idle window)
-
-| Terminal | RSS | Renderer | Binary |
-|----------|----:|----------|-------:|
-| **handterm** (CPU) | **21 MB** | softbuffer | 3.4 MB |
-| **handterm** (GPU) | **~8 MB**\* | wgpu | 6.8 MB |
-| foot | 24 MB | Wayland SHM | 477 KB |
-| footclient | 1.6 MB | shared server | 27 KB |
-| alacritty | ~30 MB | OpenGL | 8.9 MB |
-
-\*GPU mode eliminates the two ~10 MB CPU framebuffers from RSS.
+See [BENCHMARKS.md](BENCHMARKS.md) for the complete comparison: feature matrix, daemon mode projections, codebase size, virtual memory, and memory breakdowns.
 
 ## Features
 

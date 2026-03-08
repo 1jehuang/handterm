@@ -1,110 +1,101 @@
+<div align="center">
+
 # handterm
 
-A Wayland-native terminal emulator that tries to hit the theoretical limits of performance. No GPU, no runtime, no framework - just a parser, a grid, and pixels.
+A Wayland-native terminal emulator focused on reaching the theoretical limits of performance and resource efficiency.
 
-~5k lines of Rust. 2.6 MB binary. 28 MB RSS.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org)
+[![Wayland](https://img.shields.io/badge/wayland-native-green.svg)](https://wayland.freedesktop.org)
 
-## Philosophy
+~7,600 lines of Rust. 3.4 MB binary. 25ms to first frame.
 
-Most terminals are fast enough. handterm asks: how fast is *possible*?
+![handterm screenshot](assets/screenshot.png)
 
-Every layer is measured against its theoretical floor. The parser is benchmarked against raw `memcpy`. Cell writes are timed in nanoseconds. Startup is measured in microseconds. The goal isn't to be marginally faster - it's to understand where the ceilings are and sit as close to them as the hardware allows.
+</div>
 
-It's a toy terminal. It runs fish, neovim, and starship. It doesn't try to replace kitty.
+## Why handterm
 
-## Benchmarks
+Every terminal emulator is "fast enough." Handterm asks a different question: **how close to the hardware limits can a terminal get?**
+
+Each layer of the pipeline is independently benchmarked against its theoretical floor. The parser is measured against `memcpy`. Cell writes are timed in nanoseconds. Startup is measured in microseconds. The goal is not to be marginally faster, but to understand where the ceilings are and sit as close to them as the hardware allows.
+
+Handterm has both a CPU renderer (softbuffer) and a GPU renderer (wgpu), with a [roadmap to server/client architecture](OPTIMIZATION.md) that targets **<1 MB RSS per window** - roughly 3x less memory than foot's daemon mode.
+
+## Performance
 
 All numbers from `handterm bench` on an Intel Core Ultra 7 256V.
 
 ### Pipeline throughput
 
-Each layer of the terminal pipeline, measured independently:
-
 | Stage | ASCII | SGR color | Mixed |
 |-------|------:|----------:|------:|
 | Theoretical floor (memcpy) | 5,944 MB/s | - | - |
 | Theoretical floor (byte scan) | 2,088 MB/s | - | - |
-| Parser (state machine only) | 279 MB/s | 362 MB/s | 339 MB/s |
+| Parser (state machine) | 279 MB/s | 362 MB/s | 339 MB/s |
 | Grid write (parser + cells) | 363 MB/s | 328 MB/s | 259 MB/s |
-| Full pipeline (parser + grid + terminal state) | 330 MB/s | 174 MB/s | 209 MB/s |
-
-The parser runs at ~5% of memcpy speed. Per-byte state machine dispatch is the bottleneck - not memory bandwidth.
-
-### Per-cell metrics
-
-| Metric | Value |
-|--------|------:|
-| Cell struct size | 16 bytes |
-| Cell write latency | 2.7 ns |
-| Grid memory (80x24) | 30 KB |
-| Grid memory (120x72) | 135 KB |
-| Scrollback per line (80 cols) | 1,280 bytes |
-| 10k line scrollback | 12.2 MB |
+| Full pipeline (parser + grid + state) | 330 MB/s | 174 MB/s | 209 MB/s |
 
 ### Frame budget
 
-| Grid size | Theoretical frames/sec | Full-screen write |
-|-----------|----------------------:|-----------------:|
+| Grid size | Full-screen writes/sec | Time per write |
+|-----------|----------------------:|--------------:|
 | 80x24 (classic) | 11,279 | 89 us |
-| 120x72 (fullscreen HiDPI) | 2,507 | 399 us |
+| 120x72 (HiDPI fullscreen) | 2,507 | 399 us |
 
-At 120x72 the terminal pipeline can fill the entire screen 2,507 times per second. A 144 Hz display needs 1.
+At 120x72 the pipeline can repaint the entire screen 2,507 times per second. A 144 Hz display needs 1.
 
 ### Startup
 
 | Phase | Time |
 |-------|-----:|
+| Window visible | ~25 ms |
 | PTY spawn (forkpty + exec) | 266 us |
-| Shell ready | 42 us |
 | Grid alloc | 9 us |
 
-### Comparison with other terminals
+### Resource usage (single idle window)
 
-Resource usage for a single idle terminal window:
+| Terminal | RSS | Renderer | Binary |
+|----------|----:|----------|-------:|
+| **handterm** (CPU) | **21 MB** | softbuffer | 3.4 MB |
+| **handterm** (GPU) | **~8 MB**\* | wgpu | 6.8 MB |
+| foot | 24 MB | Wayland SHM | 477 KB |
+| footclient | 1.6 MB | shared server | 27 KB |
+| alacritty | ~30 MB | OpenGL | 8.9 MB |
 
-| Terminal | Binary | Installed size | RSS (idle) | Shared libs | Renderer |
-|----------|-------:|---------------:|-----------:|------------:|----------|
-| **handterm** | **2.6 MB** | **2.6 MB** | **28 MB** | 12 | CPU (softbuffer) |
-| foot | 477 KB | 778 KB | 9 MB | 22 | Wayland pixel buffer |
-| alacritty | 8.9 MB | 8.6 MB | - | 12 | GPU (OpenGL) |
-| kitty | 88 KB* | 61 MB | 375 MB | 5 | GPU (OpenGL) |
-
-*kitty's binary is a Python launcher; the actual runtime is 18 MB of Python + C modules under `/usr/lib/kitty/`.
-
-foot wins on RSS because it uses the Wayland pixel buffer protocol directly with no toolkit. handterm uses `winit` + `softbuffer` which adds overhead. kitty's RSS includes a full Python interpreter and GPU texture memory.
-
-Throughput comparison (approximate, from published benchmarks and architecture):
-
-| Terminal | Parser | Rendering | Architecture |
-|----------|--------|-----------|-------------|
-| **handterm** | 330 MB/s (ASCII) | CPU blit | Hand-rolled VT parser, softbuffer |
-| foot | ~500 MB/s* | Wayland SHM | Custom parser, pixel buffer |
-| alacritty | ~200-300 MB/s | GPU upload + shader | vte crate, OpenGL |
-| kitty | ~100-200 MB/s | GPU upload + shader | C core, Python glue, OpenGL |
-
-*foot's parser throughput is estimated from its [vtebench](https://github.com/alacritty/vtebench) results and PGO-optimized builds.
+\*GPU mode eliminates the two ~10 MB CPU framebuffers from RSS.
 
 ## Features
 
 **Terminal emulation**
 - VT100/VT220 parser: CSI, SGR, OSC, DCS, ESC sequences
-- True color (24-bit RGB), 256 color, bold, dim, italic, underline, inverse, strikethrough
+- True color (24-bit RGB), 256 color palette, bold, dim, italic, inverse, strikethrough
+- Underline styles: single, double, curly, dotted, dashed (with custom colors)
 - DECAWM auto-wrap with pending wrap semantics
 - Scroll regions, insert/delete lines and characters
 - Alt screen, cursor save/restore, cursor styles (block, bar, underline)
 - DEC special graphics (line drawing characters)
 - Device attributes (DA1/DA2), device status reports
 
-**Input**
+**Rendering**
+- CPU renderer via softbuffer (default)
+- GPU renderer via wgpu with instanced cell rendering and WGSL shaders
+- Two-pass rendering (backgrounds then glyphs) for correct powerline/nerd font display
+- Damage tracking with bitset dirty map
+- Ligature support via rustybuzz text shaping
+- DPI-aware rendering (HiDPI)
+
+**Input and interaction**
 - Full keyboard input with Ctrl, Shift, function keys
 - Mouse reporting: X10, Normal, Button, Any-event, SGR encoding
 - Bracketed paste mode
 - Focus events
+- Text selection with mouse drag, copy-on-select via wl-copy
+- 10,000 line scrollback with ring buffer
 
 **Unicode**
 - On-demand FreeType glyph rasterization
 - Wide character support (CJK, emoji)
-- DPI-aware rendering (HiDPI/Retina)
 - Fontconfig font discovery with caching
 
 **Shell integration**
@@ -114,59 +105,60 @@ Throughput comparison (approximate, from published benchmarks and architecture):
 - OSC 52 clipboard
 - OSC 0/2 window title
 
-**Other**
-- Text selection with mouse drag, copy-on-select via wl-copy
-- 10,000 line scrollback with ring buffer
-- Two-pass rendering (backgrounds then glyphs) for correct powerline/nerd font display
-- Damage tracking with bitset dirty map
-- IPC remote control via Unix socket
-- Config file with kitty-compatible defaults
+**IPC**
+- Unix socket remote control (`handterm @ <command>`)
+- Commands: get-text, send-text, send-key, get-cursor, get-size, set-title, close
 
 ## Install
 
 Requires Wayland, FreeType, and Fontconfig.
 
 ```bash
+# From source
 cargo install --path .
-```
 
-Or build and run directly:
-
-```bash
+# Or build directly
 cargo build --release
 ./target/release/handterm
 ```
 
+### Build with GPU rendering
+
+```bash
+cargo build --release --features gpu --no-default-features
+```
+
 ## Configuration
 
-Default config location: `~/.config/handterm/config.toml`
+Config file: `~/.config/handterm/config.toml`
 
-Generate a default config:
+Generate defaults:
 
 ```bash
 handterm init-config
 ```
 
-```toml
-[window]
-columns = 80
-rows = 24
+Example:
 
+```toml
 [style]
 font_family = "JetBrainsMono Nerd Font Light"
 font_size = 11.0
 background = "#000000"
 foreground = "#cdd6f4"
-cursor_color = "#f5e0dc"
+cursor = "#f5e0dc"
 background_opacity = 0.9
-```
 
-## Development
+[window]
+columns = 80
+rows = 24
 
-```bash
-cargo test            # 78 tests (parser, terminal, grid, font, CLI)
-cargo run -- bench    # full pipeline benchmark
-cargo run -- print-config
+[scrollback]
+lines = 10000
+
+[performance]
+repaint_delay_ms = 5
+sync_to_monitor = true
 ```
 
 ## Architecture
@@ -184,24 +176,59 @@ Terminal (CSI/SGR/OSC dispatch, mode tracking)
 Grid (ring buffer cells, damage tracking)
   |
   v
-Renderer (two-pass: backgrounds then glyphs)
+Renderer (CPU: two-pass pixel blit / GPU: instanced wgpu pipeline)
   |
   v
-softbuffer (CPU pixel blit to Wayland surface)
+Wayland surface (softbuffer SHM / wgpu swapchain)
 ```
 
 Each layer is independently benchmarkable. The parser can be tested without a grid. The grid can be tested without a renderer. `handterm bench` measures every boundary.
 
-## What's missing
+### Source layout
 
-- GPU rendering (wgpu) - would eliminate the CPU blit bottleneck
-- Sixel/kitty graphics protocol
-- Ligatures
-- Resize reflow for wrapped lines
-- Font fallback chains
-- Scrollbar
-- Tabs/splits
+```
+src/
+  main.rs        Entry point and CLI
+  parser.rs      VT state machine (439 lines)
+  terminal.rs    Sequence dispatch, mode state (1,458 lines)
+  grid.rs        Cell storage, ring buffer, dirty tracking (1,117 lines)
+  font.rs        FreeType rasterization, glyph cache, ligatures (696 lines)
+  render.rs      CPU renderer (546 lines)
+  gpu_app.rs     GPU renderer with wgpu + WGSL (1,197 lines)
+  app.rs         CPU app / winit event loop (504 lines)
+  frontend.rs    Shared input handling, frame scheduling (528 lines)
+  pty.rs         PTY spawn and I/O (132 lines)
+  ipc.rs         Unix socket IPC server (259 lines)
+  config.rs      TOML config loading (186 lines)
+  color.rs       Hex color type (114 lines)
+  metrics.rs     Built-in benchmarks (313 lines)
+  cli.rs         Clap CLI definitions (37 lines)
+```
+
+## Development
+
+```bash
+cargo test              # 88 tests (parser, terminal, grid, font, config, CLI)
+cargo run -- bench      # full pipeline benchmark
+cargo run -- print-config
+```
+
+## Roadmap
+
+See [OPTIMIZATION.md](OPTIMIZATION.md) for the full performance roadmap.
+
+| Phase | Goal | Status |
+|-------|------|--------|
+| CPU rendering | Functional terminal with softbuffer | ✅ |
+| GPU rendering | wgpu backend with instanced shaders | ✅ |
+| GPU as default | Eliminate CPU framebuffer memory overhead | planned |
+| Server/client mode | Daemon architecture like foot --server | planned |
+| Workspace split | Thin client binary without font libs | planned |
+| Zero-copy IPC | Shared memory cell grid between server and client | planned |
+
+**Target: <1 MB per window, ~13 MB total for 10 windows** (vs foot's ~41 MB).
 
 ## License
 
 MIT
+

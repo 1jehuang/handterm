@@ -49,9 +49,22 @@ impl Response {
 
 pub enum IpcAction {
     None,
-    SendText(Vec<u8>),
-    SetTitle(String),
-    Close,
+    SendText {
+        window: Option<u64>,
+        bytes: Vec<u8>,
+    },
+    SetTitle {
+        window: Option<u64>,
+        title: String,
+    },
+    Close {
+        window: Option<u64>,
+    },
+    OpenWindow {
+        cols: Option<u16>,
+        rows: Option<u16>,
+    },
+    FocusWindow(u64),
 }
 
 pub struct IpcServer {
@@ -201,12 +214,21 @@ fn memchr_newline(buf: &[u8]) -> Option<usize> {
 pub fn default_socket_path() -> PathBuf {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
         .unwrap_or_else(|_| format!("/tmp/handterm-{}", std::process::id()));
-    PathBuf::from(runtime_dir).join(format!("handterm-{}.sock", std::process::id()))
+    PathBuf::from(runtime_dir).join("handterm.sock")
 }
 
 pub fn find_socket() -> Option<PathBuf> {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok()?;
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+        .unwrap_or_else(|_| format!("/tmp/handterm-{}", std::process::id()));
     let dir = PathBuf::from(&runtime_dir);
+
+    let stable = dir.join("handterm.sock");
+    if stable.exists() {
+        if UnixStream::connect(&stable).is_ok() {
+            return Some(stable);
+        }
+        std::fs::remove_file(&stable).ok();
+    }
 
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {

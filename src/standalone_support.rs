@@ -5,6 +5,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use winit::event_loop::EventLoopProxy;
 
 pub fn handle_ipc_request(terminal: &mut Terminal, req: &Request) -> (Response, IpcAction) {
+    let target_window = req
+        .args
+        .as_object()
+        .and_then(|o| o.get("window_id"))
+        .and_then(|v| v.as_u64());
+
     match req.cmd.as_str() {
         "get-text" => {
             let text = if let Some(obj) = req.args.as_object() {
@@ -37,7 +43,10 @@ pub fn handle_ipc_request(terminal: &mut Terminal, req: &Request) -> (Response, 
             } else {
                 (
                     Response::ok_empty(),
-                    IpcAction::SendText(text.as_bytes().to_vec()),
+                    IpcAction::SendText {
+                        window: target_window,
+                        bytes: text.as_bytes().to_vec(),
+                    },
                 )
             }
         }
@@ -74,7 +83,13 @@ pub fn handle_ipc_request(terminal: &mut Terminal, req: &Request) -> (Response, 
                 _ => None,
             };
             match bytes {
-                Some(bytes) => (Response::ok_empty(), IpcAction::SendText(bytes)),
+                Some(bytes) => (
+                    Response::ok_empty(),
+                    IpcAction::SendText {
+                        window: target_window,
+                        bytes,
+                    },
+                ),
                 None => (
                     Response::err(format!("unknown key: {key}")),
                     IpcAction::None,
@@ -103,15 +118,50 @@ pub fn handle_ipc_request(terminal: &mut Terminal, req: &Request) -> (Response, 
                 .and_then(|v| v.as_str())
                 .unwrap_or("handterm")
                 .to_string();
-            (Response::ok_empty(), IpcAction::SetTitle(title))
+            (
+                Response::ok_empty(),
+                IpcAction::SetTitle {
+                    window: target_window,
+                    title,
+                },
+            )
         }
-        "close" => (Response::ok_empty(), IpcAction::Close),
+        "close" => (
+            Response::ok_empty(),
+            IpcAction::Close {
+                window: target_window,
+            },
+        ),
+        "open-window" => {
+            let cols = req
+                .args
+                .as_object()
+                .and_then(|o| o.get("cols"))
+                .and_then(|v| v.as_u64())
+                .and_then(|v| u16::try_from(v).ok());
+            let rows = req
+                .args
+                .as_object()
+                .and_then(|o| o.get("rows"))
+                .and_then(|v| v.as_u64())
+                .and_then(|v| u16::try_from(v).ok());
+            (Response::ok_empty(), IpcAction::OpenWindow { cols, rows })
+        }
+        "focus-window" => {
+            let Some(window_id) = target_window else {
+                return (
+                    Response::err("missing 'window_id' argument"),
+                    IpcAction::None,
+                );
+            };
+            (Response::ok_empty(), IpcAction::FocusWindow(window_id))
+        }
         "ls" => (
             Response::ok(serde_json::json!({
                 "commands": [
                     "get-text", "send-text", "send-key",
                     "get-cursor", "get-size", "set-title",
-                    "close", "ls"
+                    "close", "open-window", "focus-window", "ls"
                 ]
             })),
             IpcAction::None,

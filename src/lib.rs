@@ -63,6 +63,36 @@ use config::AppConfig;
 #[cfg(feature = "standalone")]
 use metrics::{format_bench_results, run_quick_bench};
 
+#[cfg(all(feature = "cpu", feature = "cli"))]
+fn open_window_in_existing_host(
+    to: Option<std::path::PathBuf>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+) -> Result<()> {
+    let socket_path = match to {
+        Some(path) => path,
+        None => ipc::find_socket().ok_or_else(|| anyhow::anyhow!("no running handterm host found"))?,
+    };
+
+    let mut args = serde_json::Map::new();
+    if let Some(cols) = cols {
+        args.insert("cols".into(), serde_json::json!(cols));
+    }
+    if let Some(rows) = rows {
+        args.insert("rows".into(), serde_json::json!(rows));
+    }
+
+    let req = ipc::Request {
+        cmd: "open-window".to_string(),
+        args: serde_json::Value::Object(args),
+    };
+    let resp = ipc::send_command(&socket_path, &req)?;
+    if !resp.ok {
+        anyhow::bail!(resp.error.unwrap_or_else(|| "open-window request failed".to_string()));
+    }
+    Ok(())
+}
+
 #[cfg(feature = "cli")]
 pub fn run_cli() -> Result<()> {
     let cli = Cli::parse();
@@ -96,6 +126,17 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             let out = run_quick_bench(config.window.columns, config.window.rows)?;
             println!("{}", format_bench_results(&out));
             Ok(())
+        }
+        Some(Command::OpenWindow { to, cols, rows }) => {
+            #[cfg(feature = "cpu")]
+            {
+                open_window_in_existing_host(to, cols, rows)
+            }
+            #[cfg(not(feature = "cpu"))]
+            {
+                let _ = (to, cols, rows);
+                unreachable!("open-window requires the CPU host frontend")
+            }
         }
         Some(Command::ServerOnly { socket }) => daemon::run_server_only(socket, &config),
         Some(Command::ClientOnly { socket }) => {
@@ -178,6 +219,18 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
                     #[cfg(feature = "cpu")]
                     {
                         warn_if_cpu_opacity();
+                        if let Some(socket_path) = ipc::find_socket()
+                            && ipc::send_command(
+                                &socket_path,
+                                &ipc::Request {
+                                    cmd: "open-window".to_string(),
+                                    args: serde_json::Value::Object(serde_json::Map::new()),
+                                },
+                            )
+                            .is_ok()
+                        {
+                            return Ok(());
+                        }
                         app::run(config)
                     }
                     #[cfg(not(feature = "cpu"))]

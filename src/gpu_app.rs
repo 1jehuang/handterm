@@ -440,15 +440,16 @@ fn process_pending_io(
         let actions = ipc.poll(&mut |req| handle_ipc_request(&mut state.terminal, req));
         for action in actions {
             match action {
-                IpcAction::SendText(bytes) => {
+                IpcAction::SendText { bytes, .. } => {
                     let _ = state.pty.write_all(&bytes);
                 }
-                IpcAction::SetTitle(title) => {
+                IpcAction::SetTitle { title, .. } => {
                     state.renderer.window.set_title(&title);
                 }
-                IpcAction::Close => {
+                IpcAction::Close { .. } => {
                     event_loop.exit();
                 }
+                IpcAction::OpenWindow { .. } | IpcAction::FocusWindow(_) => {}
                 IpcAction::None => {}
             }
         }

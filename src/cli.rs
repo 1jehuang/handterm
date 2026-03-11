@@ -27,6 +27,20 @@ pub enum Command {
     InitConfig,
     /// Run quick local performance benchmarks
     Bench,
+    /// Ask a running CPU host to open another window
+    OpenWindow {
+        /// Socket path (auto-detected if omitted)
+        #[arg(long)]
+        to: Option<PathBuf>,
+
+        /// Override columns for the new window
+        #[arg(long)]
+        cols: Option<u16>,
+
+        /// Override rows for the new window
+        #[arg(long)]
+        rows: Option<u16>,
+    },
     /// Run only the daemon/server process
     ServerOnly {
         /// Socket path to bind (default: $XDG_RUNTIME_DIR/handterm-server.sock)

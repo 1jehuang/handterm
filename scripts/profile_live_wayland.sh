@@ -2,14 +2,16 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="${HANDTERM_LIVE_BIN:-$ROOT/target/release/handterm-client}"
+BIN="${HANDTERM_LIVE_BIN:-$ROOT/target/release/handterm-client-gpu}"
 OUT_DIR="${HANDTERM_PROFILE_OUT:-$ROOT/profile_out}"
 mkdir -p "$OUT_DIR"
 
 if [[ ! -x "$BIN" ]]; then
   echo "building live-profile binary..."
-  if [[ "$(basename "$BIN")" == "handterm-client" ]]; then
-    cargo build --release -p handterm-client --manifest-path "$ROOT/Cargo.toml"
+  if [[ "$(basename "$BIN")" == "handterm-client-gpu" ]]; then
+    cargo build --release -p handterm-client-gpu --manifest-path "$ROOT/Cargo.toml"
+  elif [[ "$(basename "$BIN")" == "handterm-client-cpu" ]]; then
+    cargo build --release -p handterm-client-cpu --manifest-path "$ROOT/Cargo.toml"
   else
     cargo build --release --manifest-path "$ROOT/Cargo.toml"
   fi

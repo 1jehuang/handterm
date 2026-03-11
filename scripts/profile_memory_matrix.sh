@@ -8,7 +8,8 @@ OUT_FILE="$OUT_DIR/memory_matrix.txt"
 SOCKET="${HANDTERM_PROFILE_SOCKET:-/tmp/handterm-profile.sock}"
 
 HANDTERM_BIN="$ROOT/target/release/handterm"
-CLIENT_BIN="$ROOT/target/release/handterm-client"
+CLIENT_CPU_BIN="$ROOT/target/release/handterm-client-cpu"
+CLIENT_GPU_BIN="$ROOT/target/release/handterm-client-gpu"
 SERVER_BIN="$ROOT/target/release/handterm-server"
 
 cargo build -q --release --workspace --manifest-path "$ROOT/Cargo.toml"
@@ -98,7 +99,7 @@ if [[ ! -S "$SOCKET" ]]; then
   exit 1
 fi
 measure_pid "server-only" "$SERVER_PID"
-measure_window_cmd "daemon-client-gpu" "$CLIENT_BIN" --socket "$SOCKET"
-measure_window_cmd "daemon-client-cpu" "$CLIENT_BIN" --socket "$SOCKET" --backend cpu
+measure_window_cmd "daemon-client-gpu" "$CLIENT_GPU_BIN" --socket "$SOCKET"
+measure_window_cmd "daemon-client-cpu" "$CLIENT_CPU_BIN" --socket "$SOCKET"
 
 printf '\nresults saved to %s\n' "$OUT_FILE" | tee -a "$OUT_FILE"

@@ -123,7 +123,7 @@ foot's high VSZ is from mmap'd font files and Wayland protocol buffers; most is 
 |-------|-------------:|----------------:|
 | foot standalone | 24 MB | +24 MB |
 | foot --server + footclient | 25 MB (server) + 1.6 MB | +1.6 MB |
-| **handterm** daemon mode | **~3.7 MB server-only (measured, headless)** | target: **<1 MB** |
+| **handterm** daemon mode | **~4.4 MB server-only (measured, live build)** | target: **<1 MB** |
 
 handterm's daemon mode (see [OPTIMIZATION.md](OPTIMIZATION.md)) is implemented for both CPU and GPU thin clients. The current code shares PTYs, terminal state, kitty image state, and server-driven glyph/image updates over a Unix-socket protocol, with a long-term target of <1 MB per additional window once the client/server split is pushed further.
 
@@ -372,7 +372,7 @@ See [OPTIMIZATION.md](OPTIMIZATION.md) for the full performance roadmap.
 | GPU rendering | wgpu backend with instanced shaders | ✅ |
 | GPU as default | Eliminate CPU framebuffer memory overhead | planned |
 | Server/client mode | Daemon architecture like foot --server | ✅ implemented |
-| Workspace split | Thin client/server/common Cargo packages | in progress |
+| Workspace split | Thin client/server/common Cargo packages | ✅ foundation implemented |
 | Zero-copy IPC | Shared memory cell grid between server and client | planned |
 
 **Target: <1 MB per window, ~13 MB total for 10 windows** (vs foot's ~41 MB).

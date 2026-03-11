@@ -237,7 +237,7 @@ This means the first `handterm` invocation starts the server and opens a window.
 
 ### Expected result
 
-- Server: ~3.7MB RSS measured in `server-only` headless mode on this machine; higher once active windows/fonts are loaded
+- Server: ~4.4MB RSS measured in the current live-profiled build for `server-only`; earlier headless measurement was ~3.7MB on this machine
 - Client: ~2-3MB each (GPU surface + cell grid copy)
 - 10 windows: ~28MB total
 
@@ -263,7 +263,7 @@ handterm/
     src/lib.rs
 ```
 
-Status: partially implemented. The repository is now a real Cargo workspace with `handterm-common`, `handterm-client`, and `handterm-server` packages, and the terminal core (`grid`, `parser`, `protocol`, `terminal`) has been extracted into `handterm-common`. Remaining work is to continue moving package-specific code out of the root `handterm` crate so the client can stop linking server/font-side dependencies entirely.
+Status: materially implemented. The repository is now a real Cargo workspace with `handterm-common`, `handterm-server`, `handterm-client`, plus backend-specific `handterm-client-cpu` and `handterm-client-gpu` packages. The terminal core (`grid`, `parser`, `protocol`, `terminal`) lives in `handterm-common`, remote clients bootstrap from server-provided cell metrics, and local font loading is optional for split client builds. Remaining work is to continue moving more client/server-specific code out of the shared root crate and reduce runtime client memory further.
 
 The intended end state is still that the client binary drops: freetype (~600KB RSS), fontconfig, rustybuzz, and all their transitive deps.
 

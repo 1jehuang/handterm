@@ -13,6 +13,8 @@ members = [
     "handterm-common",
     "handterm-server",
     "handterm-client",
+    "handterm-client-cpu",
+    "handterm-client-gpu",
 ]
 resolver = "2"
 

@@ -907,6 +907,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "handterm-client-cpu"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "handterm",
+]
+
+[[package]]
+name = "handterm-client-gpu"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "handterm",
+]
+
+[[package]]
 name = "handterm-common"
 version = "0.1.0"
 dependencies = [

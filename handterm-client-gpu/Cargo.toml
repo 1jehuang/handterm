@@ -1,0 +1,15 @@
+[package]
+name = "handterm-client-gpu"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1.0.95"
+clap = { version = "4.5.28", features = ["derive"] }
+handterm = { path = "..", default-features = false, features = ["daemon-client", "gpu"] }
+
+[[bin]]
+name = "handterm-client-gpu"
+path = "src/main.rs"

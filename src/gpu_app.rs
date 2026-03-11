@@ -2,12 +2,12 @@ use crate::config::AppConfig;
 use crate::font::GlyphAtlas;
 use crate::frontend::{
     FrameScheduler, KeyEventKind, RedrawWork, base64_decode, classify_redraw_work,
-    copy_to_clipboard, handle_ipc_request, key_to_bytes, open_url, paste_from_clipboard,
-    scroll_to_bytes, spawn_pty_watcher,
+    copy_to_clipboard, key_to_bytes, open_url, paste_from_clipboard, scroll_to_bytes,
 };
 use crate::gpu_runtime::{GpuSurfaceState, create_surface_state, render_surface_state, resize_surface_state};
 use crate::ipc::{IpcAction, IpcServer};
 use crate::pty::PtyChild;
+use crate::standalone_support::{handle_ipc_request, spawn_pty_watcher};
 use crate::terminal::Terminal;
 use anyhow::{Context, Result};
 use std::sync::Arc;

@@ -11,11 +11,12 @@ cpu = ["handterm/cpu"]
 gpu = ["handterm/gpu"]
 local-fonts = ["handterm/local-fonts"]
 ligatures = ["handterm/ligatures"]
+daemon-client = ["handterm/daemon-client"]
 
 [dependencies]
 anyhow = "1.0.95"
 clap = { version = "4.5.28", features = ["derive"] }
-handterm = { path = "..", default-features = false }
+handterm = { path = "..", default-features = false, features = ["daemon-client"] }
 
 [[bin]]
 name = "handterm-client"

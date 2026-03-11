@@ -4,6 +4,12 @@ use handterm::backend::{resolve_backend, Backend};
 use handterm::config::AppConfig;
 use std::path::PathBuf;
 
+fn default_server_socket_path() -> PathBuf {
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+        .unwrap_or_else(|_| format!("/tmp/handterm-{}", std::process::id()));
+    PathBuf::from(runtime_dir).join("handterm-server.sock")
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "handterm-client")]
 struct Args {
@@ -18,9 +24,7 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
     let config = AppConfig::load(args.config.as_deref())?;
-    let socket_path = args
-        .socket
-        .unwrap_or_else(handterm::daemon::default_server_socket_path);
+    let socket_path = args.socket.unwrap_or_else(default_server_socket_path);
     let backend = resolve_backend(args.backend)?;
 
     match backend {

@@ -38,11 +38,15 @@ winit = { version = "0.30.9", default-features = false, features = ["wayland", "
 bincode = "1.3.3"
 
 [features]
-default = ["cpu", "gpu", "local-fonts", "ligatures"]
+default = ["cpu", "gpu", "local-fonts", "ligatures", "standalone", "daemon-client", "daemon-server", "cli"]
 cpu = ["dep:softbuffer"]
 gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
 local-fonts = ["dep:freetype-rs", "dep:fontconfig"]
 ligatures = ["dep:rustybuzz", "local-fonts"]
+standalone = []
+daemon-client = []
+daemon-server = []
+cli = []
 
 [dev-dependencies]
 assert_cmd = "2.0.16"

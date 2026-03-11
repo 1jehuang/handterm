@@ -1,4 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
+#[cfg(feature = "local-fonts")]
+use anyhow::Context;
 use crate::protocol::{CellMetrics, GlyphBitmap};
 #[cfg(feature = "local-fonts")]
 use freetype::bitmap::PixelMode;

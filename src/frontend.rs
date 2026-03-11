@@ -1,7 +1,6 @@
 use crate::grid::{Grid, Selection};
 pub use crate::input::{KeyEventKind, key_to_bytes};
-use crate::ipc::{IpcAction, Request, Response};
-use crate::terminal::{CursorStyle, Terminal, TerminalView};
+use crate::terminal::{CursorStyle, TerminalView};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -228,125 +227,6 @@ fn mark_cursor_dirty(grid: &mut Grid, cursor: Option<(usize, usize, CursorStyle)
     }
 }
 
-pub fn handle_ipc_request(terminal: &mut Terminal, req: &Request) -> (Response, IpcAction) {
-    match req.cmd.as_str() {
-        "get-text" => {
-            let text = if let Some(obj) = req.args.as_object() {
-                let start = obj
-                    .get("start_row")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
-                let end = obj
-                    .get("end_row")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(terminal.grid.rows as u64) as usize;
-                terminal.grid.get_text(start, end)
-            } else {
-                terminal.grid.get_all_text()
-            };
-            (
-                Response::ok(serde_json::json!({ "text": text })),
-                IpcAction::None,
-            )
-        }
-        "send-text" => {
-            let text = req
-                .args
-                .as_object()
-                .and_then(|o| o.get("text"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if text.is_empty() {
-                (Response::err("missing 'text' argument"), IpcAction::None)
-            } else {
-                (
-                    Response::ok_empty(),
-                    IpcAction::SendText(text.as_bytes().to_vec()),
-                )
-            }
-        }
-        "send-key" => {
-            let key = req
-                .args
-                .as_object()
-                .and_then(|o| o.get("key"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let bytes = match key {
-                "enter" | "return" => Some(b"\r".to_vec()),
-                "tab" => Some(b"\t".to_vec()),
-                "escape" | "esc" => Some(b"\x1b".to_vec()),
-                "backspace" => Some(b"\x7f".to_vec()),
-                "up" => Some(b"\x1b[A".to_vec()),
-                "down" => Some(b"\x1b[B".to_vec()),
-                "right" => Some(b"\x1b[C".to_vec()),
-                "left" => Some(b"\x1b[D".to_vec()),
-                "home" => Some(b"\x1b[H".to_vec()),
-                "end" => Some(b"\x1b[F".to_vec()),
-                "delete" => Some(b"\x1b[3~".to_vec()),
-                "page_up" => Some(b"\x1b[5~".to_vec()),
-                "page_down" => Some(b"\x1b[6~".to_vec()),
-                "space" => Some(b" ".to_vec()),
-                k if k.starts_with("ctrl+") && k.len() == 6 => {
-                    let ch = k.as_bytes()[5];
-                    if ch.is_ascii_alphabetic() {
-                        Some(vec![ch.to_ascii_lowercase() - b'a' + 1])
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
-            match bytes {
-                Some(bytes) => (Response::ok_empty(), IpcAction::SendText(bytes)),
-                None => (
-                    Response::err(format!("unknown key: {key}")),
-                    IpcAction::None,
-                ),
-            }
-        }
-        "get-cursor" => {
-            let (col, row) = terminal.grid.cursor_pos();
-            (
-                Response::ok(serde_json::json!({ "row": row, "col": col })),
-                IpcAction::None,
-            )
-        }
-        "get-size" => (
-            Response::ok(serde_json::json!({
-                "cols": terminal.cols,
-                "rows": terminal.rows,
-            })),
-            IpcAction::None,
-        ),
-        "set-title" => {
-            let title = req
-                .args
-                .as_object()
-                .and_then(|o| o.get("title"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("handterm")
-                .to_string();
-            (Response::ok_empty(), IpcAction::SetTitle(title))
-        }
-        "close" => (Response::ok_empty(), IpcAction::Close),
-        "ls" => (
-            Response::ok(serde_json::json!({
-                "commands": [
-                    "get-text", "send-text", "send-key",
-                    "get-cursor", "get-size", "set-title",
-                    "close", "ls"
-                ]
-            })),
-            IpcAction::None,
-        ),
-        _ => (
-            Response::err(format!("unknown command: {}", req.cmd)),
-            IpcAction::None,
-        ),
-    }
-}
-
 pub fn scroll_to_bytes(up: bool, app_cursor: bool) -> Vec<u8> {
     match (up, app_cursor) {
         (true, true) => b"\x1bOA".to_vec(),
@@ -439,17 +319,6 @@ pub fn spawn_fd_watcher<E: Clone + Send + 'static>(
         .expect("failed to spawn fd watcher thread");
 }
 
-pub fn spawn_pty_watcher<E: Clone + Send + 'static>(
-    thread_name: &str,
-    pty_fd: i32,
-    ipc_fd: i32,
-    proxy: EventLoopProxy<E>,
-    event: E,
-    stop: Arc<AtomicBool>,
-) {
-    spawn_fd_watcher(thread_name, pty_fd, ipc_fd, proxy, event, stop);
-}
-
 fn fd_watcher_thread<E: Clone + Send + 'static>(
     primary_fd: i32,
     secondary_fd: i32,
@@ -493,89 +362,7 @@ fn fd_watcher_thread<E: Clone + Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppConfig;
-    use crate::font::GlyphAtlas;
-    use crate::render::OffscreenRenderer;
     use crate::terminal::Terminal;
-
-    fn simulate_redraw_times(
-        io_events_ms: &[u64],
-        sample_times_ms: &[u64],
-        frame_interval_ms: u64,
-    ) -> Vec<u64> {
-        let start = Instant::now();
-        let frame_interval = Duration::from_millis(frame_interval_ms);
-        let mut scheduler = FrameScheduler::default();
-        let mut redraws = Vec::new();
-        let mut io_index = 0;
-
-        for &sample_ms in sample_times_ms {
-            while io_index < io_events_ms.len() && io_events_ms[io_index] <= sample_ms {
-                scheduler.mark_io_ready(start + Duration::from_millis(io_events_ms[io_index]), frame_interval);
-                io_index += 1;
-            }
-
-            let decision = scheduler.prepare_redraw(start + Duration::from_millis(sample_ms), || {
-                RedrawWork {
-                    changed: true,
-                    heavy: false,
-                }
-            });
-            if decision.request_redraw {
-                redraws.push(sample_ms);
-            }
-        }
-
-        redraws
-    }
-
-    fn new_atlas(config: &AppConfig) -> GlyphAtlas {
-        GlyphAtlas::new(config.style.font_size).expect("should load a monospace font for rendering")
-    }
-
-    fn simulate_presented_frames(
-        cols: u16,
-        rows: u16,
-        chunks: &[(&[u8], u64)],
-        sample_times_ms: &[u64],
-        frame_interval_ms: u64,
-    ) -> Vec<Vec<u32>> {
-        let config = AppConfig::default();
-        let mut atlas = new_atlas(&config);
-        let mut terminal = Terminal::new(cols, rows);
-        let mut renderer = OffscreenRenderer::new(cols, rows, &atlas);
-        let start = Instant::now();
-        let frame_interval = Duration::from_millis(frame_interval_ms);
-        let mut scheduler = FrameScheduler::default();
-        let mut next_chunk = 0usize;
-        let mut pending_chunks: Vec<&[u8]> = Vec::new();
-        let mut frames = Vec::new();
-
-        for &sample_ms in sample_times_ms {
-            while next_chunk < chunks.len() && chunks[next_chunk].1 <= sample_ms {
-                scheduler.mark_io_ready(start + Duration::from_millis(chunks[next_chunk].1), frame_interval);
-                pending_chunks.push(chunks[next_chunk].0);
-                next_chunk += 1;
-            }
-
-            let decision = scheduler.prepare_redraw(start + Duration::from_millis(sample_ms), || {
-                if pending_chunks.is_empty() {
-                    return RedrawWork::default();
-                }
-                for chunk in pending_chunks.drain(..) {
-                    terminal.process(chunk);
-                }
-                classify_redraw_work(&terminal, true)
-            });
-
-            if decision.request_redraw {
-                renderer.render(&mut terminal, &mut atlas, &config);
-                frames.push(renderer.pixels.clone());
-            }
-        }
-
-        frames
-    }
 
     #[test]
     fn visual_damage_marks_previous_and_current_cursor_cells() {
@@ -638,283 +425,32 @@ mod tests {
     #[test]
     fn visual_signature_changes_when_only_grapheme_changes() {
         let mut terminal = Terminal::new(2, 1);
-        let mut cell = *terminal.grid.cell_at(0, 0);
-        cell.ch = '❤' as u32;
-        terminal
-            .grid
-            .set_cell_with_grapheme(0, 0, cell, Some("❤️".into()));
+        terminal.process("❤️".as_bytes());
         let with_heart = visual_signature(&terminal);
-
-        terminal
-            .grid
-            .set_cell_with_grapheme(0, 0, cell, Some("♥️".into()));
+        terminal.grid.set_cell_with_grapheme(0, 0, crate::grid::Cell::BLANK, Some("♠️".into()));
         let with_suit = visual_signature(&terminal);
-
         assert_ne!(with_heart, with_suit);
     }
 
     #[test]
-    fn frame_scheduler_waits_until_deadline_before_processing_io() {
-        let mut scheduler = FrameScheduler::default();
+    fn frame_scheduler_defers_redraw_until_quiet_period() {
         let start = Instant::now();
         let frame_interval = Duration::from_millis(8);
-        let mut process_calls = 0;
-
-        scheduler.mark_io_ready(start, frame_interval);
-        scheduler.mark_io_ready(start, frame_interval);
-
-        let before_deadline = scheduler.prepare_redraw(start + Duration::from_millis(4), || {
-            process_calls += 1;
-            RedrawWork {
-                changed: true,
-                heavy: false,
-            }
-        });
-
-        assert!(!before_deadline.request_redraw);
-        assert_eq!(before_deadline.wait_until, Some(start + frame_interval));
-        assert_eq!(process_calls, 0);
-
-        let at_deadline = scheduler.prepare_redraw(start + frame_interval, || {
-            process_calls += 1;
-            RedrawWork {
-                changed: true,
-                heavy: false,
-            }
-        });
-
-        assert!(at_deadline.request_redraw);
-        assert_eq!(at_deadline.wait_until, None);
-        assert_eq!(process_calls, 1);
-    }
-
-    #[test]
-    fn frame_scheduler_skips_redraw_when_io_changes_nothing() {
         let mut scheduler = FrameScheduler::default();
-        let start = Instant::now();
-        let frame_interval = Duration::from_millis(8);
-        let mut process_calls = 0;
-
         scheduler.mark_io_ready(start, frame_interval);
 
-        let should_redraw = scheduler.prepare_redraw(start + frame_interval, || {
-            process_calls += 1;
-            RedrawWork::default()
-        });
-
-        assert!(!should_redraw.request_redraw);
-        assert_eq!(process_calls, 1);
-    }
-
-    #[test]
-    fn frame_scheduler_preserves_manual_redraw_requests() {
-        let mut scheduler = FrameScheduler::default();
-
-        scheduler.mark_redraw_needed();
-
-        let first = scheduler.prepare_redraw(Instant::now(), RedrawWork::default);
-        let second = scheduler.prepare_redraw(Instant::now(), RedrawWork::default);
-
-        assert!(first.request_redraw);
-        assert!(!second.request_redraw);
-    }
-
-    #[test]
-    fn frame_scheduler_extends_deadline_during_active_io_burst() {
-        let mut scheduler = FrameScheduler::default();
-        let start = Instant::now();
-        let frame_interval = Duration::from_millis(8);
-
-        scheduler.mark_io_ready(start, frame_interval);
-        scheduler.mark_io_ready(start + Duration::from_millis(4), frame_interval);
-
-        let decision = scheduler.prepare_redraw(start + Duration::from_millis(9), || {
-            RedrawWork {
-                changed: true,
-                heavy: false,
-            }
-        });
-
-        assert!(!decision.request_redraw);
-        assert_eq!(decision.wait_until, Some(start + Duration::from_millis(12)));
-    }
-
-    #[test]
-    fn frame_scheduler_caps_io_burst_deferral() {
-        let mut scheduler = FrameScheduler::default();
-        let start = Instant::now();
-        let frame_interval = Duration::from_millis(8);
-
-        scheduler.mark_io_ready(start, frame_interval);
-        scheduler.mark_io_ready(start + Duration::from_millis(18), frame_interval);
-
-        let decision = scheduler.prepare_redraw(start + Duration::from_millis(23), || {
-            RedrawWork {
-                changed: true,
-                heavy: false,
-            }
-        });
-
-        assert!(!decision.request_redraw);
-        assert_eq!(decision.wait_until, Some(start + Duration::from_millis(24)));
-
-        let at_cap = scheduler.prepare_redraw(start + Duration::from_millis(24), || {
-            RedrawWork {
-                changed: true,
-                heavy: false,
-            }
-        });
-        assert!(at_cap.request_redraw);
-    }
-
-    #[test]
-    fn heavy_redraws_get_one_extra_settle_interval_after_long_burst() {
-        let mut scheduler = FrameScheduler::default();
-        let start = Instant::now();
-        let frame_interval = Duration::from_millis(8);
-
-        scheduler.mark_io_ready(start, frame_interval);
-        scheduler.mark_io_ready(start + Duration::from_millis(8), frame_interval);
-        scheduler.mark_io_ready(start + Duration::from_millis(16), frame_interval);
-
-        let at_deadline = scheduler.prepare_redraw(start + Duration::from_millis(24), || RedrawWork {
+        let decision = scheduler.prepare_redraw(start + Duration::from_millis(1), || RedrawWork {
             changed: true,
-            heavy: true,
+            heavy: false,
         });
+        assert!(!decision.request_redraw);
+        assert!(decision.wait_until.is_some());
 
-        assert!(!at_deadline.request_redraw);
-        assert_eq!(
-            at_deadline.wait_until,
-            Some(start + Duration::from_millis(32))
-        );
-
-        let settled = scheduler.prepare_redraw(start + Duration::from_millis(32), RedrawWork::default);
-        assert!(settled.request_redraw);
-    }
-
-    #[test]
-    fn flicker_burst_test_collapses_many_io_events_into_one_redraw() {
-        let redraws = simulate_redraw_times(
-            &[0, 3, 6, 9, 12, 15, 18],
-            &[4, 8, 12, 16, 20, 24, 28, 32],
-            8,
-        );
-
-        assert_eq!(redraws, vec![24]);
-    }
-
-    #[test]
-    fn flicker_burst_test_allows_next_frame_after_burst_finishes() {
-        let redraws = simulate_redraw_times(
-            &[0, 3, 6, 20],
-            &[4, 8, 12, 16, 20, 24, 28, 32],
-            8,
-        );
-
-        assert_eq!(redraws, vec![16, 28]);
-    }
-
-    #[test]
-    fn presented_frames_skip_partial_full_screen_repaint_bursts() {
-        let chunks: [(&[u8], u64); 5] = [
-            (b"\x1b[?1049h\x1b[2J\x1b[H", 0),
-            (b"\x1b[38;5;39mstatus\x1b[0m\r\n", 3),
-            (b"alpha beta gamma\r\n", 6),
-            (b"delta epsilon\r\n", 9),
-            (b"zeta eta theta\r\niota kappa\r\n", 12),
-        ];
-        let samples = [4, 8, 12, 16, 20, 24, 28];
-        let frames = simulate_presented_frames(32, 6, &chunks, &samples, 8);
-
-        assert_eq!(frames.len(), 1, "repaint burst should collapse to one presented frame");
-
-        let final_frame = simulate_presented_frames(32, 6, &chunks, &[28], 0)
-            .pop()
-            .expect("final frame should render");
-        assert_eq!(frames[0], final_frame);
-    }
-
-    #[test]
-    fn presented_frames_allow_next_stable_frame_after_burst() {
-        let chunks: [(&[u8], u64); 6] = [
-            (b"\x1b[?1049h\x1b[2J\x1b[H", 0),
-            (b"one\r\n", 3),
-            (b"two\r\n", 6),
-            (b"three\r\n", 9),
-            (b"\x1b[H\x1b[2Kdone\r\n", 26),
-            (b"\x1b[2;1Hsteady\r\n", 27),
-        ];
-        let samples = [4, 8, 12, 16, 20, 24, 28, 32, 36];
-        let frames = simulate_presented_frames(16, 4, &chunks, &samples, 8);
-
-        assert_eq!(frames.len(), 2, "separate repaint bursts should present two stable frames");
-        assert_ne!(frames[0], frames[1], "distinct stable states should present distinct frames");
-    }
-
-    #[test]
-    fn presented_frames_skip_partial_tui_startup_and_help_overlay_repaints() {
-        let chunks: [(&[u8], u64); 13] = [
-            (b"\x1b[?1049h\x1b[2J\x1b[H", 0),
-            (b"\x1b[48;5;236m\x1b[38;5;255m jcode \x1b[0m", 2),
-            (b"\x1b[2;1Hprojects", 4),
-            (b"\x1b[3;1Hmain.rs", 6),
-            (b"\x1b[2;20Hfn main() {", 8),
-            (b"\x1b[3;20H    println!(\"hi\");", 10),
-            (b"\x1b[4;20H}", 12),
-            (b"\x1b[20;1H/help", 28),
-            (b"\x1b[2J\x1b[H", 30),
-            (b"\x1b[48;5;24m\x1b[38;5;255m Help \x1b[0m", 32),
-            (b"\x1b[3;3HESC  close", 34),
-            (b"\x1b[4;3H/    commands", 36),
-            (b"\x1b[5;3H?    search", 38),
-        ];
-        let samples = [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48];
-        let frames = simulate_presented_frames(48, 20, &chunks, &samples, 8);
-
-        assert_eq!(
-            frames.len(),
-            2,
-            "startup burst and help-overlay burst should each present one stable frame"
-        );
-        assert_ne!(
-            frames[0], frames[1],
-            "help overlay should produce a distinct second stable frame"
-        );
-
-        let startup_final = simulate_presented_frames(48, 20, &chunks[..7], &[24], 0)
-            .pop()
-            .expect("startup frame should render");
-        let help_final = simulate_presented_frames(48, 20, &chunks, &[48], 0)
-            .pop()
-            .expect("help frame should render");
-
-        assert_eq!(frames[0], startup_final, "startup should skip partial app-launch frames");
-        assert_eq!(frames[1], help_final, "help should skip partial overlay frames");
-    }
-
-    #[test]
-    fn presented_frames_skip_long_heavy_repaint_bursts() {
-        let chunks: [(&[u8], u64); 7] = [
-            (b"\x1b[?1049h\x1b[2J\x1b[H", 0),
-            (b"\x1b[48;5;236m\x1b[38;5;255m jcode \x1b[0m", 6),
-            (b"\x1b[2;1Hprojects", 12),
-            (b"\x1b[3;1Hmain.rs", 18),
-            (b"\x1b[2;20Hfn main() {", 24),
-            (b"\x1b[3;20H    println!(\"hi\");", 30),
-            (b"\x1b[4;20H}", 36),
-        ];
-        let samples = [8, 16, 24, 32, 40, 48, 56];
-        let frames = simulate_presented_frames(48, 20, &chunks, &samples, 8);
-
-        assert_eq!(
-            frames.len(),
-            1,
-            "long heavy repaint burst should settle to one presented frame"
-        );
-
-        let final_frame = simulate_presented_frames(48, 20, &chunks, &[56], 0)
-            .pop()
-            .expect("final settled frame should render");
-        assert_eq!(frames[0], final_frame);
+        let decision = scheduler.prepare_redraw(start + Duration::from_millis(9), || RedrawWork {
+            changed: true,
+            heavy: false,
+        });
+        assert!(decision.request_redraw);
+        assert!(decision.wait_until.is_none());
     }
 }

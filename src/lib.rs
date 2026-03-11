@@ -1,36 +1,46 @@
 #[cfg_attr(feature = "gpu", allow(dead_code))]
-#[cfg(feature = "cpu")]
+#[cfg(all(feature = "cpu", feature = "standalone"))]
 pub mod app;
 pub mod backend;
 pub mod build_info;
+#[cfg(feature = "daemon-client")]
 #[allow(dead_code)]
 pub mod client;
+#[cfg(feature = "cli")]
 pub mod cli;
 pub mod color;
 pub mod config;
+#[cfg(feature = "daemon-server")]
 pub mod daemon;
 #[allow(dead_code)]
 pub mod font;
 pub mod frontend;
 #[cfg(feature = "gpu")]
 pub mod gpu_frame;
-#[cfg(feature = "gpu")]
+#[cfg(all(feature = "gpu", feature = "standalone"))]
 pub mod gpu_app;
 #[cfg(feature = "gpu")]
 pub mod gpu_runtime;
+#[cfg(feature = "standalone")]
 pub mod ipc;
 pub mod input;
+#[cfg(feature = "standalone")]
 pub mod metrics;
+#[cfg(any(feature = "standalone", feature = "daemon-server"))]
 pub mod pty;
 pub mod remote;
-#[cfg(feature = "cpu")]
+#[cfg(all(feature = "cpu", feature = "daemon-client"))]
 pub mod remote_app;
-#[cfg(feature = "gpu")]
+#[cfg(all(feature = "gpu", feature = "daemon-client"))]
 pub mod remote_gpu_app;
 pub mod render;
+#[cfg(feature = "daemon-server")]
 #[allow(dead_code)]
 pub mod server;
+#[cfg(feature = "standalone")]
+pub mod standalone_support;
 pub mod visual;
+#[cfg(feature = "standalone")]
 pub mod workloads;
 
 pub use handterm_common::grid;
@@ -38,20 +48,28 @@ pub use handterm_common::parser;
 pub use handterm_common::protocol;
 pub use handterm_common::terminal;
 
+#[cfg(feature = "cli")]
 use anyhow::Result;
+#[cfg(feature = "cli")]
 use backend::{Backend, resolve_backend};
-#[cfg(feature = "cpu")]
+#[cfg(all(feature = "cpu", feature = "cli"))]
 use backend::background_opacity_warning;
+#[cfg(feature = "cli")]
 use clap::Parser;
+#[cfg(feature = "cli")]
 use cli::{Cli, Command};
+#[cfg(feature = "cli")]
 use config::AppConfig;
+#[cfg(feature = "standalone")]
 use metrics::{format_bench_results, run_quick_bench};
 
+#[cfg(feature = "cli")]
 pub fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     run_with_cli(cli)
 }
 
+#[cfg(feature = "cli")]
 pub fn run_with_cli(cli: Cli) -> Result<()> {
     let backend = resolve_backend(cli.backend)?;
     let config = AppConfig::load(cli.config.as_deref())?;

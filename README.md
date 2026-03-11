@@ -24,50 +24,62 @@ Handterm has both a CPU renderer (softbuffer) and a GPU renderer (wgpu). The cur
 
 ## Benchmarks
 
-All measurements taken on the same machine, same session, no other GPU-intensive work running.
+All measurements below refer to the **current host-based handterm architecture**, not the older one-process-per-window standalone path.
 
 **Test system:** Intel Core Ultra 7 256V, 15 GB RAM, Arch Linux, niri Wayland compositor, 2560x1600 @ 120 Hz.
 
-**Methodology:** Each terminal launched 3 times. Startup measured by polling `niri msg windows` at 2ms intervals. Memory from `/proc/<pid>/status` after 1s idle. Binary size is the on-disk ELF.
+### What the numbers mean now
 
-### Startup time
+Handterm currently has three relevant local architectures:
 
-Time from `exec()` to window visible on the Wayland compositor.
+1. **CPU host** — one process, many CPU-rendered windows
+2. **GPU host** — one process, many GPU-rendered windows
+3. **daemon mode** — server plus separate thin clients (still implemented, but no longer the best local low-RAM path)
 
-| Terminal | Best | Median | Worst |
-|----------|-----:|-------:|------:|
-| **handterm** | **28 ms** | **30 ms** | **31 ms** |
-| foot | 33 ms | 41 ms | 42 ms |
-| alacritty | 91 ms | 128 ms | 145 ms |
-| kitty | 186 ms | 247 ms | 247 ms |
-| ghostty | 641 ms | 707 ms | 807 ms |
+### Current measured memory
 
-handterm starts ~1.4x faster than foot, ~4x faster than alacritty, ~8x faster than kitty, and ~24x faster than ghostty.
+#### Host memory scaling
 
-### Memory usage (single idle window)
+| Setup | First window | Each additional |
+|-------|-------------:|----------------:|
+| handterm CPU host | ~37 MB | ~20 MB |
+| **handterm GPU host** | **~61 MB** | **~1-2 MB** |
+| handterm daemon server-only | ~4.4 MB | N/A |
 
-| Terminal | RSS | vs handterm |
-|----------|----:|------------:|
-| **handterm** | **23 MB** | 1.0x |
-| foot | 24 MB | 1.04x |
-| footclient | 1.6 MB\* | 0.07x |
-| alacritty | 84 MB | 3.7x |
-| kitty | 117 MB | 5.1x |
-| ghostty | 154 MB | 6.7x |
+The current best local low-RAM path is the **shared-GPU host**. It pays a large fixed first-window cost once, then scales cheaply for additional windows.
 
-\*footclient shares a server process (25 MB). Total for first window is ~27 MB; each additional adds ~1.6 MB.
+Measured shared-GPU host scaling on this machine/session:
 
-#### Memory breakdown
+| Windows | handterm GPU host RSS |
+|--------:|-----------------------:|
+| 1 | ~61.3 MB |
+| 2 | ~63.1 MB |
+| 3 | ~64.0 MB |
+| 4 | ~65.0 MB |
+| 5 | ~67.2 MB |
+| 6 | ~68.1 MB |
 
-| Component | handterm | foot | alacritty | kitty | ghostty |
-|-----------|--------:|-----:|----------:|------:|--------:|
-| Framebuffers (SHM) | ~20 MB | ~20 MB | - | - | - |
-| GPU context | - | - | ~50 MB | ~80 MB | ~100 MB |
-| Font cache + heap | ~1 MB | ~1 MB | ~5 MB | ~10 MB | ~10 MB |
-| Binary code pages | ~3 MB | ~0.5 MB | ~9 MB | ~18 MB | ~26 MB |
-| Shared libs | varies | varies | varies | varies | varies |
+That puts the incremental cost in roughly the **1-2 MB/window** range after the first window.
 
-CPU renderers (handterm, foot) pay for framebuffers in RSS. GPU renderers pay for driver context, shader compilation, and texture atlases.
+#### Why CPU host is still larger per added window
+
+The CPU host path improved substantially, but the dominant remaining per-window cost is the Wayland/softbuffer SHM presentation buffers. In other words, the CPU host is no longer mainly limited by terminal state — it is limited by presentation-buffer memory.
+
+### Current measured startup behavior
+
+#### CPU host
+
+- added-window startup from an existing host: ~**16 ms**
+
+#### GPU host
+
+The shared-GPU host is the best path for memory, but new-window startup is still the main remaining bottleneck. Recent measured `open-window` timings on the shared-GPU host are in the **tens of milliseconds**, with the first extra window sometimes noticeably slower than later ones.
+
+Internal timing instrumentation shows the remaining cost is mostly in:
+
+- **window / surface creation**
+
+not PTY spawn.
 
 ### Binary and install size
 
@@ -272,7 +284,7 @@ cargo build --release
 ./target/release/handterm
 ```
 
-This default build includes both CPU and GPU frontends. When a compatible host is already running, repeated launches reuse that host and open another window in the same process instead of spawning a full new renderer process.
+This default build includes both CPU and GPU frontends. Plain local `handterm` now follows the **host path by default**: when a compatible host is already running, repeated launches reuse that host and open another window in the same process instead of spawning a full new renderer process.
 
 ### Build with GPU rendering only
 

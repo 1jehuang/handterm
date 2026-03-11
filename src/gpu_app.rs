@@ -176,11 +176,13 @@ impl GpuApp {
         cols: Option<u16>,
         rows: Option<u16>,
     ) -> Result<u64> {
+        let start = Instant::now();
         let cols = cols.unwrap_or(self.config.window.columns).max(1);
         let rows = rows.unwrap_or(self.config.window.rows).max(1);
         let dpi = self.resolve_dpi(event_loop);
         self.ensure_atlas(dpi)?;
         let atlas = self.atlas_cache.get(&dpi).expect("atlas should exist for dpi");
+        let before_surface = Instant::now();
         let renderer = create_surface_state_with_shared(
             self.shared.clone(),
             event_loop,
@@ -191,6 +193,7 @@ impl GpuApp {
         .expect("gpu surface state should initialize");
         eprintln!("handterm: {}", renderer.surface_debug_summary());
         let terminal = Terminal::new_with_scrollback(cols, rows, self.config.scrollback.lines);
+        let before_pty = Instant::now();
         let pty = PtyChild::spawn_default_shell(cols, rows).expect("pty should spawn");
         let stop = Arc::new(AtomicBool::new(false));
         let id = self.next_window_id;
@@ -229,6 +232,12 @@ impl GpuApp {
         if let Some(state) = self.windows.get(&winit_id) {
             state.renderer.window.request_redraw();
         }
+        eprintln!(
+            "handterm gpu host: open-window total={}ms surface={}ms pty={}ms",
+            start.elapsed().as_millis(),
+            before_pty.duration_since(before_surface).as_millis(),
+            Instant::now().duration_since(before_pty).as_millis(),
+        );
         Ok(id)
     }
 
@@ -286,6 +295,18 @@ impl GpuApp {
                 );
             };
             return (Response::ok_empty(), IpcAction::FocusWindow(window_id));
+        }
+
+        if req.cmd == "list-windows" {
+            let windows: Vec<u64> = self.windows.values().map(|state| state.id).collect();
+            return (
+                Response::ok(serde_json::json!({
+                    "windows": windows,
+                    "count": windows.len(),
+                    "focused": self.focused_window,
+                })),
+                IpcAction::None,
+            );
         }
 
         let Some(target_id) = self.resolve_target_window_id(Self::target_window_from_args(req)) else {

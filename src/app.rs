@@ -194,11 +194,13 @@ impl HandtermApp {
         cols: Option<u16>,
         rows: Option<u16>,
     ) -> Result<u64> {
+        let start = Instant::now();
         let cols = cols.unwrap_or(self.config.window.columns).max(1);
         let rows = rows.unwrap_or(self.config.window.rows).max(1);
         let dpi = self.resolve_dpi(event_loop);
         self.ensure_atlas(dpi)?;
         let (cell_width, cell_height) = self.atlas_metrics(dpi);
+        let before_window = Instant::now();
         let window = Arc::new(
             event_loop
                 .create_window(self.create_window_attributes(cell_width, cell_height, cols, rows))
@@ -212,6 +214,7 @@ impl HandtermApp {
         let surface = Surface::new(&context, window.clone())
             .map_err(|e| anyhow::anyhow!("softbuffer surface should be created: {e}"))?;
         let terminal = Terminal::new_with_scrollback(cols, rows, self.config.scrollback.lines);
+        let before_pty = Instant::now();
         let pty = PtyChild::spawn_default_shell(cols, rows).context("pty should spawn")?;
         let stop = Arc::new(AtomicBool::new(false));
         let id = self.next_window_id;
@@ -255,6 +258,12 @@ impl HandtermApp {
         if let Some(state) = self.windows.get(&winit_id) {
             state.window.request_redraw();
         }
+        eprintln!(
+            "handterm cpu host: open-window total={}ms window={}ms pty={}ms",
+            start.elapsed().as_millis(),
+            before_pty.duration_since(before_window).as_millis(),
+            Instant::now().duration_since(before_pty).as_millis(),
+        );
         Ok(id)
     }
 
@@ -314,6 +323,18 @@ impl HandtermApp {
             return (Response::ok_empty(), IpcAction::FocusWindow(window_id));
         }
 
+        if req.cmd == "list-windows" {
+            let windows: Vec<u64> = self.windows.values().map(|state| state.id).collect();
+            return (
+                Response::ok(serde_json::json!({
+                    "windows": windows,
+                    "count": windows.len(),
+                    "focused": self.focused_window,
+                })),
+                IpcAction::None,
+            );
+        }
+
         if self.windows.is_empty() {
             return match req.cmd.as_str() {
                 "ls" => (
@@ -321,7 +342,7 @@ impl HandtermApp {
                         "commands": [
                             "get-text", "send-text", "send-key",
                             "get-cursor", "get-size", "set-title",
-                            "close", "open-window", "focus-window", "ls"
+                            "close", "open-window", "focus-window", "list-windows", "ls"
                         ]
                     })),
                     IpcAction::None,

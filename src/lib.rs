@@ -63,16 +63,20 @@ use config::AppConfig;
 #[cfg(feature = "standalone")]
 use metrics::{format_bench_results, run_quick_bench};
 
-#[cfg(all(feature = "cpu", feature = "cli"))]
+#[cfg(feature = "cli")]
 fn open_window_in_existing_host(
+    backend: Backend,
     to: Option<std::path::PathBuf>,
     cols: Option<u16>,
     rows: Option<u16>,
 ) -> Result<()> {
     let socket_path = match to {
         Some(path) => path,
-        None => ipc::find_socket_for_backend(Backend::Cpu)
-            .ok_or_else(|| anyhow::anyhow!("no running handterm CPU host found"))?,
+        None => ipc::find_socket_for_backend(backend)
+            .ok_or_else(|| anyhow::anyhow!("no running handterm {} host found", match backend {
+                Backend::Cpu => "CPU",
+                Backend::Gpu => "GPU",
+            }))?,
     };
 
     let mut args = serde_json::Map::new();
@@ -129,15 +133,7 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             Ok(())
         }
         Some(Command::OpenWindow { to, cols, rows }) => {
-            #[cfg(feature = "cpu")]
-            {
-                open_window_in_existing_host(to, cols, rows)
-            }
-            #[cfg(not(feature = "cpu"))]
-            {
-                let _ = (to, cols, rows);
-                unreachable!("open-window requires the CPU host frontend")
-            }
+            open_window_in_existing_host(backend, to, cols, rows)
         }
         Some(Command::ServerOnly { socket }) => daemon::run_server_only(socket, &config),
         Some(Command::ClientOnly { socket }) => {

@@ -288,23 +288,34 @@ impl HandtermApp {
     }
 
     fn handle_host_ipc_request(&mut self, req: &Request) -> (Response, IpcAction) {
+        if req.cmd == "open-window" {
+            let cols = req
+                .args
+                .as_object()
+                .and_then(|o| o.get("cols"))
+                .and_then(|v| v.as_u64())
+                .and_then(|v| u16::try_from(v).ok());
+            let rows = req
+                .args
+                .as_object()
+                .and_then(|o| o.get("rows"))
+                .and_then(|v| v.as_u64())
+                .and_then(|v| u16::try_from(v).ok());
+            return (Response::ok_empty(), IpcAction::OpenWindow { cols, rows });
+        }
+
+        if req.cmd == "focus-window" {
+            let Some(window_id) = Self::target_window_from_args(req) else {
+                return (
+                    Response::err("missing 'window_id' argument"),
+                    IpcAction::None,
+                );
+            };
+            return (Response::ok_empty(), IpcAction::FocusWindow(window_id));
+        }
+
         if self.windows.is_empty() {
             return match req.cmd.as_str() {
-                "open-window" => {
-                    let cols = req
-                        .args
-                        .as_object()
-                        .and_then(|o| o.get("cols"))
-                        .and_then(|v| v.as_u64())
-                        .and_then(|v| u16::try_from(v).ok());
-                    let rows = req
-                        .args
-                        .as_object()
-                        .and_then(|o| o.get("rows"))
-                        .and_then(|v| v.as_u64())
-                        .and_then(|v| u16::try_from(v).ok());
-                    (Response::ok_empty(), IpcAction::OpenWindow { cols, rows })
-                }
                 "ls" => (
                     Response::ok(serde_json::json!({
                         "commands": [

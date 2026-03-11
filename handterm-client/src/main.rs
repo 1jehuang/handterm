@@ -1,11 +1,27 @@
 use anyhow::Result;
+use clap::Parser;
 use handterm::backend::{resolve_backend, Backend};
 use handterm::config::AppConfig;
+use std::path::PathBuf;
+
+#[derive(Debug, Parser)]
+#[command(name = "handterm-client")]
+struct Args {
+    #[arg(long)]
+    config: Option<PathBuf>,
+    #[arg(long)]
+    socket: Option<PathBuf>,
+    #[arg(long, value_enum)]
+    backend: Option<Backend>,
+}
 
 fn main() -> Result<()> {
-    let config = AppConfig::load(None)?;
-    let socket_path = handterm::daemon::default_server_socket_path();
-    let backend = resolve_backend(None)?;
+    let args = Args::parse();
+    let config = AppConfig::load(args.config.as_deref())?;
+    let socket_path = args
+        .socket
+        .unwrap_or_else(handterm::daemon::default_server_socket_path);
+    let backend = resolve_backend(args.backend)?;
 
     match backend {
         Backend::Cpu => {

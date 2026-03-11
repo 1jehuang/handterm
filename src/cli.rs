@@ -1,3 +1,4 @@
+use crate::backend::Backend;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -7,6 +8,12 @@ use std::path::PathBuf;
 pub struct Cli {
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
+
+    #[arg(long, global = true, value_enum)]
+    pub backend: Option<Backend>,
+
+    #[arg(long, global = true)]
+    pub standalone: bool,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -20,6 +27,18 @@ pub enum Command {
     InitConfig,
     /// Run quick local performance benchmarks
     Bench,
+    /// Run only the daemon/server process
+    ServerOnly {
+        /// Socket path to bind (default: $XDG_RUNTIME_DIR/handterm-server.sock)
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    /// Run a window frontend connected to a running handterm server
+    ClientOnly {
+        /// Socket path to connect (default: $XDG_RUNTIME_DIR/handterm-server.sock)
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
     /// Send a command to a running handterm instance
     #[command(name = "@")]
     Remote {

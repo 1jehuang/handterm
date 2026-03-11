@@ -1,0 +1,20 @@
+[package]
+name = "handterm-client"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[features]
+default = ["cpu", "gpu", "ligatures"]
+cpu = ["handterm/cpu"]
+gpu = ["handterm/gpu"]
+ligatures = ["handterm/ligatures"]
+
+[dependencies]
+anyhow = "1.0.95"
+handterm = { path = "..", default-features = false }
+
+[[bin]]
+name = "handterm-client"
+path = "src/main.rs"

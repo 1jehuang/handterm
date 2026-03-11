@@ -1,15 +1,22 @@
+use crate::client::{ProtocolClient, TryRecvStatus};
 use crate::config::AppConfig;
 use crate::font::GlyphAtlas;
 use crate::frontend::{
     FrameScheduler, KeyEventKind, RedrawWork, base64_decode, classify_redraw_work,
-    copy_to_clipboard, handle_ipc_request, key_to_bytes, open_url, paste_from_clipboard,
-    scroll_to_bytes, spawn_pty_watcher,
+    copy_to_clipboard, key_to_bytes, open_url, paste_from_clipboard, scroll_to_bytes,
+    spawn_fd_watcher,
 };
 use crate::gpu_runtime::{GpuSurfaceState, create_surface_state, render_surface_state, resize_surface_state};
-use crate::ipc::{IpcAction, IpcServer};
-use crate::pty::PtyChild;
-use crate::terminal::Terminal;
+use crate::protocol::{
+    ClientMessage, KeyEvent as ProtocolKeyEvent, KeyEventKind as ProtocolKeyEventKind,
+    MouseButton as ProtocolMouseButton, MouseEvent as ProtocolMouseEvent,
+    MouseEventKind as ProtocolMouseEventKind, ServerMessage, WindowId,
+};
+use crate::remote::{
+    RemoteTerminalState, modifier_bits, should_apply_message, terminal_size_for_pixels,
+};
 use anyhow::{Context, Result};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -17,69 +24,64 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Ime, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::WindowId;
+use winit::window::WindowId as WinitWindowId;
 
 #[derive(Debug, Clone)]
-enum GpuAppEvent {
-    PtyReadable,
+enum AppEvent {
+    ServerReadable,
 }
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 
-pub fn run(config: AppConfig) -> Result<()> {
-    let event_loop = EventLoop::<GpuAppEvent>::with_user_event()
+pub fn run(config: AppConfig, socket_path: PathBuf) -> Result<()> {
+    let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
         .context("failed to create event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let proxy = event_loop.create_proxy();
-    let socket_path = crate::ipc::default_socket_path();
-    let ipc = IpcServer::bind(&socket_path).ok();
     eprintln!(
         "{}",
         crate::build_info::startup_banner(crate::backend::Backend::Gpu, Some(&socket_path))
     );
-    if let Some(ref ipc) = ipc {
-        eprintln!("handterm: listening on {}", ipc.path().display());
-    } else {
-        eprintln!("handterm: failed to bind {}", socket_path.display());
-    }
+    eprintln!("handterm: connecting to {}", socket_path.display());
 
-    let mut app = GpuApp::new(config, ipc, proxy);
+    let mut app = RemoteGpuApp::new(config, socket_path, proxy);
     event_loop
         .run_app(&mut app)
-        .context("failed while running app")
+        .context("failed while running remote gpu app")
 }
 
-struct GpuApp {
+struct RemoteGpuApp {
     config: AppConfig,
-    state: Option<GpuState>,
-    ipc: Option<IpcServer>,
-    proxy: EventLoopProxy<GpuAppEvent>,
+    socket_path: PathBuf,
+    state: Option<RemoteGpuState>,
+    proxy: EventLoopProxy<AppEvent>,
     watcher_started: bool,
     watcher_stop: Option<Arc<AtomicBool>>,
     scheduler: FrameScheduler,
 }
 
-struct GpuState {
+struct RemoteGpuState {
     renderer: GpuSurfaceState,
-    terminal: Terminal,
-    pty: PtyChild,
-    pty_buf: Vec<u8>,
-    atlas: GlyphAtlas,
-    pty_closed: bool,
+    terminal: RemoteTerminalState,
+    client: ProtocolClient,
+    window_id: Option<WindowId>,
+    pending_size: Option<(u16, u16)>,
+    disconnected: bool,
     modifiers: Modifiers,
     mouse_col: usize,
     mouse_row: usize,
     selecting: bool,
+    atlas: GlyphAtlas,
 }
 
-impl GpuApp {
-    fn new(config: AppConfig, ipc: Option<IpcServer>, proxy: EventLoopProxy<GpuAppEvent>) -> Self {
+impl RemoteGpuApp {
+    fn new(config: AppConfig, socket_path: PathBuf, proxy: EventLoopProxy<AppEvent>) -> Self {
         Self {
             config,
+            socket_path,
             state: None,
-            ipc,
             proxy,
             watcher_started: false,
             watcher_stop: None,
@@ -87,37 +89,32 @@ impl GpuApp {
         }
     }
 
-    fn start_pty_watcher(&mut self) {
+    fn start_server_watcher(&mut self) {
         if self.watcher_started {
             return;
         }
         let Some(state) = &self.state else { return };
 
-        let pty_fd = state.pty.raw_fd();
-        let ipc_fd = self.ipc.as_ref().map(|s| s.listener_raw_fd()).unwrap_or(-1);
         let stop = Arc::new(AtomicBool::new(false));
         self.watcher_stop = Some(stop.clone());
         self.watcher_started = true;
-
-        spawn_pty_watcher(
-            "pty-watcher-gpu",
-            pty_fd,
-            ipc_fd,
+        spawn_fd_watcher(
+            "protocol-watcher-gpu",
+            state.client.raw_fd(),
+            -1,
             self.proxy.clone(),
-            GpuAppEvent::PtyReadable,
+            AppEvent::ServerReadable,
             stop,
         );
     }
 }
 
-impl ApplicationHandler<GpuAppEvent> for GpuApp {
+impl ApplicationHandler<AppEvent> for RemoteGpuApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_some() {
             return;
         }
 
-        let cols = self.config.window.columns;
-        let rows = self.config.window.rows;
         let probe_window = event_loop
             .create_window(winit::window::Window::default_attributes().with_visible(false))
             .expect("probe window should succeed");
@@ -125,42 +122,52 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
         drop(probe_window);
         let dpi = (96.0 * scale_factor) as u32;
 
-        let atlas = GlyphAtlas::with_family_dpi(
+        let mut atlas = GlyphAtlas::with_family_dpi(
             &self.config.style.font_family,
             self.config.style.font_size,
             dpi,
         )
         .or_else(|_| GlyphAtlas::new_with_dpi(self.config.style.font_size, dpi))
         .expect("failed to load font atlas");
+        atlas.drop_font_sources();
 
-        let renderer = create_surface_state(event_loop, &self.config, "handterm [gpu]", &atlas)
+        let renderer = create_surface_state(event_loop, &self.config, "handterm [gpu remote]", &atlas)
             .expect("gpu surface state should initialize");
         eprintln!("handterm: {}", renderer.surface_debug_summary());
-        let terminal = Terminal::new_with_scrollback(cols, rows, self.config.scrollback.lines);
-        let pty = PtyChild::spawn_default_shell(cols, rows).expect("pty should spawn");
+        let cols = self.config.window.columns;
+        let rows = self.config.window.rows;
+        let mut client = ProtocolClient::connect(&self.socket_path)
+            .expect("remote frontend should connect to daemon");
+        client
+            .set_nonblocking(true)
+            .expect("protocol client should become non-blocking");
+        client
+            .send(&ClientMessage::NewWindow { cols, rows, dpi })
+            .expect("remote frontend should request a new window");
 
-        self.state = Some(GpuState {
+        self.state = Some(RemoteGpuState {
             renderer,
-            terminal,
-            pty,
-            pty_buf: vec![0u8; 64 * 1024],
-            atlas,
-            pty_closed: false,
+            terminal: RemoteTerminalState::new(cols, rows),
+            client,
+            window_id: None,
+            pending_size: None,
+            disconnected: false,
             modifiers: Modifiers::default(),
             mouse_col: 0,
             mouse_row: 0,
             selecting: false,
+            atlas,
         });
 
         if let Some(state) = &self.state {
             state.renderer.window.request_redraw();
         }
-        self.start_pty_watcher();
+        self.start_server_watcher();
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: GpuAppEvent) {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
-            GpuAppEvent::PtyReadable => {
+            AppEvent::ServerReadable => {
                 self.scheduler.mark_io_ready(Instant::now(), FRAME_INTERVAL);
             }
         }
@@ -169,7 +176,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        _window_id: WinitWindowId,
         event: WindowEvent,
     ) {
         let Some(state) = self.state.as_mut() else {
@@ -177,28 +184,25 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
         };
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                if let Some(window_id) = state.window_id {
+                    let _ = state.client.send(&ClientMessage::CloseWindow { window_id });
+                }
+                event_loop.exit();
+            }
             WindowEvent::Resized(size) => {
                 if size.width > 0 && size.height > 0 {
-                    let new_cols = (size.width as usize / state.atlas.cell_width.max(1)) as u16;
-                    let new_rows = (size.height as usize / state.atlas.cell_height.max(1)) as u16;
-                    let new_cols = new_cols.max(1);
-                    let new_rows = new_rows.max(1);
-
+                    let new_size = terminal_size_for_pixels(size.width, size.height, &state.atlas);
                     resize_surface_state(
                         &mut state.renderer,
                         &state.atlas,
                         size.width,
                         size.height,
-                        new_cols,
-                        new_rows,
+                        new_size.0,
+                        new_size.1,
                     );
-
-                    if new_cols != state.terminal.cols || new_rows != state.terminal.rows {
-                        state.terminal.resize(new_cols, new_rows);
-                        let _ = state.pty.resize(new_cols, new_rows);
-                    }
-
+                    state.pending_size = Some(new_size);
+                    maybe_send_resize(state);
                     state.renderer.window.request_redraw();
                 }
             }
@@ -207,7 +211,12 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 if !text.is_empty() {
-                    let _ = state.pty.write_all(text.as_bytes());
+                    let _ = send_key_input(
+                        state,
+                        KeyEventKind::Press,
+                        text.as_bytes().to_vec(),
+                        Some(text),
+                    );
                     if state.terminal.grid.scroll_offset > 0 {
                         state.terminal.grid.scroll_offset = 0;
                         state.terminal.grid.all_dirty = true;
@@ -223,13 +232,15 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                     if ctrl && shift && let Key::Character(s) = &event.logical_key {
                         let ch = s.chars().next().unwrap_or('\0').to_ascii_lowercase();
                         if ch == 'v' {
-                            if let Some(text) = paste_from_clipboard() {
+                            if let Some(mut text) = paste_from_clipboard() {
                                 if state.terminal.bracketed_paste_mode() {
-                                    let _ = state.pty.write_all(b"\x1b[200~");
-                                    let _ = state.pty.write_all(&text);
-                                    let _ = state.pty.write_all(b"\x1b[201~");
+                                    let mut wrapped = Vec::with_capacity(text.len() + 12);
+                                    wrapped.extend_from_slice(b"\x1b[200~");
+                                    wrapped.append(&mut text);
+                                    wrapped.extend_from_slice(b"\x1b[201~");
+                                    let _ = send_paste(state, wrapped);
                                 } else {
-                                    let _ = state.pty.write_all(&text);
+                                    let _ = send_paste(state, text);
                                 }
                             }
                             return;
@@ -277,7 +288,12 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                     state.terminal.kitty_keyboard_flags(),
                     event_kind,
                 ) {
-                    let _ = state.pty.write_all(&bytes);
+                    let _ = send_key_input(
+                        state,
+                        event_kind,
+                        bytes,
+                        event.text.as_ref().map(ToString::to_string),
+                    );
                     if state.terminal.grid.scroll_offset > 0 {
                         state.terminal.grid.scroll_offset = 0;
                         state.terminal.grid.all_dirty = true;
@@ -299,27 +315,22 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                     self.scheduler.mark_redraw_needed();
                 }
             }
-            WindowEvent::MouseInput {
-                state: btn_state,
-                button,
-                ..
-            } => {
-                let btn = match button {
-                    MouseButton::Left => 0u8,
-                    MouseButton::Middle => 1,
-                    MouseButton::Right => 2,
+            WindowEvent::MouseInput { state: btn_state, button, .. } => {
+                let protocol_button = match button {
+                    MouseButton::Left => ProtocolMouseButton::Left,
+                    MouseButton::Middle => ProtocolMouseButton::Middle,
+                    MouseButton::Right => ProtocolMouseButton::Right,
                     _ => return,
                 };
                 let pressed = btn_state == ElementState::Pressed;
 
-                if btn == 0 {
+                if button == MouseButton::Left {
                     if pressed {
                         let ctrl = state.modifiers.state().control_key();
                         if ctrl {
                             let cell = state.terminal.grid.cell_at(state.mouse_row, state.mouse_col);
                             if cell.hyperlink_id != 0
-                                && let Some(url) =
-                                    state.terminal.grid.hyperlink_url(cell.hyperlink_id)
+                                && let Some(url) = state.terminal.grid.hyperlink_url(cell.hyperlink_id)
                             {
                                 open_url(url);
                                 return;
@@ -342,12 +353,21 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                     }
                 }
 
-                if state.terminal.mouse_mode != crate::terminal::MouseMode::Off
-                    && let Some(bytes) = state
-                        .terminal
-                        .encode_mouse(btn, state.mouse_col, state.mouse_row, pressed)
-                {
-                    let _ = state.pty.write_all(&bytes);
+                if state.terminal.mouse_mode != crate::terminal::MouseMode::Off {
+                    let _ = send_mouse_input(
+                        state,
+                        ProtocolMouseEvent {
+                            kind: if pressed {
+                                ProtocolMouseEventKind::Press
+                            } else {
+                                ProtocolMouseEventKind::Release
+                            },
+                            button: protocol_button,
+                            col: state.mouse_col as u16,
+                            row: state.mouse_row as u16,
+                            modifiers: modifier_bits(state.modifiers.state()),
+                        },
+                    );
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -358,20 +378,28 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                         (pos.y > 0.0, (pos.y.abs() / ch).max(1.0) as usize)
                     }
                 };
+
                 if state.terminal.mouse_mode != crate::terminal::MouseMode::Off {
                     for _ in 0..lines {
-                        if let Some(bytes) =
-                            state
-                                .terminal
-                                .encode_mouse_scroll(up, state.mouse_col, state.mouse_row)
-                        {
-                            let _ = state.pty.write_all(&bytes);
-                        }
+                        let _ = send_mouse_input(
+                            state,
+                            ProtocolMouseEvent {
+                                kind: if up {
+                                    ProtocolMouseEventKind::ScrollUp
+                                } else {
+                                    ProtocolMouseEventKind::ScrollDown
+                                },
+                                button: ProtocolMouseButton::None,
+                                col: state.mouse_col as u16,
+                                row: state.mouse_row as u16,
+                                modifiers: modifier_bits(state.modifiers.state()),
+                            },
+                        );
                     }
                 } else if state.terminal.alternate_scroll_mode() && state.terminal.in_alt_screen() {
                     let bytes = scroll_to_bytes(up, state.terminal.application_cursor_keys);
                     for _ in 0..lines {
-                        let _ = state.pty.write_all(&bytes);
+                        let _ = send_key_input(state, KeyEventKind::Press, bytes.clone(), None);
                     }
                 } else {
                     let max = state.terminal.grid.scrollback_len();
@@ -387,11 +415,8 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
             }
             WindowEvent::Focused(focused) => {
                 if state.terminal.focus_events_mode() {
-                    let _ = if focused {
-                        state.pty.write_all(b"\x1b[I")
-                    } else {
-                        state.pty.write_all(b"\x1b[O")
-                    };
+                    let bytes = if focused { b"\x1b[I".to_vec() } else { b"\x1b[O".to_vec() };
+                    let _ = send_key_input(state, KeyEventKind::Press, bytes, None);
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -409,7 +434,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(state) = &mut self.state {
             let decision = self.scheduler.prepare_redraw(Instant::now(), || {
-                process_pending_io(state, self.ipc.as_mut(), event_loop)
+                process_pending_io(state, event_loop)
             });
             if let Some(deadline) = decision.wait_until {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
@@ -419,7 +444,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
             if decision.request_redraw {
                 state.renderer.window.request_redraw();
             }
-            if state.pty_closed {
+            if state.disconnected {
                 if let Some(stop) = &self.watcher_stop {
                     stop.store(true, Ordering::Relaxed);
                 }
@@ -429,67 +454,119 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
     }
 }
 
-fn process_pending_io(
-    state: &mut GpuState,
-    ipc: Option<&mut IpcServer>,
-    event_loop: &ActiveEventLoop,
-) -> RedrawWork {
-    let needs_redraw = drain_pty(state) > 0;
+fn process_pending_io(state: &mut RemoteGpuState, event_loop: &ActiveEventLoop) -> RedrawWork {
+    let mut changed = false;
 
-    if let Some(ipc) = ipc {
-        let actions = ipc.poll(&mut |req| handle_ipc_request(&mut state.terminal, req));
-        for action in actions {
-            match action {
-                IpcAction::SendText(bytes) => {
-                    let _ = state.pty.write_all(&bytes);
-                }
-                IpcAction::SetTitle(title) => {
-                    state.renderer.window.set_title(&title);
-                }
-                IpcAction::Close => {
-                    event_loop.exit();
-                }
-                IpcAction::None => {}
-            }
-        }
-    }
-
-    classify_redraw_work(&state.terminal, needs_redraw)
-}
-
-fn drain_pty(state: &mut GpuState) -> usize {
-    if state.pty_closed {
-        return 0;
-    }
-
-    let mut total = 0;
     loop {
-        match state.pty.try_read(&mut state.pty_buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                state.terminal.process(&state.pty_buf[..n]);
-                total += n;
+        match state.client.try_recv() {
+            Ok(TryRecvStatus::Message(message)) => {
+                changed |= apply_server_message(state, &message, event_loop);
+            }
+            Ok(TryRecvStatus::Empty) => break,
+            Ok(TryRecvStatus::Closed) => {
+                state.disconnected = true;
+                break;
             }
             Err(_) => {
-                state.pty_closed = true;
+                state.disconnected = true;
                 break;
             }
         }
     }
 
-    if total > 0 {
-        if let Some(resp) = state.terminal.drain_responses() {
-            let _ = state.pty.write_all(&resp);
-        }
-        if let Some(title) = state.terminal.take_title() {
-            state.renderer.window.set_title(&title);
-        }
-        if let Some(b64_data) = state.terminal.take_osc52_clipboard()
-            && let Ok(decoded) = base64_decode(&b64_data)
-        {
-            copy_to_clipboard(&decoded);
-        }
+    classify_redraw_work(&state.terminal, changed)
+}
+
+fn apply_server_message(
+    state: &mut RemoteGpuState,
+    message: &ServerMessage,
+    event_loop: &ActiveEventLoop,
+) -> bool {
+    if !should_apply_message(state.window_id, message) {
+        return false;
     }
 
-    total
+    if let ServerMessage::WindowCreated { window_id, .. } = message {
+        state.window_id = Some(*window_id);
+        maybe_send_resize(state);
+    }
+
+    let effects = state.terminal.apply_server_message(message);
+    if let ServerMessage::AtlasUpdate { glyph } = message {
+        state.atlas.insert_protocol_glyph(glyph);
+        state.renderer.last_presented_signature = None;
+    }
+    if let Some(title) = effects.title {
+        state.renderer.window.set_title(&title);
+    }
+    if let Some(text) = effects.clipboard {
+        if let Ok(decoded) = base64_decode(&text) {
+            copy_to_clipboard(&decoded);
+        } else {
+            copy_to_clipboard(&text);
+        }
+    }
+    if effects.closed.is_some() {
+        state.disconnected = true;
+        event_loop.exit();
+    }
+
+    matches!(
+        message,
+        ServerMessage::WindowCreated { .. }
+            | ServerMessage::WindowResized { .. }
+            | ServerMessage::CellUpdate { .. }
+            | ServerMessage::AtlasUpdate { .. }
+    )
+}
+
+fn maybe_send_resize(state: &mut RemoteGpuState) {
+    let Some(window_id) = state.window_id else { return };
+    let Some((cols, rows)) = state.pending_size else {
+        return;
+    };
+    if cols == state.terminal.cols && rows == state.terminal.rows {
+        state.pending_size = None;
+        return;
+    }
+    let _ = state.client.send(&ClientMessage::Resize { window_id, cols, rows });
+    state.pending_size = None;
+}
+
+fn send_key_input(
+    state: &mut RemoteGpuState,
+    kind: KeyEventKind,
+    bytes: Vec<u8>,
+    text: Option<String>,
+) -> Result<()> {
+    let Some(window_id) = state.window_id else {
+        return Ok(());
+    };
+    state.client.send(&ClientMessage::KeyInput {
+        window_id,
+        event: ProtocolKeyEvent {
+            kind: match kind {
+                KeyEventKind::Press => ProtocolKeyEventKind::Press,
+                KeyEventKind::Repeat => ProtocolKeyEventKind::Repeat,
+                KeyEventKind::Release => ProtocolKeyEventKind::Release,
+            },
+            bytes,
+            text,
+            modifiers: modifier_bits(state.modifiers.state()),
+        },
+    })
+}
+
+fn send_paste(state: &mut RemoteGpuState, text: Vec<u8>) -> Result<()> {
+    let Some(window_id) = state.window_id else {
+        return Ok(());
+    };
+    state.client.send(&ClientMessage::Paste { window_id, text })
+}
+
+fn send_mouse_input(state: &mut RemoteGpuState, event: ProtocolMouseEvent) -> Result<()> {
+    let Some(window_id) = state.window_id else {
+        return Ok(());
+    };
+    state.client.send(&ClientMessage::MouseInput { window_id, event })
 }

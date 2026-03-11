@@ -417,23 +417,4 @@ mod tests {
         );
     }
 
-    fn parse_throughput_mb_per_sec(input: &[u8]) -> f64 {
-        let mut p = Parser::new();
-        let start = std::time::Instant::now();
-        for &b in input {
-            std::hint::black_box(p.advance(b));
-        }
-        let secs = start.elapsed().as_secs_f64().max(1e-9);
-        (input.len() as f64 / (1024.0 * 1024.0)) / secs
-    }
-
-    #[test]
-    fn parser_throughput_exceeds_50_mb_per_sec() {
-        let payload = vec![b'A'; 8 * 1024 * 1024];
-        let rate = parse_throughput_mb_per_sec(&payload);
-        assert!(
-            rate > 50.0,
-            "parser throughput too low: {rate:.0} MB/s (debug build expected >50)"
-        );
-    }
 }

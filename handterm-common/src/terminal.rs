@@ -1,5 +1,6 @@
 use crate::grid::Grid;
 use crate::parser::{Action, Parser};
+use crate::protocol::{CursorState, DirtyCell, ServerMessage, WindowModes};
 
 fn dec_special_to_unicode(b: u8) -> u32 {
     match b {
@@ -24,6 +25,7 @@ pub struct Terminal {
     pub grid: Grid,
     alt_grid: Option<Grid>,
     parser: Parser,
+    scrollback_limit: usize,
     pub cols: u16,
     pub rows: u16,
     pub cursor_visible: bool,
@@ -51,6 +53,18 @@ pub struct Terminal {
     kitty_pending_height: u32,
     kitty_more_chunks: bool,
     kitty_generation: u64,
+    kitty_keyboard_main_flags: u8,
+    kitty_keyboard_alt_flags: u8,
+    kitty_keyboard_main_stack: Vec<u8>,
+    kitty_keyboard_alt_stack: Vec<u8>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct AppliedServerEffects {
+    pub title: Option<String>,
+    pub clipboard: Option<Vec<u8>>,
+    pub bell: bool,
+    pub closed: Option<Option<i32>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,12 +113,89 @@ pub struct KittyPlacement {
     pub rows: usize,
 }
 
+pub trait TerminalView {
+    fn grid(&self) -> &Grid;
+    fn grid_mut(&mut self) -> &mut Grid;
+    fn cols(&self) -> u16;
+    fn rows(&self) -> u16;
+    fn cursor_visible(&self) -> bool;
+    fn cursor_style(&self) -> CursorStyle;
+    fn kitty_generation(&self) -> u64;
+    fn kitty_placements(&self) -> &[KittyPlacement];
+    fn kitty_image(&self, id: u32) -> Option<&KittyImage>;
+}
+
+#[derive(Debug, Clone, Copy)]
+struct KittyImageFinalize {
+    id: u32,
+    width: u32,
+    height: u32,
+    action: u8,
+    cols: u32,
+    rows_param: u32,
+}
+
+pub const KITTY_KBD_DISAMBIGUATE: u8 = 0b00001;
+pub const KITTY_KBD_REPORT_EVENTS: u8 = 0b00010;
+pub const KITTY_KBD_REPORT_ALTERNATE: u8 = 0b00100;
+pub const KITTY_KBD_REPORT_ALL: u8 = 0b01000;
+pub const KITTY_KBD_REPORT_TEXT: u8 = 0b10000;
+
+impl TerminalView for Terminal {
+    fn grid(&self) -> &Grid {
+        &self.grid
+    }
+
+    fn grid_mut(&mut self) -> &mut Grid {
+        &mut self.grid
+    }
+
+    fn cols(&self) -> u16 {
+        self.cols
+    }
+
+    fn rows(&self) -> u16 {
+        self.rows
+    }
+
+    fn cursor_visible(&self) -> bool {
+        self.cursor_visible
+    }
+
+    fn cursor_style(&self) -> CursorStyle {
+        self.cursor_style
+    }
+
+    fn kitty_generation(&self) -> u64 {
+        self.kitty_generation
+    }
+
+    fn kitty_placements(&self) -> &[KittyPlacement] {
+        &self.kitty_placements
+    }
+
+    fn kitty_image(&self, id: u32) -> Option<&KittyImage> {
+        self.kitty_image(id)
+    }
+}
+
 impl Terminal {
     pub fn new(cols: u16, rows: u16) -> Self {
+        Self::new_with_scrollback(cols, rows, crate::grid::DEFAULT_SCROLLBACK_MAX)
+    }
+
+    pub fn new_with_scrollback(cols: u16, rows: u16, scrollback_limit: usize) -> Self {
         Self {
-            grid: Grid::new(cols, rows, [0xcd, 0xd6, 0xf4], [0x00, 0x00, 0x00]),
+            grid: Grid::new_with_scrollback(
+                cols,
+                rows,
+                [0xcd, 0xd6, 0xf4],
+                [0x00, 0x00, 0x00],
+                scrollback_limit,
+            ),
             alt_grid: None,
             parser: Parser::new(),
+            scrollback_limit,
             cols,
             rows,
             cursor_visible: true,
@@ -132,7 +223,15 @@ impl Terminal {
             kitty_pending_height: 0,
             kitty_more_chunks: false,
             kitty_generation: 0,
+            kitty_keyboard_main_flags: 0,
+            kitty_keyboard_alt_flags: 0,
+            kitty_keyboard_main_stack: Vec::with_capacity(8),
+            kitty_keyboard_alt_stack: Vec::with_capacity(8),
         }
+    }
+
+    pub fn scrollback_limit(&self) -> usize {
+        self.scrollback_limit
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -164,8 +263,193 @@ impl Terminal {
         self.osc52_clipboard.take()
     }
 
+    pub fn take_bell(&mut self) -> bool {
+        let bell = self.bell;
+        self.bell = false;
+        bell
+    }
+
+    pub fn window_modes(&self) -> WindowModes {
+        WindowModes {
+            bracketed_paste: self.mode_bracketed_paste,
+            focus_events: self.mode_focus_events,
+            alternate_scroll: self.mode_alternate_scroll,
+            application_cursor_keys: self.application_cursor_keys,
+            in_alt_screen: self.alt_grid.is_some(),
+            mouse_mode: match self.mouse_mode {
+                MouseMode::Off => 0,
+                MouseMode::X10 => 1,
+                MouseMode::Normal => 2,
+                MouseMode::ButtonEvent => 3,
+                MouseMode::AnyEvent => 4,
+            },
+            kitty_keyboard_flags: self.kitty_keyboard_flags(),
+        }
+    }
+
+    pub fn apply_server_message(&mut self, message: &ServerMessage) -> AppliedServerEffects {
+        let mut effects = AppliedServerEffects::default();
+
+        match message {
+            ServerMessage::Pong { .. } => {}
+            ServerMessage::WindowCreated {
+                cols, rows, modes, ..
+            } => {
+                self.resize(*cols, *rows);
+                self.apply_window_modes(*modes);
+                self.grid.mark_all_dirty();
+            }
+            ServerMessage::WindowResized {
+                cols, rows, modes, ..
+            } => {
+                self.resize(*cols, *rows);
+                self.apply_window_modes(*modes);
+                self.grid.mark_all_dirty();
+            }
+            ServerMessage::CellUpdate {
+                dirty_cells,
+                cursor,
+                modes,
+                ..
+            } => {
+                self.apply_window_modes(*modes);
+                for dirty in dirty_cells {
+                    self.apply_dirty_cell(dirty);
+                }
+                self.apply_cursor_state(cursor.as_ref());
+            }
+            ServerMessage::SetTitle { title, .. } => {
+                self.title = Some(title.clone());
+                effects.title = Some(title.clone());
+            }
+            ServerMessage::Bell { .. } => {
+                self.bell = true;
+                effects.bell = true;
+            }
+            ServerMessage::CopyToClipboard { text, .. } => {
+                self.osc52_clipboard = Some(text.clone());
+                effects.clipboard = Some(text.clone());
+            }
+            ServerMessage::WindowClosed { exit_code, .. } => {
+                effects.closed = Some(*exit_code);
+            }
+            ServerMessage::KittyImageState {
+                generation,
+                images,
+                placements,
+                ..
+            } => {
+                self.kitty_images = images
+                    .iter()
+                    .map(|image| KittyImage {
+                        id: image.id,
+                        width: image.width,
+                        height: image.height,
+                        data: image.data.clone(),
+                    })
+                    .collect();
+                self.kitty_placements = placements
+                    .iter()
+                    .map(|placement| KittyPlacement {
+                        image_id: placement.image_id,
+                        col: placement.col as usize,
+                        row: placement.row as usize,
+                        cols: placement.cols as usize,
+                        rows: placement.rows as usize,
+                    })
+                    .collect();
+                self.kitty_generation = *generation;
+                self.grid.mark_all_dirty();
+            }
+            ServerMessage::AtlasUpdate { .. } => {}
+        }
+
+        effects
+    }
+
+    fn apply_dirty_cell(&mut self, dirty: &DirtyCell) {
+        let underline_style = match dirty.underline_style {
+            1 => crate::grid::UnderlineStyle::Single,
+            2 => crate::grid::UnderlineStyle::Double,
+            3 => crate::grid::UnderlineStyle::Curly,
+            4 => crate::grid::UnderlineStyle::Dotted,
+            5 => crate::grid::UnderlineStyle::Dashed,
+            _ => crate::grid::UnderlineStyle::None,
+        };
+
+        let grapheme = dirty.grapheme.clone().map(Into::into);
+        self.grid.set_cell_with_grapheme(
+            dirty.row as usize,
+            dirty.col as usize,
+            crate::grid::Cell::from_snapshot(crate::grid::CellSnapshot {
+                ch: dirty.ch,
+                grapheme: grapheme.clone(),
+                fg: dirty.fg,
+                bg: dirty.bg,
+                underline_color: dirty.underline_color,
+                hyperlink_id: dirty.hyperlink_id,
+                attrs: dirty.attrs,
+                flags: dirty.flags,
+                underline_style,
+            }),
+            grapheme,
+        );
+    }
+
+    fn apply_cursor_state(&mut self, cursor: Option<&CursorState>) {
+        match cursor {
+            Some(cursor) => {
+                self.grid.set_cursor(cursor.row as usize, cursor.col as usize);
+                self.cursor_visible = cursor.visible;
+                self.cursor_style = match cursor.style {
+                    1 => CursorStyle::Underline,
+                    2 => CursorStyle::Bar,
+                    _ => CursorStyle::Block,
+                };
+            }
+            None => {
+                self.cursor_visible = false;
+            }
+        }
+    }
+
+    fn apply_window_modes(&mut self, modes: WindowModes) {
+        self.mode_bracketed_paste = modes.bracketed_paste;
+        self.mode_focus_events = modes.focus_events;
+        self.mode_alternate_scroll = modes.alternate_scroll;
+        self.application_cursor_keys = modes.application_cursor_keys;
+
+        if modes.in_alt_screen {
+            self.enter_alt_screen();
+        } else {
+            self.leave_alt_screen();
+        }
+
+        self.mouse_mode = match modes.mouse_mode {
+            1 => MouseMode::X10,
+            2 => MouseMode::Normal,
+            3 => MouseMode::ButtonEvent,
+            4 => MouseMode::AnyEvent,
+            _ => MouseMode::Off,
+        };
+
+        if self.alt_grid.is_some() {
+            self.kitty_keyboard_alt_flags = modes.kitty_keyboard_flags;
+        } else {
+            self.kitty_keyboard_main_flags = modes.kitty_keyboard_flags;
+        }
+    }
+
     pub fn focus_events_mode(&self) -> bool {
         self.mode_focus_events
+    }
+
+    pub fn kitty_keyboard_flags(&self) -> u8 {
+        if self.alt_grid.is_some() {
+            self.kitty_keyboard_alt_flags
+        } else {
+            self.kitty_keyboard_main_flags
+        }
     }
 
     pub fn alternate_scroll_mode(&self) -> bool {
@@ -441,12 +725,27 @@ impl Terminal {
                     _ => {}
                 }
             }
-            // Kitty keyboard protocol query - respond with flags=0 (no enhancement)
-            (b'?', b'u') => {
-                self.response_buf.extend_from_slice(b"\x1b[?0u");
+            // Kitty keyboard protocol set flags
+            (b'=', b'u') => {
+                let flags = p.param(0, 0).min(u8::MAX as u16) as u8;
+                let mode = p.param(1, 1);
+                self.apply_kitty_keyboard_flags(flags, mode);
             }
-            // Kitty keyboard protocol push/pop - silently accept
-            (b'>', b'u') | (b'<', b'u') => {}
+            // Kitty keyboard protocol query
+            (b'?', b'u') => {
+                let resp = format!("\x1b[?{}u", self.kitty_keyboard_flags());
+                self.response_buf.extend_from_slice(resp.as_bytes());
+            }
+            // Kitty keyboard protocol push
+            (b'>', b'u') => {
+                let flags = p.param(0, 0).min(u8::MAX as u16) as u8;
+                self.push_kitty_keyboard_flags(flags);
+            }
+            // Kitty keyboard protocol pop
+            (b'<', b'u') => {
+                let count = p.param(0, 1) as usize;
+                self.pop_kitty_keyboard_flags(count);
+            }
             // XTVERSION query
             (b'>', b'q') => {
                 self.response_buf.extend_from_slice(b"\x1bP>|handterm(0.1)\x1b\\");
@@ -506,7 +805,7 @@ impl Terminal {
             (0, b'u') => self.restore_cursor(),
             (b' ', b'q') => {
                 match self.parser.param(0, 0) {
-                    0 | 1 | 2 => self.cursor_style = CursorStyle::Block,
+                    0..=2 => self.cursor_style = CursorStyle::Block,
                     3 | 4 => self.cursor_style = CursorStyle::Underline,
                     5 | 6 => self.cursor_style = CursorStyle::Bar,
                     _ => {}
@@ -766,11 +1065,29 @@ impl Terminal {
                         self.kitty_pending_fmt = 0;
                         self.kitty_pending_width = 0;
                         self.kitty_pending_height = 0;
-                        self.finalize_kitty_image(final_id, final_fmt, final_w, final_h, &full_payload, action, cols, rows_param);
+                        let request = KittyImageFinalize {
+                            id: final_id,
+                            width: final_w,
+                            height: final_h,
+                            action,
+                            cols,
+                            rows_param,
+                        };
+                        let _ = final_fmt;
+                        self.finalize_kitty_image(request, &full_payload);
                     }
                     return;
                 }
-                self.finalize_kitty_image(img_id, fmt, width, height, payload, action, cols, rows_param);
+                let request = KittyImageFinalize {
+                    id: img_id,
+                    width,
+                    height,
+                    action,
+                    cols,
+                    rows_param,
+                };
+                let _ = fmt;
+                self.finalize_kitty_image(request, payload);
             }
             b'p' => {
                 if let Some(_img) = self.kitty_images.iter().find(|i| i.id == img_id) {
@@ -801,31 +1118,39 @@ impl Terminal {
         }
     }
 
-    fn finalize_kitty_image(&mut self, id: u32, _fmt: u32, width: u32, height: u32, payload: &[u8], action: u8, cols: u32, rows_param: u32) {
+    fn finalize_kitty_image(&mut self, request: KittyImageFinalize, payload: &[u8]) {
         let decoded = if let Ok(d) = self.base64_decode_kitty(payload) { d } else { return };
 
-        let actual_id = if id > 0 { id } else {
+        let actual_id = if request.id > 0 { request.id } else {
             (self.kitty_images.len() as u32) + 1
         };
 
         let image = KittyImage {
             id: actual_id,
-            width,
-            height,
+            width: request.width,
+            height: request.height,
             data: decoded,
         };
 
         self.kitty_images.retain(|i| i.id != actual_id);
         self.kitty_images.push(image);
 
-        if action == b'T' || action == 0 {
+        if request.action == b'T' || request.action == 0 {
             let (col, row) = self.grid.cursor_pos();
             self.kitty_placements.push(KittyPlacement {
                 image_id: actual_id,
                 col,
                 row,
-                cols: if cols > 0 { cols as usize } else { (width / self.grid.cols.max(1) as u32).max(1) as usize },
-                rows: if rows_param > 0 { rows_param as usize } else { (height / self.grid.rows.max(1) as u32).max(1) as usize },
+                cols: if request.cols > 0 {
+                    request.cols as usize
+                } else {
+                    (request.width / self.grid.cols.max(1) as u32).max(1) as usize
+                },
+                rows: if request.rows_param > 0 {
+                    request.rows_param as usize
+                } else {
+                    (request.height / self.grid.rows.max(1) as u32).max(1) as usize
+                },
             });
         }
         self.kitty_generation = self.kitty_generation.wrapping_add(1);
@@ -878,6 +1203,14 @@ impl Terminal {
         self.kitty_images.iter().find(|i| i.id == id)
     }
 
+    pub fn kitty_images(&self) -> &[KittyImage] {
+        &self.kitty_images
+    }
+
+    pub fn kitty_placements(&self) -> &[KittyPlacement] {
+        &self.kitty_placements
+    }
+
     pub fn kitty_generation(&self) -> u64 {
         self.kitty_generation
     }
@@ -888,7 +1221,13 @@ impl Terminal {
         }
         let main = std::mem::replace(
             &mut self.grid,
-            Grid::new(self.cols, self.rows, [0xcd, 0xd6, 0xf4], [0x00, 0x00, 0x00]),
+            Grid::new_with_scrollback(
+                self.cols,
+                self.rows,
+                [0xcd, 0xd6, 0xf4],
+                [0x00, 0x00, 0x00],
+                0,
+            ),
         );
         self.alt_grid = Some(main);
     }
@@ -897,6 +1236,52 @@ impl Terminal {
         if let Some(main) = self.alt_grid.take() {
             self.grid = main;
         }
+    }
+
+    fn current_kitty_keyboard_flags_mut(&mut self) -> &mut u8 {
+        if self.alt_grid.is_some() {
+            &mut self.kitty_keyboard_alt_flags
+        } else {
+            &mut self.kitty_keyboard_main_flags
+        }
+    }
+
+    fn current_kitty_keyboard_stack_mut(&mut self) -> &mut Vec<u8> {
+        if self.alt_grid.is_some() {
+            &mut self.kitty_keyboard_alt_stack
+        } else {
+            &mut self.kitty_keyboard_main_stack
+        }
+    }
+
+    fn apply_kitty_keyboard_flags(&mut self, flags: u8, mode: u16) {
+        let current = self.current_kitty_keyboard_flags_mut();
+        match mode {
+            2 => *current |= flags,
+            3 => *current &= !flags,
+            _ => *current = flags,
+        }
+    }
+
+    fn push_kitty_keyboard_flags(&mut self, flags: u8) {
+        let current_flags = self.kitty_keyboard_flags();
+        let stack = self.current_kitty_keyboard_stack_mut();
+        if stack.len() < 64 {
+            stack.push(current_flags);
+        }
+        *self.current_kitty_keyboard_flags_mut() = flags;
+    }
+
+    fn pop_kitty_keyboard_flags(&mut self, count: usize) {
+        let stack = self.current_kitty_keyboard_stack_mut();
+        let mut restored = None;
+        for _ in 0..count.max(1) {
+            restored = stack.pop();
+            if restored.is_none() {
+                break;
+            }
+        }
+        *self.current_kitty_keyboard_flags_mut() = restored.unwrap_or(0);
     }
 }
 
@@ -984,6 +1369,32 @@ mod tests {
 
         t.process(b"\x1b[?1049l");
         assert_eq!(t.grid.cell_char(0, 0), 'm');
+    }
+
+    #[test]
+    fn alt_screen_disables_scrollback_even_when_main_screen_has_history() {
+        let mut t = Terminal::new_with_scrollback(4, 2, 8);
+        t.process(b"abcdefghij");
+        assert!(t.grid.scrollback_len() > 0);
+
+        t.process(b"\x1b[?1049h");
+        assert_eq!(t.scrollback_limit(), 8);
+        assert_eq!(t.grid.scrollback_len(), 0);
+
+        t.process(b"klmnopqrst");
+        assert_eq!(t.grid.scrollback_len(), 0);
+
+        t.process(b"\x1b[?1049l");
+        assert!(t.grid.scrollback_len() > 0);
+        assert_eq!(t.grid.cell_char(0, 0), 'e');
+    }
+
+    #[test]
+    fn remote_terminal_can_enter_alt_screen_without_allocating_history() {
+        let mut t = Terminal::new_with_scrollback(4, 2, 0);
+        t.process(b"\x1b[?1049habcdefghij\x1b[?1049l");
+        assert_eq!(t.scrollback_limit(), 0);
+        assert_eq!(t.grid.scrollback_len(), 0);
     }
 
     #[test]
@@ -1131,6 +1542,54 @@ mod tests {
         t.process(b"\x1b[?u");
         let resp = t.drain_responses().unwrap();
         assert_eq!(resp, b"\x1b[?0u");
+    }
+
+    #[test]
+    fn kitty_keyboard_flags_set_query_and_modify() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[=5u");
+        assert_eq!(t.kitty_keyboard_flags(), 5);
+
+        t.process(b"\x1b[=2;2u");
+        assert_eq!(t.kitty_keyboard_flags(), 7);
+
+        t.process(b"\x1b[=1;3u");
+        assert_eq!(t.kitty_keyboard_flags(), 6);
+
+        t.process(b"\x1b[?u");
+        let resp = t.drain_responses().unwrap();
+        assert_eq!(resp, b"\x1b[?6u");
+    }
+
+    #[test]
+    fn kitty_keyboard_push_and_pop_restore_previous_flags() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[=1u");
+        t.process(b"\x1b[>9u");
+        assert_eq!(t.kitty_keyboard_flags(), 9);
+
+        t.process(b"\x1b[<u");
+        assert_eq!(t.kitty_keyboard_flags(), 1);
+
+        t.process(b"\x1b[<u");
+        assert_eq!(t.kitty_keyboard_flags(), 0);
+    }
+
+    #[test]
+    fn kitty_keyboard_main_and_alt_screen_modes_are_independent() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[=1u");
+        t.process(b"\x1b[?1049h");
+        assert_eq!(t.kitty_keyboard_flags(), 0);
+
+        t.process(b"\x1b[>8u");
+        assert_eq!(t.kitty_keyboard_flags(), 8);
+
+        t.process(b"\x1b[?1049l");
+        assert_eq!(t.kitty_keyboard_flags(), 1);
+
+        t.process(b"\x1b[?1049h");
+        assert_eq!(t.kitty_keyboard_flags(), 8);
     }
 
     #[test]
@@ -1483,5 +1942,172 @@ mod tests {
         t.process(b"\x1b_Ga=d,i=7\x1b\\");
         assert!(t.kitty_image(7).is_none());
         assert!(t.kitty_placements.is_empty());
+    }
+
+    #[test]
+    fn apply_server_message_updates_cells_and_cursor() {
+        let mut t = Terminal::new(4, 2);
+        let effects = t.apply_server_message(&ServerMessage::CellUpdate {
+            window_id: 1,
+            dirty_cells: vec![
+                DirtyCell {
+                    row: 0,
+                    col: 0,
+                    ch: 'h' as u32,
+                    grapheme: None,
+                    fg: 2,
+                    bg: 4,
+                    underline_color: 0,
+                    hyperlink_id: 0,
+                    attrs: 0,
+                    flags: 0,
+                    underline_style: 0,
+                },
+                DirtyCell {
+                    row: 0,
+                    col: 1,
+                    ch: 'i' as u32,
+                    grapheme: None,
+                    fg: 2,
+                    bg: 4,
+                    underline_color: 0,
+                    hyperlink_id: 0,
+                    attrs: 0,
+                    flags: 0,
+                    underline_style: 0,
+                },
+            ],
+            cursor: Some(CursorState {
+                row: 0,
+                col: 2,
+                style: 2,
+                visible: true,
+            }),
+            modes: WindowModes::default(),
+        });
+
+        assert_eq!(effects, AppliedServerEffects::default());
+        assert_eq!(t.grid.cell_at(0, 0).ch, 'h' as u32);
+        assert_eq!(t.grid.cell_at(0, 1).ch, 'i' as u32);
+        assert_eq!(t.grid.cursor_pos(), (2, 0));
+        assert_eq!(t.cursor_style, CursorStyle::Bar);
+        assert!(t.cursor_visible);
+    }
+
+    #[test]
+    fn apply_server_message_preserves_grapheme_clusters() {
+        let mut t = Terminal::new(4, 2);
+        t.apply_server_message(&ServerMessage::CellUpdate {
+            window_id: 1,
+            dirty_cells: vec![DirtyCell {
+                row: 0,
+                col: 0,
+                ch: '❤' as u32,
+                grapheme: Some("❤️".to_string()),
+                fg: 2,
+                bg: 4,
+                underline_color: 0,
+                hyperlink_id: 0,
+                attrs: 0,
+                flags: crate::grid::FLAG_WIDE,
+                underline_style: 0,
+            }],
+            cursor: None,
+            modes: WindowModes::default(),
+        });
+
+        assert_eq!(t.grid.cell_grapheme_at(0, 0), Some("❤️"));
+        assert_eq!(t.grid.get_text(0, 1), "❤️");
+    }
+
+    #[test]
+    fn apply_server_message_collects_side_effects() {
+        let mut t = Terminal::new(4, 2);
+        let effects = t.apply_server_message(&ServerMessage::SetTitle {
+            window_id: 1,
+            title: "remote title".to_string(),
+        });
+        assert_eq!(effects.title.as_deref(), Some("remote title"));
+
+        let effects = t.apply_server_message(&ServerMessage::CopyToClipboard {
+            window_id: 1,
+            text: b"Zm9v".to_vec(),
+        });
+        assert_eq!(effects.clipboard.as_deref(), Some(&b"Zm9v"[..]));
+
+        let effects = t.apply_server_message(&ServerMessage::Bell { window_id: 1 });
+        assert!(effects.bell);
+
+        let effects = t.apply_server_message(&ServerMessage::WindowClosed {
+            window_id: 1,
+            exit_code: Some(0),
+        });
+        assert_eq!(effects.closed, Some(Some(0)));
+
+        t.apply_server_message(&ServerMessage::WindowResized {
+            window_id: 1,
+            cols: 10,
+            rows: 3,
+            modes: WindowModes::default(),
+        });
+        assert_eq!(t.cols, 10);
+        assert_eq!(t.rows, 3);
+    }
+
+    #[test]
+    fn apply_server_message_updates_remote_window_modes() {
+        let mut t = Terminal::new(4, 2);
+        t.apply_server_message(&ServerMessage::CellUpdate {
+            window_id: 1,
+            dirty_cells: Vec::new(),
+            cursor: None,
+            modes: WindowModes {
+                bracketed_paste: true,
+                focus_events: true,
+                alternate_scroll: true,
+                application_cursor_keys: true,
+                in_alt_screen: true,
+                mouse_mode: 2,
+                kitty_keyboard_flags: 9,
+            },
+        });
+
+        assert!(t.bracketed_paste_mode());
+        assert!(t.focus_events_mode());
+        assert!(t.alternate_scroll_mode());
+        assert!(t.application_cursor_keys);
+        assert!(t.in_alt_screen());
+        assert_eq!(t.mouse_mode, MouseMode::Normal);
+        assert_eq!(t.kitty_keyboard_flags(), 9);
+
+        t.apply_server_message(&ServerMessage::WindowResized {
+            window_id: 1,
+            cols: 4,
+            rows: 2,
+            modes: WindowModes::default(),
+        });
+
+        assert!(!t.bracketed_paste_mode());
+        assert!(!t.focus_events_mode());
+        assert!(!t.alternate_scroll_mode());
+        assert!(!t.application_cursor_keys);
+        assert!(!t.in_alt_screen());
+        assert_eq!(t.mouse_mode, MouseMode::Off);
+        assert_eq!(t.kitty_keyboard_flags(), 0);
+    }
+
+    #[test]
+    fn window_modes_snapshot_tracks_terminal_state() {
+        let mut t = Terminal::new(8, 2);
+        t.process(b"\x1b[?2004h\x1b[?1004h\x1b[?1007h\x1b[?1h\x1b[?1000h\x1b[?1049h\x1b[=5u");
+
+        let modes = t.window_modes();
+        assert!(modes.bracketed_paste);
+        assert!(modes.focus_events);
+        assert!(modes.alternate_scroll);
+        assert!(modes.application_cursor_keys);
+        assert!(modes.in_alt_screen);
+        assert_eq!(modes.mouse_mode, 2);
+        assert_eq!(modes.kitty_keyboard_flags, 5);
     }
 }

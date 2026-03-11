@@ -2,7 +2,7 @@ use crate::config::AppConfig;
 use crate::font::GlyphAtlas;
 use crate::frontend::{VisualState, sync_visual_damage};
 use crate::grid::{COLOR_DEFAULT, Cell};
-use crate::terminal::{CursorStyle, Terminal};
+use crate::terminal::{CursorStyle, TerminalView};
 use crate::visual::{is_in_selection, resolve_cell_colors, resolve_underline_color};
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -18,6 +18,10 @@ impl OffscreenRenderer {
     pub fn new(cols: u16, rows: u16, atlas: &GlyphAtlas) -> Self {
         let width = cols as usize * atlas.cell_width;
         let height = rows as usize * atlas.cell_height;
+        Self::new_for_pixels(width, height)
+    }
+
+    pub fn new_for_pixels(width: usize, height: usize) -> Self {
         Self {
             width,
             height,
@@ -31,9 +35,19 @@ impl OffscreenRenderer {
         self.last_visual_state = None;
     }
 
+    pub fn resize_pixels(&mut self, width: usize, height: usize) {
+        if self.width == width && self.height == height {
+            return;
+        }
+        self.width = width;
+        self.height = height;
+        self.pixels.resize(width * height, 0);
+        self.reset();
+    }
+
     pub fn render(
         &mut self,
-        terminal: &mut Terminal,
+        terminal: &mut impl TerminalView,
         atlas: &mut GlyphAtlas,
         config: &AppConfig,
     ) {
@@ -53,28 +67,28 @@ pub fn render_terminal_to_buffer(
     buffer: &mut [u32],
     buf_w: usize,
     buf_h: usize,
-    terminal: &mut Terminal,
+    terminal: &mut impl TerminalView,
     atlas: &mut GlyphAtlas,
     config: &AppConfig,
     last_visual_state: &mut Option<VisualState>,
 ) {
     let current_visual = VisualState::capture(terminal);
-    sync_visual_damage(&mut terminal.grid, *last_visual_state, current_visual);
+    sync_visual_damage(terminal.grid_mut(), *last_visual_state, current_visual);
 
     let base_bg = config.style.background.as_u32_rgb();
     let base_fg = config.style.foreground.as_u32_rgb();
 
-    let grid = &terminal.grid;
+    let grid = terminal.grid();
     let has_selection = grid.selection.is_some();
     let scrolled = grid.scroll_offset > 0;
-    let full_redraw = grid.all_dirty || has_selection || scrolled;
+    let full_redraw = grid.all_dirty || has_selection || scrolled || has_complex_dirty_cells(grid);
     if full_redraw {
         buffer.fill(base_bg);
     }
 
     let (cursor_col, cursor_row) = grid.cursor_pos();
-    let show_cursor = terminal.cursor_visible && grid.scroll_offset == 0;
-    let cursor_style = terminal.cursor_style;
+    let show_cursor = terminal.cursor_visible() && grid.scroll_offset == 0;
+    let cursor_style = terminal.cursor_style();
     let selection = grid.selection;
     let cell_w = atlas.cell_width;
     let cell_h = atlas.cell_height;
@@ -180,17 +194,24 @@ pub fn render_terminal_to_buffer(
                 let is_cursor_block = is_cursor_here && cursor_style == CursorStyle::Block;
                 let selected = is_in_selection(selection, row, col);
                 let colors = resolve_cell_colors(cell, base_fg, base_bg, is_cursor_block, selected);
-                let has_content = cell.ch > 0x20;
+                let grapheme = grid.cell_grapheme_at_scroll(row, col);
+                let has_content = cell.ch > 0x20 || grapheme.is_some();
 
                 let same_run =
-                    has_content && !run_text.is_empty() && colors.fg == run_fg && cell.attrs == run_attrs;
+                    has_content
+                        && grapheme.is_none()
+                        && !run_text.is_empty()
+                        && colors.fg == run_fg
+                        && cell.attrs == run_attrs;
 
                 if !same_run && !run_text.is_empty() {
                     flush_run(atlas, buffer, buf_w, buf_h, &run_text, run_start, row, run_fg);
                     run_text.clear();
                 }
 
-                if has_content {
+                if let Some(grapheme) = grapheme {
+                    atlas.draw_grapheme(buffer, buf_w, buf_h, col, row, grapheme, colors.fg);
+                } else if has_content {
                     if run_text.is_empty() {
                         run_start = col;
                         run_fg = colors.fg;
@@ -202,7 +223,13 @@ pub fn render_terminal_to_buffer(
                 }
 
                 if is_cursor_here && cursor_style != CursorStyle::Block {
-                    draw_cursor(buffer, buf_w, buf_h, col, row, cell_w, cell_h, cursor_style, base_fg);
+                    draw_cursor(
+                        buffer,
+                        (buf_w, buf_h),
+                        CellRect::from_cell(col, row, cell_w, cell_h),
+                        cursor_style,
+                        base_fg,
+                    );
                 }
             }
 
@@ -223,7 +250,13 @@ pub fn render_terminal_to_buffer(
                 let selected = is_in_selection(selection, row, col);
                 let colors = resolve_cell_colors(cell, base_fg, base_bg, is_cursor_block, selected);
 
-                draw_text_decorations(buffer, buf_w, buf_h, cell_w, cell_h, col, row, cell, colors.fg);
+                draw_text_decorations(
+                    buffer,
+                    (buf_w, buf_h),
+                    CellRect::from_cell(col, row, cell_w, cell_h),
+                    cell,
+                    colors.fg,
+                );
             }
         }
     }
@@ -244,57 +277,104 @@ pub fn render_terminal_to_buffer(
                     continue;
                 }
 
-                let has_content = cell.ch > 0x20;
+                let grapheme = grid.cell_grapheme_at_scroll(row, col);
+                let has_content = cell.ch > 0x20 || grapheme.is_some();
                 let is_cursor_block = is_cursor && cursor_style == CursorStyle::Block;
                 let selected = is_in_selection(selection, row, col);
                 let colors = resolve_cell_colors(cell, base_fg, base_bg, is_cursor_block, selected);
 
-                if has_content {
+                if let Some(grapheme) = grapheme {
+                    atlas.draw_grapheme(buffer, buf_w, buf_h, col, row, grapheme, colors.fg);
+                } else if has_content {
                     atlas.draw_glyph(buffer, buf_w, buf_h, col, row, cell.ch, colors.fg);
                 }
 
                 if cell.attrs != 0 {
-                    draw_text_decorations(buffer, buf_w, buf_h, cell_w, cell_h, col, row, cell, colors.fg);
+                    draw_text_decorations(
+                        buffer,
+                        (buf_w, buf_h),
+                        CellRect::from_cell(col, row, cell_w, cell_h),
+                        cell,
+                        colors.fg,
+                    );
                 }
 
                 if is_cursor && cursor_style != CursorStyle::Block {
-                    draw_cursor(buffer, buf_w, buf_h, col, row, cell_w, cell_h, cursor_style, base_fg);
+                    draw_cursor(
+                        buffer,
+                        (buf_w, buf_h),
+                        CellRect::from_cell(col, row, cell_w, cell_h),
+                        cursor_style,
+                        base_fg,
+                    );
                 }
             }
         }
     }
 
-    terminal.grid.clear_dirty();
+    terminal.grid_mut().clear_dirty();
     *last_visual_state = Some(current_visual);
+}
+
+fn has_complex_dirty_cells(grid: &crate::grid::Grid) -> bool {
+    for row in 0..grid.rows {
+        for col in 0..grid.cols {
+            if !grid.is_cell_dirty(row, col) {
+                continue;
+            }
+            let cell = grid.cell_at_scroll(row, col);
+            if cell.ch > 0x7f
+                || grid.cell_grapheme_at_scroll(row, col).is_some()
+                || cell.flags & (crate::grid::FLAG_WIDE | crate::grid::FLAG_WIDE_CONT) != 0
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CellRect {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+}
+
+impl CellRect {
+    fn from_cell(col: usize, row: usize, cell_w: usize, cell_h: usize) -> Self {
+        Self {
+            x: col * cell_w,
+            y: row * cell_h,
+            width: cell_w,
+            height: cell_h,
+        }
+    }
 }
 
 fn draw_cursor(
     buffer: &mut [u32],
-    buf_w: usize,
-    buf_h: usize,
-    col: usize,
-    row: usize,
-    cell_w: usize,
-    cell_h: usize,
+    dims: (usize, usize),
+    cell: CellRect,
     cursor_style: CursorStyle,
     color: u32,
 ) {
-    let px_x = col * cell_w;
-    let px_y = row * cell_h;
+    let (buf_w, buf_h) = dims;
     match cursor_style {
         CursorStyle::Bar => {
-            let bar_w = 2.min(cell_w);
-            for y in px_y..(px_y + cell_h).min(buf_h) {
-                for x in px_x..(px_x + bar_w).min(buf_w) {
+            let bar_w = 2.min(cell.width);
+            for y in cell.y..(cell.y + cell.height).min(buf_h) {
+                for x in cell.x..(cell.x + bar_w).min(buf_w) {
                     buffer[y * buf_w + x] = color;
                 }
             }
         }
         CursorStyle::Underline => {
-            let ul_h = 2.min(cell_h);
-            let y_start = (px_y + cell_h).saturating_sub(ul_h);
-            for y in y_start..(px_y + cell_h).min(buf_h) {
-                for x in px_x..(px_x + cell_w).min(buf_w) {
+            let ul_h = 2.min(cell.height);
+            let y_start = (cell.y + cell.height).saturating_sub(ul_h);
+            for y in y_start..(cell.y + cell.height).min(buf_h) {
+                for x in cell.x..(cell.x + cell.width).min(buf_w) {
                     buffer[y * buf_w + x] = color;
                 }
             }
@@ -305,19 +385,18 @@ fn draw_cursor(
 
 fn draw_text_decorations(
     buffer: &mut [u32],
-    buf_w: usize,
-    buf_h: usize,
-    cell_w: usize,
-    cell_h: usize,
-    col: usize,
-    row: usize,
+    dims: (usize, usize),
+    rect: CellRect,
     cell: &Cell,
     actual_fg: u32,
 ) {
     use crate::grid::*;
 
-    let px_x = col * cell_w;
-    let px_y = row * cell_h;
+    let (buf_w, buf_h) = dims;
+    let px_x = rect.x;
+    let px_y = rect.y;
+    let cell_w = rect.width;
+    let cell_h = rect.height;
 
     if cell.attrs & ATTR_UNDERLINE != 0 {
         let ul_color = resolve_underline_color(cell, actual_fg);
@@ -361,7 +440,7 @@ fn draw_text_decorations(
             UnderlineStyle::Dotted => {
                 if y_base < buf_h {
                     for x in px_x..(px_x + cell_w).min(buf_w) {
-                        if (x - px_x) % 3 == 0 {
+                        if (x - px_x).is_multiple_of(3) {
                             buffer[y_base * buf_w + x] = ul_color;
                         }
                     }
@@ -394,11 +473,11 @@ fn draw_kitty_images(
     buffer: &mut [u32],
     buf_w: usize,
     buf_h: usize,
-    terminal: &Terminal,
+    terminal: &impl TerminalView,
     cell_w: usize,
     cell_h: usize,
 ) {
-    for placement in &terminal.kitty_placements {
+    for placement in terminal.kitty_placements() {
         let Some(image) = terminal.kitty_image(placement.image_id) else {
             continue;
         };
@@ -455,9 +534,39 @@ fn blend_rgba(pixel: &mut u32, rgba: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal::Terminal;
+    use crate::workloads::{
+        EMOJI_AND_SHADE_TRANSCRIPT, FISH_STARTUP_TRANSCRIPT, STARSHIP_PROMPT_TRANSCRIPT,
+        TUI_HELP_OVERLAY_TRANSCRIPT,
+    };
 
     fn new_atlas(config: &AppConfig) -> GlyphAtlas {
         GlyphAtlas::new(config.style.font_size).expect("should load a monospace font for rendering")
+    }
+
+    fn replay_chunks_match_full_redraw(
+        cols: u16,
+        rows: u16,
+        chunks: &[&[u8]],
+        per_step_assert: impl Fn(&Terminal, usize),
+    ) {
+        let config = AppConfig::default();
+        let mut atlas = new_atlas(&config);
+        let mut terminal = Terminal::new(cols, rows);
+        let mut incremental = OffscreenRenderer::new(cols, rows, &atlas);
+        let mut full = OffscreenRenderer::new(cols, rows, &atlas);
+
+        for (idx, chunk) in chunks.iter().enumerate() {
+            terminal.process(chunk);
+            incremental.render(&mut terminal, &mut atlas, &config);
+            full.reset();
+            full.render(&mut terminal, &mut atlas, &config);
+            assert_eq!(
+                incremental.pixels, full.pixels,
+                "incremental render diverged after replay chunk {idx}"
+            );
+            per_step_assert(&terminal, idx);
+        }
     }
 
     #[test]
@@ -551,8 +660,106 @@ mod tests {
         renderer.render(&mut terminal, &mut atlas, &config);
 
         assert!(
-            renderer.pixels.iter().any(|&p| p == 0xff0000),
+            renderer.pixels.contains(&0xff0000),
             "expected kitty image to draw a red pixel"
         );
+    }
+
+    #[test]
+    fn fish_startup_transcript_replay_matches_full_redraw() {
+        replay_chunks_match_full_redraw(80, 24, FISH_STARTUP_TRANSCRIPT, |terminal, _| {
+            for row in 0..24 {
+                for col in 0..80 {
+                    let ch = terminal.grid.cell_char(row, col);
+                    assert!(
+                        ch == ' ' || ch == '\0',
+                        "fish startup leaked visible char '{}' at row={} col={}",
+                        ch,
+                        row,
+                        col
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn starship_prompt_transcript_replay_matches_full_redraw() {
+        replay_chunks_match_full_redraw(80, 24, STARSHIP_PROMPT_TRANSCRIPT, |terminal, idx| {
+            if idx == STARSHIP_PROMPT_TRANSCRIPT.len() - 1 {
+                let mut text = String::new();
+                for col in 0..80 {
+                    let ch = terminal.grid.cell_char(1, col);
+                    if ch != ' ' && ch != '\0' {
+                        text.push(ch);
+                    }
+                }
+                assert!(text.contains("jeremy"), "row 1 should contain 'jeremy', got: {:?}", text);
+            }
+        });
+    }
+
+    #[test]
+    fn tui_help_overlay_transcript_replay_matches_full_redraw() {
+        replay_chunks_match_full_redraw(32, 8, TUI_HELP_OVERLAY_TRANSCRIPT, |terminal, idx| {
+            if idx == TUI_HELP_OVERLAY_TRANSCRIPT.len() - 1 {
+                let mut row0 = String::new();
+                for col in 0..32 {
+                    let ch = terminal.grid.cell_char(0, col);
+                    if ch != ' ' && ch != '\0' {
+                        row0.push(ch);
+                    }
+                }
+                assert!(row0.contains("/help"), "expected help overlay in top row, got: {:?}", row0);
+            }
+        });
+    }
+
+    #[test]
+    fn emoji_and_shade_transcript_replay_matches_full_redraw() {
+        replay_chunks_match_full_redraw(16, 4, EMOJI_AND_SHADE_TRANSCRIPT, |terminal, idx| {
+            if idx == EMOJI_AND_SHADE_TRANSCRIPT.len() - 1 {
+                assert_eq!(terminal.grid.cell_grapheme_at(0, 7), Some("❤️"));
+                assert_eq!(terminal.grid.cell_grapheme_at(0, 10), Some("👨‍💻"));
+                let row1 = (0..16)
+                    .filter_map(|col| match terminal.grid.cell_char(1, col) {
+                        ' ' | '\0' => None,
+                        ch => Some(ch),
+                    })
+                    .collect::<String>();
+                assert_eq!(row1, "░░░░░░░░░░");
+            }
+            if idx >= 1 {
+                assert!(
+                    terminal.grid.get_text(0, 16).contains("❤️"),
+                    "top row should retain the heart cluster after replay chunk {idx}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn persistent_cpu_framebuffer_can_present_into_fresh_front_buffers() {
+        let config = AppConfig::default();
+        let cols = 32;
+        let rows = 2;
+        let mut atlas = new_atlas(&config);
+        let mut terminal = Terminal::new(cols, rows);
+        let mut persistent = OffscreenRenderer::new(cols, rows, &atlas);
+        let mut full = OffscreenRenderer::new(cols, rows, &atlas);
+
+        terminal.process(b"\x1b[38;5;10m>\x1b[0m echo");
+        persistent.render(&mut terminal, &mut atlas, &config);
+
+        terminal.process(b" hello");
+        persistent.render(&mut terminal, &mut atlas, &config);
+
+        let mut presented = vec![0u32; persistent.pixels.len()];
+        presented.copy_from_slice(&persistent.pixels);
+
+        full.reset();
+        full.render(&mut terminal, &mut atlas, &config);
+
+        assert_eq!(presented, full.pixels);
     }
 }

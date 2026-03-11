@@ -12,6 +12,19 @@ pub struct Cell {
     _pad: [u8; 3],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellSnapshot {
+    pub ch: u32,
+    pub grapheme: Option<Box<str>>,
+    pub fg: u32,
+    pub bg: u32,
+    pub underline_color: u32,
+    pub hyperlink_id: u16,
+    pub attrs: u8,
+    pub flags: u8,
+    pub underline_style: UnderlineStyle,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum UnderlineStyle {
@@ -96,6 +109,76 @@ impl Cell {
     pub fn char_display(&self) -> char {
         char::from_u32(self.ch).unwrap_or(' ')
     }
+
+    pub fn from_snapshot(snapshot: CellSnapshot) -> Self {
+        Self {
+            ch: snapshot.ch,
+            fg: snapshot.fg,
+            bg: snapshot.bg,
+            underline_color: snapshot.underline_color,
+            hyperlink_id: snapshot.hyperlink_id,
+            attrs: snapshot.attrs,
+            flags: snapshot.flags,
+            underline_style: snapshot.underline_style,
+            _pad: [0; 3],
+        }
+    }
+}
+
+fn needs_grapheme_storage(grapheme: &str) -> bool {
+    grapheme.chars().count() > 1
+}
+
+fn bytes_need_grapheme_clusters(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            0xCC..=0xCD => return true,
+            0xE2 if i + 2 < bytes.len() => {
+                if bytes[i + 1] == 0x80 && bytes[i + 2] == 0x8D {
+                    return true;
+                }
+                if bytes[i + 1] == 0x83 && bytes[i + 2] == 0xA3 {
+                    return true;
+                }
+            }
+            0xEF if i + 2 < bytes.len() => {
+                if bytes[i + 1] == 0xB8
+                    && (matches!(bytes[i + 2], 0x8E | 0x8F) || (0xA0..=0xAF).contains(&bytes[i + 2]))
+                {
+                    return true;
+                }
+            }
+            0xF0 if i + 3 < bytes.len() => {
+                if bytes[i + 1] == 0x9F {
+                    if bytes[i + 2] == 0x87 {
+                        return true;
+                    }
+                    if bytes[i + 2] == 0x8F && (0xBB..=0xBF).contains(&bytes[i + 3]) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+fn clone_optional_slice<T: Clone>(slice: &mut [Option<T>], src: usize, dest: usize, len: usize) {
+    if len == 0 || src == dest {
+        return;
+    }
+    if dest > src {
+        for i in (0..len).rev() {
+            slice[dest + i] = slice[src + i].clone();
+        }
+    } else {
+        for i in 0..len {
+            slice[dest + i] = slice[src + i].clone();
+        }
+    }
 }
 
 pub struct Grid {
@@ -104,6 +187,7 @@ pub struct Grid {
     cursor_col: usize,
     cursor_row: usize,
     cells: Vec<Cell>,
+    graphemes: Vec<Option<Box<str>>>,
     top_row: usize,
     current_fg: u32,
     current_bg: u32,
@@ -119,12 +203,15 @@ pub struct Grid {
     dirty: Vec<u64>,
     pub all_dirty: bool,
     scrollback: Vec<Cell>,
+    scrollback_graphemes: Vec<Option<Box<str>>>,
     scrollback_len: usize,
     scrollback_head: usize,
     scrollback_max: usize,
     pub scroll_offset: usize,
     pub selection: Option<Selection>,
 }
+
+pub const DEFAULT_SCROLLBACK_MAX: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
@@ -136,17 +223,27 @@ pub struct Selection {
 
 impl Grid {
     pub fn new(cols: u16, rows: u16, _default_fg: [u8; 3], _default_bg: [u8; 3]) -> Self {
+        Self::new_with_scrollback(cols, rows, _default_fg, _default_bg, DEFAULT_SCROLLBACK_MAX)
+    }
+
+    pub fn new_with_scrollback(
+        cols: u16,
+        rows: u16,
+        _default_fg: [u8; 3],
+        _default_bg: [u8; 3],
+        scrollback_max: usize,
+    ) -> Self {
         let cols = cols as usize;
         let rows = rows as usize;
-        let scrollback_max = 10000;
         let total_cells = cols * rows;
-        let dirty_words = (total_cells + 63) / 64;
+        let dirty_words = total_cells.div_ceil(64);
         Self {
             cols,
             rows,
             cursor_col: 0,
             cursor_row: 0,
             cells: vec![Cell::BLANK; total_cells],
+            graphemes: vec![None; total_cells],
             top_row: 0,
             current_fg: COLOR_DEFAULT,
             current_bg: COLOR_DEFAULT,
@@ -162,6 +259,7 @@ impl Grid {
             dirty: vec![!0u64; dirty_words],
             all_dirty: true,
             scrollback: Vec::new(),
+            scrollback_graphemes: Vec::new(),
             scrollback_len: 0,
             scrollback_head: 0,
             scrollback_max,
@@ -181,6 +279,7 @@ impl Grid {
         let old_cols = self.cols;
         let old_rows = self.rows;
         let mut new_cells = vec![Cell::BLANK; new_cols * new_rows];
+        let mut new_graphemes = vec![None; new_cols * new_rows];
 
         let copy_rows = old_rows.min(new_rows);
         let copy_cols = old_cols.min(new_cols);
@@ -189,12 +288,14 @@ impl Grid {
             let src_phys = self.physical_row(r);
             let src_start = src_phys * old_cols;
             let dst_start = r * new_cols;
-            for c in 0..copy_cols {
-                new_cells[dst_start + c] = self.cells[src_start + c];
-            }
+            new_cells[dst_start..dst_start + copy_cols]
+                .copy_from_slice(&self.cells[src_start..src_start + copy_cols]);
+            new_graphemes[dst_start..dst_start + copy_cols]
+                .clone_from_slice(&self.graphemes[src_start..src_start + copy_cols]);
         }
 
         self.cells = new_cells;
+        self.graphemes = new_graphemes;
         self.cols = new_cols;
         self.rows = new_rows;
         self.top_row = 0;
@@ -204,7 +305,7 @@ impl Grid {
         self.cursor_row = self.cursor_row.min(new_rows.saturating_sub(1));
         self.pending_wrap = false;
         let total_cells = new_cols * new_rows;
-        let dirty_words = (total_cells + 63) / 64;
+        let dirty_words = total_cells.div_ceil(64);
         self.dirty = vec![!0u64; dirty_words];
         self.all_dirty = true;
     }
@@ -278,6 +379,14 @@ impl Grid {
         self.all_dirty || self.dirty.iter().any(|&w| w != 0)
     }
 
+    #[allow(dead_code)]
+    pub fn dirty_cell_count(&self) -> usize {
+        if self.all_dirty {
+            return self.rows * self.cols;
+        }
+        self.dirty.iter().map(|word| word.count_ones() as usize).sum()
+    }
+
     #[inline(always)]
     fn physical_row(&self, logical_row: usize) -> usize {
         (self.top_row + logical_row) % self.rows
@@ -290,6 +399,35 @@ impl Grid {
     pub fn cell_at(&self, row: usize, col: usize) -> &Cell {
         let idx = self.cell_index_at(row, col);
         &self.cells[idx]
+    }
+
+    #[allow(dead_code)]
+    pub fn set_cell(&mut self, row: usize, col: usize, cell: Cell) {
+        self.set_cell_with_grapheme(row, col, cell, None);
+    }
+
+    pub fn set_cell_with_grapheme(
+        &mut self,
+        row: usize,
+        col: usize,
+        cell: Cell,
+        grapheme: Option<Box<str>>,
+    ) {
+        if row >= self.rows || col >= self.cols {
+            return;
+        }
+        let idx = self.cell_index_at(row, col);
+        self.cells[idx] = cell;
+        self.graphemes[idx] = grapheme;
+        self.mark_dirty(idx);
+    }
+
+    pub fn cell_grapheme_at(&self, row: usize, col: usize) -> Option<&str> {
+        if row >= self.rows || col >= self.cols {
+            return None;
+        }
+        let idx = self.cell_index_at(row, col);
+        self.graphemes[idx].as_deref()
     }
 
     pub fn get_selection_text(&self) -> String {
@@ -315,7 +453,9 @@ impl Grid {
                 if cell.flags & FLAG_WIDE_CONT != 0 {
                     continue;
                 }
-                if let Some(c) = char::from_u32(cell.ch) {
+                if let Some(grapheme) = self.cell_grapheme_at_scroll(row, col) {
+                    text.push_str(grapheme);
+                } else if let Some(c) = char::from_u32(cell.ch) {
                     if c > ' ' {
                         text.push(c);
                     } else {
@@ -368,6 +508,38 @@ impl Grid {
         }
     }
 
+    pub fn cell_grapheme_at_scroll(&self, row: usize, col: usize) -> Option<&str> {
+        if self.scroll_offset == 0 {
+            return self.cell_grapheme_at(row, col);
+        }
+        let sb_len = self.scrollback_len;
+        if self.scroll_offset > sb_len {
+            return None;
+        }
+        let sb_start = sb_len - self.scroll_offset;
+        let line_in_sb = sb_start + row;
+        if line_in_sb < sb_len {
+            let ring_idx = if self.scrollback_len >= self.scrollback_max {
+                (self.scrollback_head + line_in_sb) % self.scrollback_max
+            } else {
+                line_in_sb
+            };
+            let offset = ring_idx * self.cols;
+            if col < self.cols && offset + col < self.scrollback_graphemes.len() {
+                self.scrollback_graphemes[offset + col].as_deref()
+            } else {
+                None
+            }
+        } else {
+            let grid_row = line_in_sb - sb_len;
+            if grid_row < self.rows && col < self.cols {
+                self.cell_grapheme_at(grid_row, col)
+            } else {
+                None
+            }
+        }
+    }
+
     #[allow(dead_code)]
     pub fn cell_char(&self, row: usize, col: usize) -> char {
         if row >= self.rows || col >= self.cols {
@@ -381,7 +553,15 @@ impl Grid {
         let mut out = String::with_capacity(self.cols * (end - start_row) + end - start_row);
         for row in start_row..end {
             for col in 0..self.cols {
-                out.push(self.cell_at(row, col).char_display());
+                let cell = self.cell_at(row, col);
+                if cell.flags & FLAG_WIDE_CONT != 0 {
+                    continue;
+                }
+                if let Some(grapheme) = self.cell_grapheme_at(row, col) {
+                    out.push_str(grapheme);
+                } else {
+                    out.push(cell.char_display());
+                }
             }
             let trimmed = out.trim_end_matches(' ');
             let trimmed_len = trimmed.len();
@@ -399,6 +579,14 @@ impl Grid {
 
     #[inline]
     pub fn write_bytes(&mut self, bytes: &[u8]) {
+        if !bytes.is_ascii()
+            && bytes_need_grapheme_clusters(bytes)
+            && let Ok(text) = std::str::from_utf8(bytes)
+        {
+            self.write_text(text);
+            return;
+        }
+
         let mut i = 0;
         let len = bytes.len();
 
@@ -432,6 +620,43 @@ impl Grid {
                     _ => {}
                 }
                 i += 1;
+            }
+        }
+    }
+
+    fn write_text(&mut self, text: &str) {
+        use unicode_segmentation::UnicodeSegmentation;
+
+        for grapheme in UnicodeSegmentation::graphemes(text, true) {
+            match grapheme {
+                "\r\n" => {
+                    self.carriage_return();
+                    self.line_feed();
+                    continue;
+                }
+                "\n" => {
+                    self.line_feed();
+                    continue;
+                }
+                "\r" => {
+                    self.carriage_return();
+                    continue;
+                }
+                "\t" => {
+                    self.tab();
+                    continue;
+                }
+                _ => {}
+            }
+
+            if grapheme.len() == 1 {
+                let ch = grapheme.chars().next().unwrap_or('\0');
+                match ch {
+                    c if c >= ' ' => self.put_char(c as u32),
+                    _ => {}
+                }
+            } else {
+                self.put_grapheme(grapheme);
             }
         }
     }
@@ -495,6 +720,7 @@ impl Grid {
                         cell.underline_style = ustyle;
                         cell.hyperlink_id = hlink;
                         cell.flags = 0;
+                        *self.graphemes.get_unchecked_mut(dest_start + j + k) = None;
                     }
                     j += 4;
                 }
@@ -508,6 +734,7 @@ impl Grid {
                     cell.underline_style = ustyle;
                     cell.hyperlink_id = hlink;
                     cell.flags = 0;
+                    *self.graphemes.get_unchecked_mut(dest_start + j) = None;
                     j += 1;
                 }
             }
@@ -529,28 +756,59 @@ impl Grid {
         let old_top = self.top_row;
         let blank_start = old_top * cols;
 
+        if self.scrollback_max == 0 {
+            self.cells[blank_start..blank_start + cols].fill(Cell::BLANK);
+            self.graphemes[blank_start..blank_start + cols].fill(None);
+            self.top_row = (old_top + 1) % self.rows;
+            self.all_dirty = true;
+            return;
+        }
+
         if self.scrollback_len < self.scrollback_max {
             let needed = (self.scrollback_len + 1) * cols;
             if self.scrollback.len() < needed {
                 self.scrollback.resize(needed, Cell::BLANK);
+                self.scrollback_graphemes.resize(needed, None);
             }
             let dest = self.scrollback_len * cols;
             self.scrollback[dest..dest + cols]
                 .copy_from_slice(&self.cells[blank_start..blank_start + cols]);
+            for col in 0..cols {
+                self.scrollback_graphemes[dest + col] = self.graphemes[blank_start + col].clone();
+            }
             self.scrollback_len += 1;
         } else {
             let dest = self.scrollback_head * cols;
             self.scrollback[dest..dest + cols]
                 .copy_from_slice(&self.cells[blank_start..blank_start + cols]);
+            for col in 0..cols {
+                self.scrollback_graphemes[dest + col] = self.graphemes[blank_start + col].clone();
+            }
             self.scrollback_head = (self.scrollback_head + 1) % self.scrollback_max;
         }
 
         self.cells[blank_start..blank_start + cols].fill(Cell::BLANK);
+        self.graphemes[blank_start..blank_start + cols].fill(None);
         self.top_row = (old_top + 1) % self.rows;
         self.all_dirty = true;
     }
 
     pub fn put_char(&mut self, ch: u32) {
+        let width = if let Some(c) = char::from_u32(ch) {
+            unicode_width::UnicodeWidthChar::width(c).unwrap_or(1).clamp(1, 2)
+        } else {
+            1
+        };
+        self.put_cluster_parts(ch, width, None);
+    }
+
+    pub fn put_grapheme(&mut self, grapheme: &str) {
+        let ch = grapheme.chars().next().map(|c| c as u32).unwrap_or(b' ' as u32);
+        let width = unicode_width::UnicodeWidthStr::width(grapheme).clamp(1, 2);
+        self.put_cluster_parts(ch, width, needs_grapheme_storage(grapheme).then(|| grapheme.into()));
+    }
+
+    fn put_cluster_parts(&mut self, ch: u32, width: usize, grapheme: Option<Box<str>>) {
         if self.cursor_row >= self.rows {
             return;
         }
@@ -574,18 +832,13 @@ impl Grid {
             return;
         }
 
-        let width = if let Some(c) = char::from_u32(ch) {
-            unicode_width::UnicodeWidthChar::width(c).unwrap_or(1)
-        } else {
-            1
-        };
-
         if width == 2 && self.cursor_col + 1 >= self.cols {
             if !self.autowrap {
                 return;
             }
             let idx = self.cell_index_at(self.cursor_row, self.cursor_col);
             self.cells[idx] = Cell::BLANK;
+            self.graphemes[idx] = None;
             self.cursor_col = 0;
             if self.cursor_row + 1 >= self.scroll_bottom {
                 self.scroll_up();
@@ -604,6 +857,7 @@ impl Grid {
         cell.underline_style = self.current_underline_style;
         cell.hyperlink_id = self.current_hyperlink_id;
         cell.flags = if width == 2 { FLAG_WIDE } else { 0 };
+        self.graphemes[idx] = grapheme;
         self.mark_dirty(idx);
 
         self.cursor_col += 1;
@@ -619,6 +873,7 @@ impl Grid {
             cell2.underline_style = self.current_underline_style;
             cell2.hyperlink_id = self.current_hyperlink_id;
             cell2.flags = FLAG_WIDE_CONT;
+            self.graphemes[idx2] = None;
             self.mark_dirty(idx2);
             self.cursor_col += 1;
         }
@@ -720,6 +975,7 @@ impl Grid {
         let start = phys * self.cols;
         let end = start + self.cols;
         self.cells[start..end].fill(Cell::BLANK);
+        self.graphemes[start..end].fill(None);
         self.mark_dirty_range(start, self.cols);
     }
 
@@ -732,6 +988,7 @@ impl Grid {
         let end = phys * self.cols + self.cols;
         let len = end - start;
         self.cells[start..end].fill(Cell::BLANK);
+        self.graphemes[start..end].fill(None);
         self.mark_dirty_range(start, len);
     }
 
@@ -745,6 +1002,7 @@ impl Grid {
         let actual_end = end.min(start + self.cols);
         let len = actual_end - start;
         self.cells[start..actual_end].fill(Cell::BLANK);
+        self.graphemes[start..actual_end].fill(None);
         self.mark_dirty_range(start, len);
     }
 
@@ -761,6 +1019,7 @@ impl Grid {
         let end = (start + n).min(phys * self.cols + self.cols);
         let len = end - start;
         self.cells[start..end].fill(Cell::BLANK);
+        self.graphemes[start..end].fill(None);
         self.mark_dirty_range(start, len);
     }
 
@@ -789,8 +1048,10 @@ impl Grid {
         let move_count = self.cols - col - n;
         if move_count > 0 {
             self.cells.copy_within(src..src + move_count, dest);
+            clone_optional_slice(&mut self.graphemes, src, dest, move_count);
         }
         self.cells[src..src + n].fill(Cell::BLANK);
+        self.graphemes[src..src + n].fill(None);
         self.mark_dirty_range(row_start + col, self.cols - col);
     }
 
@@ -807,9 +1068,11 @@ impl Grid {
         let move_count = self.cols - col - n;
         if move_count > 0 {
             self.cells.copy_within(src..src + move_count, dest);
+            clone_optional_slice(&mut self.graphemes, src, dest, move_count);
         }
         let blank_start = row_start + self.cols - n;
         self.cells[blank_start..row_start + self.cols].fill(Cell::BLANK);
+        self.graphemes[blank_start..row_start + self.cols].fill(None);
         self.mark_dirty_range(row_start + col, self.cols - col);
     }
 
@@ -843,23 +1106,39 @@ impl Grid {
             let blank_start = old_top * self.cols;
             let cols = self.cols;
 
+            if self.scrollback_max == 0 {
+                self.cells[blank_start..blank_start + cols].fill(Cell::BLANK);
+                self.graphemes[blank_start..blank_start + cols].fill(None);
+                self.top_row = (self.top_row + 1) % self.rows;
+                self.all_dirty = true;
+                return;
+            }
+
             if self.scrollback_len < self.scrollback_max {
                 let needed = (self.scrollback_len + 1) * cols;
                 if self.scrollback.len() < needed {
                     self.scrollback.resize(needed, Cell::BLANK);
+                    self.scrollback_graphemes.resize(needed, None);
                 }
                 let dest = self.scrollback_len * cols;
                 self.scrollback[dest..dest + cols]
                     .copy_from_slice(&self.cells[blank_start..blank_start + cols]);
+                for col in 0..cols {
+                    self.scrollback_graphemes[dest + col] = self.graphemes[blank_start + col].clone();
+                }
                 self.scrollback_len += 1;
             } else {
                 let dest = self.scrollback_head * cols;
                 self.scrollback[dest..dest + cols]
                     .copy_from_slice(&self.cells[blank_start..blank_start + cols]);
+                for col in 0..cols {
+                    self.scrollback_graphemes[dest + col] = self.graphemes[blank_start + col].clone();
+                }
                 self.scrollback_head = (self.scrollback_head + 1) % self.scrollback_max;
             }
 
             self.cells[blank_start..blank_start + cols].fill(Cell::BLANK);
+            self.graphemes[blank_start..blank_start + cols].fill(None);
             self.top_row = (self.top_row + 1) % self.rows;
         } else {
             let cols = self.cols;
@@ -867,10 +1146,12 @@ impl Grid {
                 let src = self.physical_row(r + 1) * cols;
                 let dst = self.physical_row(r) * cols;
                 self.cells.copy_within(src..src + cols, dst);
+                clone_optional_slice(&mut self.graphemes, src, dst, cols);
             }
             let last = self.physical_row(self.scroll_bottom.saturating_sub(1));
             let start = last * self.cols;
             self.cells[start..start + self.cols].fill(Cell::BLANK);
+            self.graphemes[start..start + self.cols].fill(None);
         }
         self.all_dirty = true;
     }
@@ -885,10 +1166,12 @@ impl Grid {
             let src = self.physical_row(r - 1) * cols;
             let dst = self.physical_row(r) * cols;
             self.cells.copy_within(src..src + cols, dst);
+            clone_optional_slice(&mut self.graphemes, src, dst, cols);
         }
         let first = self.physical_row(self.scroll_top);
         let start = first * self.cols;
         self.cells[start..start + self.cols].fill(Cell::BLANK);
+        self.graphemes[start..start + self.cols].fill(None);
         self.all_dirty = true;
     }
 
@@ -999,11 +1282,9 @@ impl Grid {
         }
         if let Some(pos) = self.hyperlinks.iter().position(|u| u == url) {
             self.current_hyperlink_id = pos as u16;
-        } else {
-            if self.hyperlinks.len() < u16::MAX as usize {
-                self.current_hyperlink_id = self.hyperlinks.len() as u16;
-                self.hyperlinks.push(url.to_string());
-            }
+        } else if self.hyperlinks.len() < u16::MAX as usize {
+            self.current_hyperlink_id = self.hyperlinks.len() as u16;
+            self.hyperlinks.push(url.to_string());
         }
     }
 
@@ -1095,6 +1376,16 @@ mod tests {
     }
 
     #[test]
+    fn writes_emoji_grapheme_clusters_into_single_cells() {
+        let mut g = super::Grid::new(80, 24, [0xff; 3], [0; 3]);
+        g.write_bytes("❤️👨‍💻".as_bytes());
+
+        assert_eq!(g.cell_grapheme_at(0, 0), Some("❤️"));
+        assert_eq!(g.cell_grapheme_at(0, 2), Some("👨‍💻"));
+        assert_eq!(g.get_text(0, 1), "❤️👨‍💻");
+    }
+
+    #[test]
     fn pending_wrap_defers_line_advance() {
         let mut g = Grid::new(4, 2, [0; 3], [0; 3]);
         g.write_bytes(b"abcd");
@@ -1113,5 +1404,35 @@ mod tests {
         assert_eq!(g.cell_char(0, 3), 'f');
         let (col, row) = g.cursor_pos();
         assert_eq!((col, row), (3, 0));
+    }
+
+    #[test]
+    fn zero_scrollback_scrolls_without_history() {
+        let mut g = Grid::new_with_scrollback(4, 2, [0; 3], [0; 3], 0);
+        g.write_bytes(b"abcdefghij");
+
+        assert_eq!(g.scrollback_len(), 0);
+        assert_eq!(g.cell_char(0, 0), 'e');
+        assert_eq!(g.cell_char(0, 3), 'h');
+        assert_eq!(g.cell_char(1, 0), 'i');
+        assert_eq!(g.cell_char(1, 1), 'j');
+        assert_eq!(g.cell_char(1, 2), ' ');
+
+        g.scroll_offset = 1;
+        assert_eq!(g.cell_char(0, 0), 'e');
+        assert_eq!(g.cell_at_scroll(0, 0).char_display(), ' ');
+        assert_eq!(g.cell_grapheme_at_scroll(0, 0), None);
+    }
+
+    #[test]
+    fn zero_scrollback_preserves_grapheme_integrity_when_scrolling() {
+        let mut g = Grid::new_with_scrollback(4, 2, [0xff; 3], [0; 3], 0);
+        g.write_bytes("❤️\r\n👨‍💻\r\nxy".as_bytes());
+
+        assert_eq!(g.scrollback_len(), 0);
+        assert_eq!(g.cell_grapheme_at(0, 0), Some("👨‍💻"));
+        assert_eq!(g.cell_grapheme_at(1, 0), None);
+        assert_eq!(g.cell_char(1, 0), 'x');
+        assert_eq!(g.cell_char(1, 1), 'y');
     }
 }

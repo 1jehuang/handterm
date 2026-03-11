@@ -1,0 +1,18 @@
+[package]
+name = "handterm-server"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[features]
+default = ["ligatures"]
+ligatures = ["handterm/ligatures"]
+
+[dependencies]
+anyhow = "1.0.95"
+handterm = { path = "..", default-features = false }
+
+[[bin]]
+name = "handterm-server"
+path = "src/main.rs"

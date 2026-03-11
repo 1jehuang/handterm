@@ -28,8 +28,33 @@ The two `memfd:softbuffer` SHM mappings at ~9.8MB each (2560x1600x4 bytes, doubl
 - Shared frontend scheduling/input/IPC helpers were extracted so the CPU and GPU frontends are less duplicated.
 - CPU rendering now has an offscreen framebuffer harness that compares incremental rendering against forced full redraws.
 - PTY-driven redraws are batched to a frame deadline instead of presenting every readiness notification immediately.
+- Large PTY repaint bursts now get an additional scheduler settle step after the normal burst cap, based on dirty-grid intensity, with automated tests covering long TUI-style repaint bursts.
+- Both frontends now compute a visual-scene signature and skip redundant presents when the visible scene is unchanged.
 - Glyph cache misses no longer reopen the configured FreeType face.
-- A narrow emoji fallback path exists in the font layer, but full emoji correctness and renderer parity are not finished.
+- Keyboard/input encoding now lives in a dedicated module and supports negotiated kitty keyboard protocol with automated tests.
+- CPU and GPU startup now print build/backend/debug information so the running binary is unambiguous.
+- GPU frame planning/batching was split out of `gpu_app.rs` into a dedicated `gpu_frame.rs` module with automated tests.
+- GPU hot-path allocations were reduced by reusing frame planning, text batching, image batching, and instance vectors across frames.
+- The GPU path now skips redundant default-background quads, and `hand bench` measures GPU frame-prep throughput plus CPU render throughput.
+- GPU batch construction now has transcript-driven parity coverage for fish startup, starship-style prompts, and chunked TUI help overlays, including kitty image placement assertions.
+- Benchmarks now include transcript-shaped prompt and TUI replay workloads for both the CPU renderer and GPU frame-prep path so parity work is measured against realistic repaint patterns.
+- A dedicated binary protocol module now exists with client/server message types, length-prefixed framing helpers, encode/decode tests, and a protocol roundtrip benchmark.
+- An in-process server core now exists with per-window terminal ownership, dirty-cell snapshot emission, resize/close handling, and automated lifecycle/update tests.
+- The server core now handles binary protocol client messages and emits both server updates and explicit PTY-side actions, with automated command-processing coverage.
+- A `server-only` daemon runtime now exists with a real Unix-socket event loop, framed protocol parsing, client/window ownership tracking, and PTY polling/forwarding.
+- A reusable protocol client transport now exists, and there is an end-to-end daemon smoke test covering `NewWindow`/`CloseWindow` roundtrips over the real socket protocol.
+- The thin-client foundation now includes nonblocking protocol client reads plus terminal-side application of server cell/cursor/title/clipboard/bell updates.
+- Real CPU and GPU thin-client window frontends now exist, with daemon reachability checks and automatic server startup so non-standalone launches can use the daemon/client flow on either backend.
+- The daemon protocol now carries negotiated client DPI in `NewWindow`, explicit kitty image/placement state snapshots, and server-driven glyph/grapheme atlas updates that remote clients apply before rendering.
+- Thin clients now consume kitty image state, track alternate-screen mode, and inject protocol glyph updates into their local atlas cache instead of ignoring them.
+- The server now keeps per-DPI glyph atlases, emits incremental `AtlasUpdate` payloads from dirty cells/graphemes, and deduplicates already-uploaded glyphs per window so steady-state daemon traffic stays smaller.
+- Remote frontends now drop live font rasterization sources after startup geometry is established, reducing retained client-side font state while preserving protocol-injected glyph rendering.
+- The server now preserves terminal-generated PTY reply bytes on the server I/O path and translates protocol mouse input into PTY mouse sequences instead of dropping it.
+- The grid/protocol/font stack is now grapheme-aware for UTF-8 printable clusters, and the font layer caches rasterized grapheme bitmaps so emoji sequences like variation-selector and ZWJ clusters can render as one cell span instead of being split into separate placeholder glyphs.
+- The GPU frontend now prefers non-sRGB surface formats when available for better color parity, and GPU glyph quads expand to the uploaded glyph width so prompt icons with right-side overhang are not clipped.
+- The CPU frontends now keep their own persistent software framebuffer and copy that into softbuffer at present time, instead of relying on softbuffer backbuffer persistence across frames. This has automated coverage because the CPU renderer is now tested for the “persistent software framebuffer -> fresh presented front buffer” path that matches live CPU presentation more closely.
+- The font path now uses explicit FreeType light hinting for normal text, derives cell width from a representative monospace sample set instead of a single rendered `M`, and procedurally rasterizes shaded/block glyphs like `░▒▓` so they stay cell-aligned and crisp.
+- True configured background opacity is now wired through the GPU backend using transparent windows plus a non-opaque surface alpha mode when available. The current CPU backend cannot support real opacity on Wayland because `softbuffer` presents `Xrgb8888` there, so CPU remains intentionally opaque.
 
 ## Verification Standard
 
@@ -59,15 +84,16 @@ With a daemon model on top of GPU rendering, each additional window could be **<
 
 ## Phase 1: Ship the GPU backend as default
 
-**Status: in progress** - `gpu_app.rs` exists, but GPU rendering is not yet at parity with the stable CPU renderer, so CPU remains the release default.
+**Status: in progress** - GPU frame planning/batching is significantly more structured and benchmarked than before, and GPU is now the preferred default backend when it is compiled in. Full framebuffer parity and broader live validation still remain.
 
 ### Tasks
 
 1. Reach rendering parity with CPU for shell prompts, typing, resize, selection, and TUI repaint behavior.
-2. Add automated GPU parity tests against CPU/offscreen reference output.
+2. Add stronger automated GPU parity tests against CPU/offscreen reference output and shared visual expectations.
+   Status: partially done. Transcript-driven shared-visual tests now exist for the GPU batch builder, but end-to-end GPU framebuffer parity is still missing.
 3. Verify glyph atlas upload and rendering across normal text, wide glyphs, and fallback/emoji paths.
 4. Benchmark RSS, startup time, redraw throughput, and frame pacing on CPU vs GPU.
-5. Only after those gates pass, reconsider making GPU the default release backend.
+5. Keep validating the GPU default path against live shell/TUI workloads and continue tightening parity until CPU is no longer the fallback/debug backend.
 
 ### Expected result
 
@@ -98,7 +124,7 @@ Split into a server process (owns PTYs, terminals, fonts) and thin client proces
 Binary protocol over Unix socket (bincode or simple TLV, not JSON).
 
 **Client -> Server:**
-- `NewWindow { cols, rows }` - request a new terminal window
+- `NewWindow { cols, rows, dpi }` - request a new terminal window for a specific client DPI
 - `KeyInput { window_id, key_event }` - forward keyboard input
 - `MouseInput { window_id, mouse_event }` - forward mouse input
 - `Resize { window_id, cols, rows }` - window was resized
@@ -112,7 +138,8 @@ Binary protocol over Unix socket (bincode or simple TLV, not JSON).
 - `Bell { window_id }` - terminal bell
 - `CopyToClipboard { window_id, text }` - OSC 52 clipboard
 - `WindowClosed { window_id }` - PTY exited
-- `AtlasUpdate { glyph_id, bitmap, metrics }` - new glyph rasterized
+- `KittyImageState { window_id, generation, images, placements }` - current kitty RGBA image state for that window
+- `AtlasUpdate { glyph, ... }` - incremental glyph/grapheme bitmap upload for the negotiated client DPI
 
 ### 2b: Server process (`handterm --server`)
 
@@ -185,7 +212,7 @@ Clients don't need freetype/fontconfig linked at all.
 
 ### Kitty graphics requirement
 
-Kitty graphics protocol support is part of project completion. The terminal already parses/stores kitty image payloads and placements, but the renderers do not yet draw them. Before Phase 2 is considered complete:
+Kitty graphics protocol support is part of project completion. The terminal parses/stores kitty image payloads and placements, and both renderers now draw the currently implemented RGBA placement path, but broader protocol coverage and performance validation are still incomplete. Before Phase 2 is considered complete:
 
 - image decode/place/delete flows need automated coverage
 - CPU and GPU renderers must draw kitty image placements correctly
@@ -204,11 +231,13 @@ Default behavior (`handterm` with no flags):
 2. If yes, connect to it and open a new window (fast path, ~1-2MB)
 3. If no, fork a server process in the background, wait for socket, then connect
 
+Status: mostly done. The default non-standalone path now ensures the server is running and launches either the CPU or GPU thin client automatically, with `--standalone` to force the legacy local-PTY mode. The remaining work here is shrinking the thin clients further, continuing GPU/live parity validation, and pushing total memory toward the long-term target.
+
 This means the first `handterm` invocation starts the server and opens a window. Every subsequent `handterm` just connects to the existing server. The user never thinks about server vs client - it just works, and second+ windows are near-instant and ultra-lightweight.
 
 ### Expected result
 
-- Server: ~5-6MB (font cache + terminal state, no framebuffers)
+- Server: ~3.7MB RSS measured in `server-only` headless mode on this machine; higher once active windows/fonts are loaded
 - Client: ~2-3MB each (GPU surface + cell grid copy)
 - 10 windows: ~28MB total
 
@@ -234,7 +263,9 @@ handterm/
     src/lib.rs
 ```
 
-The client binary drops: freetype (~600KB RSS), fontconfig, rustybuzz, and all their transitive deps.
+Status: partially implemented. The repository is now a real Cargo workspace with `handterm-common`, `handterm-client`, and `handterm-server` packages, and the terminal core (`grid`, `parser`, `protocol`, `terminal`) has been extracted into `handterm-common`. Remaining work is to continue moving package-specific code out of the root `handterm` crate so the client can stop linking server/font-side dependencies entirely.
+
+The intended end state is still that the client binary drops: freetype (~600KB RSS), fontconfig, rustybuzz, and all their transitive deps.
 
 ### 3b: Pre-compiled shader
 

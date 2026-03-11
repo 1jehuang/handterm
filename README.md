@@ -123,9 +123,9 @@ foot's high VSZ is from mmap'd font files and Wayland protocol buffers; most is 
 |-------|-------------:|----------------:|
 | foot standalone | 24 MB | +24 MB |
 | foot --server + footclient | 25 MB (server) + 1.6 MB | +1.6 MB |
-| **handterm** (planned server mode) | ~13 MB (server) | **<1 MB** |
+| **handterm** daemon mode | **~3.7 MB server-only (measured, headless)** | target: **<1 MB** |
 
-handterm's planned daemon mode (see [OPTIMIZATION.md](OPTIMIZATION.md)) targets <1 MB per additional window by sharing the font cache, GPU context, and grid memory across a thin client/server split.
+handterm's daemon mode (see [OPTIMIZATION.md](OPTIMIZATION.md)) is implemented for both CPU and GPU thin clients. The current code shares PTYs, terminal state, kitty image state, and server-driven glyph/image updates over a Unix-socket protocol, with a long-term target of <1 MB per additional window once the client/server split is pushed further.
 
 | Windows | foot standalone | foot daemon | handterm daemon (target) |
 |--------:|---------------:|------------:|-------------------------:|
@@ -142,8 +142,8 @@ handterm's planned daemon mode (see [OPTIMIZATION.md](OPTIMIZATION.md)) targets 
 | True color (24-bit) | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Ligatures | ✅ | ✅ | - | ✅ | ✅ |
 | Sixel graphics | - | ✅ | - | - | ✅ |
-| Kitty image protocol | - | - | - | ✅ | ✅ |
-| Daemon mode | planned | ✅ | - | - | - |
+| Kitty image protocol | partial | - | - | ✅ | ✅ |
+| Daemon mode | ✅ | ✅ | - | - | - |
 | Tabs | - | - | - | ✅ | ✅ |
 | Splits/panes | - | - | - | ✅ | ✅ |
 | Bracketed paste | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -217,8 +217,8 @@ handterm bench
 - Device attributes (DA1/DA2), device status reports
 
 **Rendering**
-- CPU renderer via softbuffer (default)
-- GPU renderer via wgpu with instanced cell rendering and WGSL shaders
+- GPU renderer via wgpu with instanced cell rendering and WGSL shaders (default when built)
+- CPU renderer via softbuffer (`--backend cpu`, but Wayland presentation remains opaque)
 - Two-pass rendering (backgrounds then glyphs) for correct powerline/nerd font display
 - Damage tracking with bitset dirty map
 - Ligature support via rustybuzz text shaping
@@ -261,10 +261,18 @@ cargo build --release
 ./target/release/handterm
 ```
 
-### Build with GPU rendering
+This default build includes both CPU and GPU frontends, and will prefer GPU automatically so `background_opacity` works out of the box on supported systems.
+
+### Build with GPU rendering only
 
 ```bash
 cargo build --release --features gpu --no-default-features
+```
+
+### Build with CPU rendering only
+
+```bash
+cargo build --release --features cpu --no-default-features
 ```
 
 ## Configuration
@@ -299,6 +307,8 @@ lines = 10000
 repaint_delay_ms = 5
 sync_to_monitor = true
 ```
+
+`background_opacity` is implemented by the GPU backend. If you force `--backend cpu`, Handterm will stay opaque on Wayland because `softbuffer` presents `Xrgb8888` there.
 
 ## Architecture
 
@@ -361,8 +371,8 @@ See [OPTIMIZATION.md](OPTIMIZATION.md) for the full performance roadmap.
 | CPU rendering | Functional terminal with softbuffer | ✅ |
 | GPU rendering | wgpu backend with instanced shaders | ✅ |
 | GPU as default | Eliminate CPU framebuffer memory overhead | planned |
-| Server/client mode | Daemon architecture like foot --server | planned |
-| Workspace split | Thin client binary without font libs | planned |
+| Server/client mode | Daemon architecture like foot --server | ✅ implemented |
+| Workspace split | Thin client/server/common Cargo packages | in progress |
 | Zero-copy IPC | Shared memory cell grid between server and client | planned |
 
 **Target: <1 MB per window, ~13 MB total for 10 windows** (vs foot's ~41 MB).
@@ -370,4 +380,3 @@ See [OPTIMIZATION.md](OPTIMIZATION.md) for the full performance roadmap.
 ## License
 
 MIT
-

@@ -1,13 +1,13 @@
 use crate::config::AppConfig;
 use crate::font::GlyphAtlas;
 use crate::frontend::{
-    FrameDecision, FrameScheduler, KeyEventKind, RedrawWork, base64_decode,
+    FrameDecision, FrameScheduler, KeyEventKind, RedrawWork, VisualState, base64_decode,
     classify_redraw_work, copy_to_clipboard, key_to_bytes, open_url, paste_from_clipboard,
     scroll_to_bytes, spawn_fd_watcher, visual_signature,
 };
 use crate::ipc::{IpcAction, IpcServer, Request, Response};
 use crate::pty::PtyChild;
-use crate::render::OffscreenRenderer;
+use crate::render::render_terminal_to_buffer;
 use crate::standalone_support::handle_ipc_request;
 use crate::terminal::Terminal;
 use anyhow::{Context, Result};
@@ -87,7 +87,7 @@ struct HostWindowState {
     mouse_col: usize,
     mouse_row: usize,
     selecting: bool,
-    renderer: OffscreenRenderer,
+    last_visual_state: Option<VisualState>,
     last_presented_signature: Option<u64>,
     scheduler: FrameScheduler,
     watcher_stop: Arc<AtomicBool>,
@@ -213,10 +213,6 @@ impl HandtermApp {
             .map_err(|e| anyhow::anyhow!("softbuffer surface should be created: {e}"))?;
         let terminal = Terminal::new_with_scrollback(cols, rows, self.config.scrollback.lines);
         let pty = PtyChild::spawn_default_shell(cols, rows).context("pty should spawn")?;
-        let renderer = {
-            let atlas = self.atlas_cache.get(&dpi).expect("atlas should exist");
-            OffscreenRenderer::new(cols, rows, atlas)
-        };
         let stop = Arc::new(AtomicBool::new(false));
         let id = self.next_window_id;
         self.next_window_id += 1;
@@ -250,7 +246,7 @@ impl HandtermApp {
                 mouse_col: 0,
                 mouse_row: 0,
                 selecting: false,
-                renderer,
+                last_visual_state: None,
                 last_presented_signature: None,
                 scheduler: FrameScheduler::default(),
                 watcher_stop: stop,
@@ -438,8 +434,7 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                                 .expect("surface resize should succeed");
                             state.surface_size = (width.get(), height.get());
                             state
-                                .renderer
-                                .resize_pixels(width.get() as usize, height.get() as usize);
+                                .last_visual_state = None;
                             state.last_presented_signature = None;
 
                             let new_cols = (width.get() as usize / cell_width) as u16;
@@ -768,12 +763,19 @@ fn render_grid(state: &mut HostWindowState, atlas: &mut GlyphAtlas, config: &App
         return Ok(());
     }
 
-    state.renderer.render(&mut state.terminal, atlas, config);
     let mut buffer = state
         .surface
         .buffer_mut()
         .map_err(|e| anyhow::anyhow!("failed to acquire backbuffer: {e}"))?;
-    buffer.copy_from_slice(&state.renderer.pixels);
+    render_terminal_to_buffer(
+        buffer.as_mut(),
+        width.get() as usize,
+        height.get() as usize,
+        &mut state.terminal,
+        atlas,
+        config,
+        &mut state.last_visual_state,
+    );
 
     buffer
         .present()

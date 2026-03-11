@@ -132,36 +132,12 @@ pub fn handle_ipc_request(terminal: &mut Terminal, req: &Request) -> (Response, 
                 window: target_window,
             },
         ),
-        "open-window" => {
-            let cols = req
-                .args
-                .as_object()
-                .and_then(|o| o.get("cols"))
-                .and_then(|v| v.as_u64())
-                .and_then(|v| u16::try_from(v).ok());
-            let rows = req
-                .args
-                .as_object()
-                .and_then(|o| o.get("rows"))
-                .and_then(|v| v.as_u64())
-                .and_then(|v| u16::try_from(v).ok());
-            (Response::ok_empty(), IpcAction::OpenWindow { cols, rows })
-        }
-        "focus-window" => {
-            let Some(window_id) = target_window else {
-                return (
-                    Response::err("missing 'window_id' argument"),
-                    IpcAction::None,
-                );
-            };
-            (Response::ok_empty(), IpcAction::FocusWindow(window_id))
-        }
         "ls" => (
             Response::ok(serde_json::json!({
                 "commands": [
                     "get-text", "send-text", "send-key",
                     "get-cursor", "get-size", "set-title",
-                    "close", "open-window", "focus-window", "ls"
+                    "close", "ls"
                 ]
             })),
             IpcAction::None,

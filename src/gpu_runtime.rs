@@ -43,11 +43,22 @@ struct GpuImageEntry {
     height: u32,
 }
 
+pub struct SharedGpuContext {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    bind_group_layout: wgpu::BindGroupLayout,
+    shader: wgpu::ShaderModule,
+    image_shader: wgpu::ShaderModule,
+    pipeline_layout: wgpu::PipelineLayout,
+    atlas_sampler: wgpu::Sampler,
+}
+
 pub struct GpuSurfaceState {
+    pub shared: Arc<SharedGpuContext>,
     pub window: Arc<Window>,
     pub surface: wgpu::Surface<'static>,
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
     pub surface_config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     image_pipeline: wgpu::RenderPipeline,
@@ -284,32 +295,15 @@ pub fn create_window_attributes(
         .with_inner_size(Size::Logical(LogicalSize::new(width, height)))
 }
 
-pub fn create_surface_state(
-    event_loop: &ActiveEventLoop,
-    config: &AppConfig,
-    title: &str,
-    atlas: &GlyphAtlas,
-) -> Result<GpuSurfaceState> {
-    let window = Arc::new(
-        event_loop
-            .create_window(create_window_attributes(config, atlas, title))
-            .context("window creation should succeed")?,
-    );
-    window.set_ime_allowed(true);
-    window.set_ime_purpose(ImePurpose::Terminal);
-
+pub fn create_shared_gpu_context() -> Result<Arc<SharedGpuContext>> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         ..Default::default()
     });
 
-    let surface = instance
-        .create_surface(window.clone())
-        .context("surface creation should succeed")?;
-
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::LowPower,
-        compatible_surface: Some(&surface),
+        compatible_surface: None,
         force_fallback_adapter: false,
     }))
     .context("no suitable GPU adapter found")?;
@@ -321,75 +315,6 @@ pub fn create_surface_state(
         ..Default::default()
     }))
     .context("device creation should succeed")?;
-
-    let size = window.inner_size();
-    let mut surface_config = surface
-        .get_default_config(&adapter, size.width.max(1), size.height.max(1))
-        .context("surface should be compatible")?;
-    let surface_caps = surface.get_capabilities(&adapter);
-    surface_config.format = select_surface_format(&surface_caps, surface_config.format);
-    surface_config.alpha_mode = select_alpha_mode(
-        &surface_caps,
-        transparency_requested(config.style.background_opacity),
-    );
-    surface.configure(&device, &surface_config);
-
-    let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("glyph_atlas"),
-        size: wgpu::Extent3d {
-            width: ATLAS_WIDTH,
-            height: ATLAS_HEIGHT,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-
-    let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        mag_filter: wgpu::FilterMode::Nearest,
-        min_filter: wgpu::FilterMode::Nearest,
-        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-        ..Default::default()
-    });
-
-    let uniforms = Uniforms {
-        screen_size: [size.width as f32, size.height as f32],
-        cell_size: [atlas.cell_width as f32, atlas.cell_height as f32],
-        atlas_size: [ATLAS_WIDTH as f32, ATLAS_HEIGHT as f32],
-        _pad: [0.0; 2],
-    };
-    let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("uniforms"),
-        contents: bytemuck::bytes_of(&uniforms),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-    });
-
-    let max_instances = (config.window.columns as usize) * (config.window.rows as usize);
-    let max_fg_instances = max_instances + 4;
-    let bg_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("bg_instances"),
-        size: (max_instances * std::mem::size_of::<CellInstance>()) as u64,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let fg_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("fg_instances"),
-        size: (max_fg_instances * std::mem::size_of::<CellInstance>()) as u64,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let max_image_instances = (config.window.columns as usize) * (config.window.rows as usize);
-    let image_instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("image_instances"),
-        size: (max_image_instances * std::mem::size_of::<ImageInstance>()) as u64,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
 
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("bind_group_layout"),
@@ -423,9 +348,135 @@ pub fn create_surface_state(
         ],
     });
 
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("shader"),
+        source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+    });
+    let image_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("image_shader"),
+        source: wgpu::ShaderSource::Wgsl(IMAGE_SHADER.into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("pipeline_layout"),
+        bind_group_layouts: &[&bind_group_layout],
+        immediate_size: 0,
+    });
+    let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    });
+
+    Ok(Arc::new(SharedGpuContext {
+        instance,
+        adapter,
+        device,
+        queue,
+        bind_group_layout,
+        shader,
+        image_shader,
+        pipeline_layout,
+        atlas_sampler,
+    }))
+}
+
+pub fn create_surface_state(
+    event_loop: &ActiveEventLoop,
+    config: &AppConfig,
+    title: &str,
+    atlas: &GlyphAtlas,
+) -> Result<GpuSurfaceState> {
+    let shared = create_shared_gpu_context()?;
+    create_surface_state_with_shared(shared, event_loop, config, title, atlas)
+}
+
+pub fn create_surface_state_with_shared(
+    shared: Arc<SharedGpuContext>,
+    event_loop: &ActiveEventLoop,
+    config: &AppConfig,
+    title: &str,
+    atlas: &GlyphAtlas,
+) -> Result<GpuSurfaceState> {
+    let window = Arc::new(
+        event_loop
+            .create_window(create_window_attributes(config, atlas, title))
+            .context("window creation should succeed")?,
+    );
+    window.set_ime_allowed(true);
+    window.set_ime_purpose(ImePurpose::Terminal);
+
+    let surface = shared
+        .instance
+        .create_surface(window.clone())
+        .context("surface creation should succeed")?;
+
+    let size = window.inner_size();
+    let mut surface_config = surface
+        .get_default_config(&shared.adapter, size.width.max(1), size.height.max(1))
+        .context("surface should be compatible")?;
+    let surface_caps = surface.get_capabilities(&shared.adapter);
+    surface_config.format = select_surface_format(&surface_caps, surface_config.format);
+    surface_config.alpha_mode = select_alpha_mode(
+        &surface_caps,
+        transparency_requested(config.style.background_opacity),
+    );
+    surface.configure(&shared.device, &surface_config);
+
+    let atlas_texture = shared.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("glyph_atlas"),
+        size: wgpu::Extent3d {
+            width: ATLAS_WIDTH,
+            height: ATLAS_HEIGHT,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let uniforms = Uniforms {
+        screen_size: [size.width as f32, size.height as f32],
+        cell_size: [atlas.cell_width as f32, atlas.cell_height as f32],
+        atlas_size: [ATLAS_WIDTH as f32, ATLAS_HEIGHT as f32],
+        _pad: [0.0; 2],
+    };
+    let uniform_buffer = shared.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("uniforms"),
+        contents: bytemuck::bytes_of(&uniforms),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let max_instances = (config.window.columns as usize) * (config.window.rows as usize);
+    let max_fg_instances = max_instances + 4;
+    let bg_instance_buffer = shared.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("bg_instances"),
+        size: (max_instances * std::mem::size_of::<CellInstance>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let fg_instance_buffer = shared.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("fg_instances"),
+        size: (max_fg_instances * std::mem::size_of::<CellInstance>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let max_image_instances = (config.window.columns as usize) * (config.window.rows as usize);
+    let image_instance_buffer = shared.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("image_instances"),
+        size: (max_image_instances * std::mem::size_of::<ImageInstance>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let bind_group = shared.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("bind_group"),
-        layout: &bind_group_layout,
+        layout: &shared.bind_group_layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -437,24 +488,9 @@ pub fn create_surface_state(
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: wgpu::BindingResource::Sampler(&atlas_sampler),
+                resource: wgpu::BindingResource::Sampler(&shared.atlas_sampler),
             },
         ],
-    });
-
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("shader"),
-        source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-    });
-    let image_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("image_shader"),
-        source: wgpu::ShaderSource::Wgsl(IMAGE_SHADER.into()),
-    });
-
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("pipeline_layout"),
-        bind_group_layouts: &[&bind_group_layout],
-        immediate_size: 0,
     });
 
     let instance_layout = wgpu::VertexBufferLayout {
@@ -504,17 +540,17 @@ pub fn create_surface_state(
         ],
     };
 
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    let pipeline = shared.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("render_pipeline"),
-        layout: Some(&pipeline_layout),
+        layout: Some(&shared.pipeline_layout),
         vertex: wgpu::VertexState {
-            module: &shader,
+            module: &shared.shader,
             entry_point: Some("vs_main"),
             buffers: &[instance_layout],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
-            module: &shader,
+            module: &shared.shader,
             entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: surface_config.format,
@@ -560,17 +596,17 @@ pub fn create_surface_state(
         ],
     };
 
-    let image_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    let image_pipeline = shared.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("image_pipeline"),
-        layout: Some(&pipeline_layout),
+        layout: Some(&shared.pipeline_layout),
         vertex: wgpu::VertexState {
-            module: &image_shader,
+            module: &shared.image_shader,
             entry_point: Some("vs_main"),
             buffers: &[image_instance_layout],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
-            module: &image_shader,
+            module: &shared.image_shader,
             entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: surface_config.format,
@@ -590,10 +626,9 @@ pub fn create_surface_state(
     });
 
     Ok(GpuSurfaceState {
+        shared,
         window,
         surface,
-        device,
-        queue,
         surface_config,
         pipeline,
         image_pipeline,
@@ -638,20 +673,22 @@ pub fn resize_surface_state(
 
     state.surface_config.width = width;
     state.surface_config.height = height;
-    state.surface.configure(&state.device, &state.surface_config);
+    state
+        .surface
+        .configure(&state.shared.device, &state.surface_config);
     state.last_presented_signature = None;
 
     let needed = (cols as usize) * (rows as usize) * 2;
     if needed > state.max_instances {
         state.max_instances = needed;
         let needed_fg = needed + 4;
-        state.bg_instance_buffer = state.device.create_buffer(&wgpu::BufferDescriptor {
+        state.bg_instance_buffer = state.shared.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("bg_instances"),
             size: (needed * std::mem::size_of::<CellInstance>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        state.fg_instance_buffer = state.device.create_buffer(&wgpu::BufferDescriptor {
+        state.fg_instance_buffer = state.shared.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fg_instances"),
             size: (needed_fg * std::mem::size_of::<CellInstance>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
@@ -673,7 +710,7 @@ pub fn resize_surface_state(
     let needed_images = (cols as usize) * (rows as usize);
     if needed_images > state.max_image_instances {
         state.max_image_instances = needed_images;
-        state.image_instance_buffer = state.device.create_buffer(&wgpu::BufferDescriptor {
+        state.image_instance_buffer = state.shared.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("image_instances"),
             size: (needed_images * std::mem::size_of::<ImageInstance>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
@@ -690,9 +727,11 @@ pub fn resize_surface_state(
         atlas_size: [ATLAS_WIDTH as f32, ATLAS_HEIGHT as f32],
         _pad: [0.0; 2],
     };
-    state
-        .queue
-        .write_buffer(&state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+    state.shared.queue.write_buffer(
+        &state.uniform_buffer,
+        0,
+        bytemuck::bytes_of(&uniforms),
+    );
 }
 
 pub fn render_surface_state(
@@ -712,7 +751,9 @@ pub fn render_surface_state(
     let output = match state.surface.get_current_texture() {
         Ok(texture) => texture,
         Err(wgpu::SurfaceError::Lost) => {
-            state.surface.configure(&state.device, &state.surface_config);
+            state
+                .surface
+                .configure(&state.shared.device, &state.surface_config);
             state.last_presented_signature = None;
             return;
         }
@@ -801,12 +842,12 @@ pub fn render_surface_state(
     state.text_batches = text_batches;
     state.image_instances = image_instances;
 
-    state.queue.write_buffer(
+    state.shared.queue.write_buffer(
         &state.bg_instance_buffer,
         0,
         bytemuck::cast_slice(&state.text_batches.bg_instances),
     );
-    state.queue.write_buffer(
+    state.shared.queue.write_buffer(
         &state.fg_instance_buffer,
         0,
         bytemuck::cast_slice(&state.text_batches.fg_instances),
@@ -814,14 +855,14 @@ pub fn render_surface_state(
     if !state.text_batches.overlay_instances.is_empty() {
         let offset =
             (state.text_batches.fg_instances.len() * std::mem::size_of::<CellInstance>()) as u64;
-        state.queue.write_buffer(
+        state.shared.queue.write_buffer(
             &state.fg_instance_buffer,
             offset,
             bytemuck::cast_slice(&state.text_batches.overlay_instances),
         );
     }
     if !state.image_instances.is_empty() {
-        state.queue.write_buffer(
+        state.shared.queue.write_buffer(
             &state.image_instance_buffer,
             0,
             bytemuck::cast_slice(&state.image_instances),
@@ -829,6 +870,7 @@ pub fn render_surface_state(
     }
 
     let mut encoder = state
+        .shared
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("render"),
@@ -882,7 +924,7 @@ pub fn render_surface_state(
         }
     }
 
-    state.queue.submit(std::iter::once(encoder.finish()));
+    state.shared.queue.submit(std::iter::once(encoder.finish()));
     output.present();
     terminal.grid_mut().clear_dirty();
     state.last_visual_state = Some(current_visual);
@@ -990,7 +1032,7 @@ fn ensure_glyph_in_atlas<'a>(
         return None;
     }
 
-    state.queue.write_texture(
+    state.shared.queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture: &state.atlas_texture,
             mip_level: 0,
@@ -1074,7 +1116,7 @@ fn ensure_grapheme_in_atlas<'a>(
         return None;
     }
 
-    state.queue.write_texture(
+    state.shared.queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture: &state.atlas_texture,
             mip_level: 0,
@@ -1143,7 +1185,7 @@ fn ensure_kitty_image_in_atlas<'a>(
         return None;
     }
 
-    state.queue.write_texture(
+    state.shared.queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture: &state.atlas_texture,
             mip_level: 0,

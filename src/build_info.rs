@@ -74,11 +74,11 @@ mod tests {
 
     #[test]
     fn startup_banner_includes_core_build_fields() {
-        let banner = startup_banner(Backend::Cpu, Some(Path::new("/tmp/handterm.sock")));
+        let banner = startup_banner(Backend::Cpu, Some(Path::new("/tmp/handterm-cpu.sock")));
         assert!(banner.contains("handterm "));
         assert!(banner.contains("backend=cpu"));
         assert!(banner.contains("features="));
-        assert!(banner.contains("socket=/tmp/handterm.sock"));
+        assert!(banner.contains("socket=/tmp/handterm-cpu.sock"));
     }
 
     #[test]

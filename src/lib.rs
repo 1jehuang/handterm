@@ -71,7 +71,8 @@ fn open_window_in_existing_host(
 ) -> Result<()> {
     let socket_path = match to {
         Some(path) => path,
-        None => ipc::find_socket().ok_or_else(|| anyhow::anyhow!("no running handterm host found"))?,
+        None => ipc::find_socket_for_backend(Backend::Cpu)
+            .ok_or_else(|| anyhow::anyhow!("no running handterm CPU host found"))?,
     };
 
     let mut args = serde_json::Map::new();
@@ -168,7 +169,7 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
         Some(Command::Remote { to, cmd, args }) => {
             let socket_path = match to {
                 Some(path) => path,
-                None => ipc::find_socket()
+                None => ipc::find_socket_for_backend(backend)
                     .ok_or_else(|| anyhow::anyhow!("no running handterm instance found"))?,
             };
             let parsed_args: serde_json::Value = serde_json::from_str(&args)
@@ -219,7 +220,7 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
                     #[cfg(feature = "cpu")]
                     {
                         warn_if_cpu_opacity();
-                        if let Some(socket_path) = ipc::find_socket()
+                        if let Some(socket_path) = ipc::find_socket_for_backend(Backend::Cpu)
                             && ipc::send_command(
                                 &socket_path,
                                 &ipc::Request {
@@ -241,6 +242,18 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
                 Backend::Gpu => {
                     #[cfg(feature = "gpu")]
                     {
+                        if let Some(socket_path) = ipc::find_socket_for_backend(Backend::Gpu)
+                            && ipc::send_command(
+                                &socket_path,
+                                &ipc::Request {
+                                    cmd: "open-window".to_string(),
+                                    args: serde_json::Value::Object(serde_json::Map::new()),
+                                },
+                            )
+                            .is_ok()
+                        {
+                            return Ok(());
+                        }
                         gpu_app::run(config)
                     }
                     #[cfg(not(feature = "gpu"))]

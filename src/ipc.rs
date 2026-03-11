@@ -1,3 +1,4 @@
+use crate::backend::Backend;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -211,18 +212,29 @@ fn memchr_newline(buf: &[u8]) -> Option<usize> {
     buf.iter().position(|&b| b == b'\n')
 }
 
-pub fn default_socket_path() -> PathBuf {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .unwrap_or_else(|_| format!("/tmp/handterm-{}", std::process::id()));
-    PathBuf::from(runtime_dir).join("handterm.sock")
+fn host_socket_name(backend: Backend) -> &'static str {
+    match backend {
+        Backend::Cpu => "handterm-cpu.sock",
+        Backend::Gpu => "handterm-gpu.sock",
+    }
 }
 
-pub fn find_socket() -> Option<PathBuf> {
+pub fn default_socket_path_for_backend(backend: Backend) -> PathBuf {
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+        .unwrap_or_else(|_| format!("/tmp/handterm-{}", std::process::id()));
+    PathBuf::from(runtime_dir).join(host_socket_name(backend))
+}
+
+pub fn default_socket_path() -> PathBuf {
+    default_socket_path_for_backend(Backend::Cpu)
+}
+
+pub fn find_socket_for_backend(backend: Backend) -> Option<PathBuf> {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
         .unwrap_or_else(|_| format!("/tmp/handterm-{}", std::process::id()));
     let dir = PathBuf::from(&runtime_dir);
 
-    let stable = dir.join("handterm.sock");
+    let stable = dir.join(host_socket_name(backend));
     if stable.exists() {
         if UnixStream::connect(&stable).is_ok() {
             return Some(stable);
@@ -244,6 +256,10 @@ pub fn find_socket() -> Option<PathBuf> {
         }
     }
     None
+}
+
+pub fn find_socket() -> Option<PathBuf> {
+    find_socket_for_backend(Backend::Cpu)
 }
 
 pub fn send_command(socket_path: &Path, req: &Request) -> Result<Response> {

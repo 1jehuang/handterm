@@ -1,6 +1,6 @@
 use crate::protocol::{
-    ClientMessage, CursorState, DirtyCell, GlyphBitmap, KittyImageData, KittyImagePlacement,
-    MouseEvent, ServerMessage, WindowId,
+    CellMetrics, ClientMessage, CursorState, DirtyCell, GlyphBitmap, KittyImageData,
+    KittyImagePlacement, MouseEvent, ServerMessage, WindowId,
 };
 use crate::font::{GlyphAtlas, GlyphFormat};
 use crate::terminal::Terminal;
@@ -109,6 +109,7 @@ impl ServerCore {
     pub fn create_window(&mut self, cols: u16, rows: u16, dpi: u32) -> ServerMessage {
         let window_id = self.next_window_id;
         self.next_window_id = self.next_window_id.wrapping_add(1).max(1);
+        let metrics = self.cell_metrics_for_dpi(dpi);
         self.windows.insert(
             window_id,
             ServerWindow {
@@ -122,6 +123,7 @@ impl ServerCore {
             window_id,
             cols,
             rows,
+            metrics,
             modes: self
                 .windows
                 .get(&window_id)
@@ -139,12 +141,15 @@ impl ServerCore {
     }
 
     pub fn resize_window(&mut self, window_id: WindowId, cols: u16, rows: u16) -> Option<Vec<ServerMessage>> {
+        let dpi = self.windows.get(&window_id)?.dpi;
+        let metrics = self.cell_metrics_for_dpi(dpi);
         let window = self.windows.get_mut(&window_id)?;
         window.terminal.resize(cols, rows);
         let mut messages = vec![ServerMessage::WindowResized {
             window_id,
             cols,
             rows,
+            metrics,
             modes: window.terminal.window_modes(),
         }];
         messages.extend(self.collect_update_batch(window_id).messages);
@@ -253,6 +258,19 @@ impl ServerCore {
             Ok(())
         } else {
             Err(ServerError::UnknownWindow(window_id))
+        }
+    }
+
+    fn cell_metrics_for_dpi(&mut self, dpi: u32) -> CellMetrics {
+        let atlas = self.atlases_by_dpi.entry(dpi).or_insert_with(|| {
+            GlyphAtlas::with_family_dpi(&self.font_family, self.font_size, dpi)
+                .or_else(|_| GlyphAtlas::new_with_dpi(self.font_size, dpi))
+                .expect("server glyph atlas should initialize for negotiated dpi")
+        });
+        CellMetrics {
+            cell_width: atlas.cell_width.min(u16::MAX as usize) as u16,
+            cell_height: atlas.cell_height.min(u16::MAX as usize) as u16,
+            baseline: atlas.baseline.min(u16::MAX as usize) as u16,
         }
     }
 

@@ -7,7 +7,7 @@ use crate::frontend::{
     spawn_fd_watcher, visual_signature,
 };
 use crate::protocol::{
-    ClientMessage, KeyEvent as ProtocolKeyEvent, KeyEventKind as ProtocolKeyEventKind,
+    CellMetrics, ClientMessage, KeyEvent as ProtocolKeyEvent, KeyEventKind as ProtocolKeyEventKind,
     MouseButton as ProtocolMouseButton, MouseEvent as ProtocolMouseEvent,
     MouseEventKind as ProtocolMouseEventKind, ServerMessage, WindowId,
 };
@@ -117,9 +117,9 @@ impl RemoteHandtermApp {
         );
     }
 
-    fn create_window_attributes(&self, atlas: &GlyphAtlas) -> WindowAttributes {
-        let width = self.config.window.columns as f64 * atlas.cell_width as f64;
-        let height = self.config.window.rows as f64 * atlas.cell_height as f64;
+    fn create_window_attributes(&self, metrics: CellMetrics) -> WindowAttributes {
+        let width = self.config.window.columns as f64 * f64::from(metrics.cell_width.max(1));
+        let height = self.config.window.rows as f64 * f64::from(metrics.cell_height.max(1));
 
         Window::default_attributes()
             .with_title("handterm [cpu remote]")
@@ -142,18 +142,31 @@ impl ApplicationHandler<AppEvent> for RemoteHandtermApp {
         drop(probe_window);
         let dpi = (96.0 * scale_factor) as u32;
 
-        let mut atlas = GlyphAtlas::with_family_dpi(
-            &self.config.style.font_family,
-            self.config.style.font_size,
-            dpi,
-        )
-        .or_else(|_| GlyphAtlas::new_with_dpi(self.config.style.font_size, dpi))
-        .expect("failed to load font atlas");
-        atlas.drop_font_sources();
+        let cols = self.config.window.columns;
+        let rows = self.config.window.rows;
+        let mut client = ProtocolClient::connect(&self.socket_path)
+            .expect("remote frontend should connect to daemon");
+        client
+            .send(&ClientMessage::NewWindow { cols, rows, dpi })
+            .expect("remote frontend should request a new window");
+
+        let created = client
+            .recv()
+            .expect("remote frontend should receive window creation response");
+        let (window_id, metrics) = match created {
+            ServerMessage::WindowCreated {
+                window_id,
+                metrics,
+                ..
+            } => (window_id, metrics),
+            other => panic!("expected WindowCreated from server, got {other:?}"),
+        };
+
+        let atlas = GlyphAtlas::protocol_only(metrics);
 
         let window = Arc::new(
             event_loop
-                .create_window(self.create_window_attributes(&atlas))
+                .create_window(self.create_window_attributes(metrics))
                 .expect("window creation should succeed"),
         );
         window.set_ime_allowed(true);
@@ -163,27 +176,28 @@ impl ApplicationHandler<AppEvent> for RemoteHandtermApp {
         let surface =
             Surface::new(&context, window.clone()).expect("softbuffer surface should be created");
 
-        let cols = self.config.window.columns;
-        let rows = self.config.window.rows;
-        let mut client = ProtocolClient::connect(&self.socket_path)
-            .expect("remote frontend should connect to daemon");
+        let renderer = OffscreenRenderer::new(cols, rows, &atlas);
+
+        let mut terminal = RemoteTerminalState::new(cols, rows);
+        let _ = terminal.apply_server_message(&ServerMessage::WindowCreated {
+            window_id,
+            cols,
+            rows,
+            metrics,
+            modes: Default::default(),
+        });
         client
             .set_nonblocking(true)
             .expect("protocol client should become non-blocking");
-        client
-            .send(&ClientMessage::NewWindow { cols, rows, dpi })
-            .expect("remote frontend should request a new window");
-
-        let renderer = OffscreenRenderer::new(cols, rows, &atlas);
 
         self.state = Some(RemoteState {
             window,
             _context: context,
             surface,
             surface_size: (0, 0),
-            terminal: RemoteTerminalState::new(cols, rows),
+            terminal,
             client,
-            window_id: None,
+            window_id: Some(window_id),
             pending_size: None,
             disconnected: false,
             modifiers: Modifiers::default(),
@@ -195,7 +209,10 @@ impl ApplicationHandler<AppEvent> for RemoteHandtermApp {
             last_presented_signature: None,
         });
 
-        if let Some(state) = &self.state {
+        if let Some(state) = self.state.as_mut() {
+            while let Ok(TryRecvStatus::Message(message)) = state.client.try_recv() {
+                let _ = apply_server_message(state, &message, event_loop);
+            }
             state.window.request_redraw();
         }
         self.start_server_watcher();

@@ -1288,6 +1288,15 @@ impl Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::CellMetrics;
+
+    fn sample_metrics() -> CellMetrics {
+        CellMetrics {
+            cell_width: 9,
+            cell_height: 18,
+            baseline: 14,
+        }
+    }
 
     #[test]
     fn processes_plain_text() {
@@ -2048,6 +2057,7 @@ mod tests {
             window_id: 1,
             cols: 10,
             rows: 3,
+            metrics: sample_metrics(),
             modes: WindowModes::default(),
         });
         assert_eq!(t.cols, 10);
@@ -2084,6 +2094,7 @@ mod tests {
             window_id: 1,
             cols: 4,
             rows: 2,
+            metrics: sample_metrics(),
             modes: WindowModes::default(),
         });
 

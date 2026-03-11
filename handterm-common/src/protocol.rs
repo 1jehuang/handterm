@@ -74,6 +74,13 @@ pub struct CursorState {
     pub visible: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CellMetrics {
+    pub cell_width: u16,
+    pub cell_height: u16,
+    pub baseline: u16,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WindowModes {
     pub bracketed_paste: bool,
@@ -156,12 +163,14 @@ pub enum ServerMessage {
         window_id: WindowId,
         cols: u16,
         rows: u16,
+        metrics: CellMetrics,
         modes: WindowModes,
     },
     WindowResized {
         window_id: WindowId,
         cols: u16,
         rows: u16,
+        metrics: CellMetrics,
         modes: WindowModes,
     },
     CellUpdate {
@@ -259,6 +268,14 @@ fn read_frame<R: Read>(reader: &mut R) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    fn sample_metrics() -> CellMetrics {
+        CellMetrics {
+            cell_width: 9,
+            cell_height: 18,
+            baseline: 14,
+        }
+    }
 
     fn sample_dirty_cell(row: u16, col: u16, ch: char) -> DirtyCell {
         DirtyCell {
@@ -366,6 +383,7 @@ mod tests {
             window_id: 3,
             cols: 120,
             rows: 40,
+            metrics: sample_metrics(),
             modes: WindowModes::default(),
         };
         let encoded = encode_server_message(&message).expect("resize message should encode");

@@ -319,7 +319,15 @@ pub fn should_apply_message(window_id: Option<WindowId>, message: &ServerMessage
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{KittyImageData, KittyImagePlacement, WindowModes};
+    use crate::protocol::{CellMetrics, KittyImageData, KittyImagePlacement, WindowModes};
+
+    fn sample_metrics() -> CellMetrics {
+        CellMetrics {
+            cell_width: 9,
+            cell_height: 18,
+            baseline: 14,
+        }
+    }
 
     #[test]
     fn window_messages_are_filtered_to_the_active_remote_window() {
@@ -329,6 +337,7 @@ mod tests {
                 window_id: 7,
                 cols: 80,
                 rows: 24,
+                metrics: sample_metrics(),
                 modes: WindowModes::default(),
             }
         ));
@@ -374,6 +383,7 @@ mod tests {
             window_id: 1,
             cols: 4,
             rows: 2,
+            metrics: sample_metrics(),
             modes: WindowModes {
                 in_alt_screen: true,
                 ..WindowModes::default()
@@ -386,6 +396,7 @@ mod tests {
             window_id: 1,
             cols: 4,
             rows: 2,
+            metrics: sample_metrics(),
             modes: WindowModes::default(),
         });
 

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use crate::protocol::GlyphBitmap;
+use crate::protocol::{CellMetrics, GlyphBitmap};
 use freetype::bitmap::PixelMode;
 use freetype::face::LoadFlag;
 use freetype::Face;
@@ -134,6 +134,31 @@ impl GlyphAtlas {
             #[cfg(feature = "ligatures")]
             fallback_rb_loaded: false,
         })
+    }
+
+    pub fn protocol_only(metrics: CellMetrics) -> Self {
+        Self {
+            glyphs: HashMap::with_capacity(128),
+            grapheme_glyphs: HashMap::with_capacity(32),
+            primary_face: None,
+            fallback_faces: Vec::new(),
+            fallback_paths: Vec::new(),
+            fallback_loaded: true,
+            font_size_pt: 0.0,
+            dpi: 96,
+            glyph_sources: HashMap::with_capacity(0),
+            missing_glyphs: HashSet::with_capacity(0),
+            font_path: String::new(),
+            cell_width: usize::from(metrics.cell_width.max(1)),
+            cell_height: usize::from(metrics.cell_height.max(1)),
+            baseline: usize::from(metrics.baseline.max(1)),
+            #[cfg(feature = "ligatures")]
+            rb_face: None,
+            #[cfg(feature = "ligatures")]
+            fallback_rb_faces: Vec::new(),
+            #[cfg(feature = "ligatures")]
+            fallback_rb_loaded: true,
+        }
     }
 
     pub fn ensure_glyph(&mut self, ch: u32) -> bool {

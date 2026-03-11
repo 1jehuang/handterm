@@ -1,0 +1,9 @@
+handterm memory matrix (2026-03-11T02:51:48-07:00)
+
+standalone-gpu         pid=2619957  rss=60696 kB     vsz=516924 kB    threads=4
+standalone-cpu         pid=2620224  rss=46668 kB     vsz=137184 kB    threads=2
+server-only            pid=2620332  rss=4416 kB      vsz=9204 kB      threads=1
+daemon-client-gpu      pid=2620362  rss=52588 kB     vsz=505968 kB    threads=4
+daemon-client-cpu      pid=2620642  rss=38464 kB     vsz=126636 kB    threads=2
+
+results saved to /home/jeremy/handterm/profile_out/memory_matrix.txt

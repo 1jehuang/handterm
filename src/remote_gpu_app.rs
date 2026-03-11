@@ -122,34 +122,49 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
         drop(probe_window);
         let dpi = (96.0 * scale_factor) as u32;
 
-        let mut atlas = GlyphAtlas::with_family_dpi(
-            &self.config.style.font_family,
-            self.config.style.font_size,
-            dpi,
-        )
-        .or_else(|_| GlyphAtlas::new_with_dpi(self.config.style.font_size, dpi))
-        .expect("failed to load font atlas");
-        atlas.drop_font_sources();
-
-        let renderer = create_surface_state(event_loop, &self.config, "handterm [gpu remote]", &atlas)
-            .expect("gpu surface state should initialize");
-        eprintln!("handterm: {}", renderer.surface_debug_summary());
         let cols = self.config.window.columns;
         let rows = self.config.window.rows;
         let mut client = ProtocolClient::connect(&self.socket_path)
             .expect("remote frontend should connect to daemon");
         client
-            .set_nonblocking(true)
-            .expect("protocol client should become non-blocking");
-        client
             .send(&ClientMessage::NewWindow { cols, rows, dpi })
             .expect("remote frontend should request a new window");
 
+        let created = client
+            .recv()
+            .expect("remote frontend should receive window creation response");
+        let (window_id, metrics) = match created {
+            ServerMessage::WindowCreated {
+                window_id,
+                metrics,
+                ..
+            } => (window_id, metrics),
+            other => panic!("expected WindowCreated from server, got {other:?}"),
+        };
+
+        let atlas = GlyphAtlas::protocol_only(metrics);
+
+        let renderer = create_surface_state(event_loop, &self.config, "handterm [gpu remote]", &atlas)
+            .expect("gpu surface state should initialize");
+        eprintln!("handterm: {}", renderer.surface_debug_summary());
+
+        let mut terminal = RemoteTerminalState::new(cols, rows);
+        let _ = terminal.apply_server_message(&ServerMessage::WindowCreated {
+            window_id,
+            cols,
+            rows,
+            metrics,
+            modes: Default::default(),
+        });
+        client
+            .set_nonblocking(true)
+            .expect("protocol client should become non-blocking");
+
         self.state = Some(RemoteGpuState {
             renderer,
-            terminal: RemoteTerminalState::new(cols, rows),
+            terminal,
             client,
-            window_id: None,
+            window_id: Some(window_id),
             pending_size: None,
             disconnected: false,
             modifiers: Modifiers::default(),
@@ -159,7 +174,10 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
             atlas,
         });
 
-        if let Some(state) = &self.state {
+        if let Some(state) = self.state.as_mut() {
+            while let Ok(TryRecvStatus::Message(message)) = state.client.try_recv() {
+                let _ = apply_server_message(state, &message, event_loop);
+            }
             state.renderer.window.request_redraw();
         }
         self.start_server_watcher();

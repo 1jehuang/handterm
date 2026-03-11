@@ -183,34 +183,6 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             Ok(())
         }
         None => {
-            if !cli.standalone {
-                let socket_path = daemon::default_server_socket_path();
-                daemon::ensure_server_running(&socket_path, cli.config.as_deref())?;
-                match backend {
-                    Backend::Cpu => {
-                        #[cfg(feature = "cpu")]
-                        {
-                            warn_if_cpu_opacity();
-                            return remote_app::run(config, socket_path);
-                        }
-                        #[cfg(not(feature = "cpu"))]
-                        {
-                            unreachable!("daemon client mode requires the CPU frontend");
-                        }
-                    }
-                    Backend::Gpu => {
-                        #[cfg(feature = "gpu")]
-                        {
-                            return remote_gpu_app::run(config, socket_path);
-                        }
-                        #[cfg(not(feature = "gpu"))]
-                        {
-                            unreachable!("daemon client mode requires the GPU frontend");
-                        }
-                    }
-                }
-            }
-
             match backend {
                 Backend::Cpu => {
                     #[cfg(feature = "cpu")]

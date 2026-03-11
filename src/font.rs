@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use crate::protocol::{CellMetrics, GlyphBitmap};
+#[cfg(feature = "local-fonts")]
 use freetype::bitmap::PixelMode;
+#[cfg(feature = "local-fonts")]
 use freetype::face::LoadFlag;
+#[cfg(feature = "local-fonts")]
 use freetype::Face;
 use std::collections::{HashMap, HashSet};
 
@@ -11,12 +14,16 @@ const CELL_WIDTH_SAMPLE_TEXT: &str =
 pub struct GlyphAtlas {
     glyphs: HashMap<u32, RasterizedGlyph>,
     grapheme_glyphs: HashMap<Box<str>, RasterizedGlyph>,
+    #[cfg(feature = "local-fonts")]
     primary_face: Option<Face>,
+    #[cfg(feature = "local-fonts")]
     fallback_faces: Vec<Option<Face>>,
+    #[cfg(feature = "local-fonts")]
     fallback_paths: Vec<String>,
     fallback_loaded: bool,
     font_size_pt: f64,
     dpi: u32,
+    #[cfg(feature = "local-fonts")]
     glyph_sources: HashMap<u32, GlyphSource>,
     missing_glyphs: HashSet<u32>,
     font_path: String,
@@ -46,6 +53,7 @@ pub enum GlyphFormat {
     Rgba,
 }
 
+#[cfg(feature = "local-fonts")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GlyphSource {
     Primary,
@@ -68,15 +76,28 @@ impl GlyphAtlas {
         Self::new_with_dpi(font_size_pt, 96)
     }
 
+    #[cfg(feature = "local-fonts")]
     pub fn new_with_dpi(font_size_pt: f64, dpi: u32) -> Result<Self> {
         let font_path = find_monospace_font(None)?;
         Self::from_font_path_dpi(&font_path, font_size_pt, dpi)
     }
 
+    #[cfg(not(feature = "local-fonts"))]
+    pub fn new_with_dpi(_font_size_pt: f64, _dpi: u32) -> Result<Self> {
+        anyhow::bail!("local font loading is disabled in this build")
+    }
+
+    #[cfg(feature = "local-fonts")]
     pub fn with_family(family: &str, font_size_pt: f64) -> Result<Self> {
         Self::with_family_dpi(family, font_size_pt, 96)
     }
 
+    #[cfg(not(feature = "local-fonts"))]
+    pub fn with_family(_family: &str, _font_size_pt: f64) -> Result<Self> {
+        anyhow::bail!("local font loading is disabled in this build")
+    }
+
+    #[cfg(feature = "local-fonts")]
     pub fn with_family_dpi(family: &str, font_size_pt: f64, dpi: u32) -> Result<Self> {
         if let Some(cached) = load_cached_font_path(family)
             && std::path::Path::new(&cached).exists()
@@ -88,10 +109,22 @@ impl GlyphAtlas {
         Self::from_font_path_dpi(&font_path, font_size_pt, dpi)
     }
 
+    #[cfg(not(feature = "local-fonts"))]
+    pub fn with_family_dpi(_family: &str, _font_size_pt: f64, _dpi: u32) -> Result<Self> {
+        anyhow::bail!("local font loading is disabled in this build")
+    }
+
+    #[cfg(feature = "local-fonts")]
     pub fn from_font_path(path: &str, font_size_pt: f64) -> Result<Self> {
         Self::from_font_path_dpi(path, font_size_pt, 96)
     }
 
+    #[cfg(not(feature = "local-fonts"))]
+    pub fn from_font_path(_path: &str, _font_size_pt: f64) -> Result<Self> {
+        anyhow::bail!("local font loading is disabled in this build")
+    }
+
+    #[cfg(feature = "local-fonts")]
     pub fn from_font_path_dpi(path: &str, font_size_pt: f64, dpi: u32) -> Result<Self> {
         let lib = freetype::Library::init().context("failed to init freetype")?;
 
@@ -136,16 +169,25 @@ impl GlyphAtlas {
         })
     }
 
+    #[cfg(not(feature = "local-fonts"))]
+    pub fn from_font_path_dpi(_path: &str, _font_size_pt: f64, _dpi: u32) -> Result<Self> {
+        anyhow::bail!("local font loading is disabled in this build")
+    }
+
     pub fn protocol_only(metrics: CellMetrics) -> Self {
         Self {
             glyphs: HashMap::with_capacity(128),
             grapheme_glyphs: HashMap::with_capacity(32),
+            #[cfg(feature = "local-fonts")]
             primary_face: None,
+            #[cfg(feature = "local-fonts")]
             fallback_faces: Vec::new(),
+            #[cfg(feature = "local-fonts")]
             fallback_paths: Vec::new(),
             fallback_loaded: true,
             font_size_pt: 0.0,
             dpi: 96,
+            #[cfg(feature = "local-fonts")]
             glyph_sources: HashMap::with_capacity(0),
             missing_glyphs: HashSet::with_capacity(0),
             font_path: String::new(),
@@ -172,10 +214,12 @@ impl GlyphAtlas {
         if let Some(glyph) = procedural_glyph(ch, self.cell_width, self.cell_height, self.baseline)
         {
             self.glyphs.insert(ch, glyph);
+            #[cfg(feature = "local-fonts")]
             self.glyph_sources.insert(ch, GlyphSource::Primary);
             return true;
         }
 
+        #[cfg(feature = "local-fonts")]
         if let Some(source) = self.glyph_sources.get(&ch).copied()
             && let Some(glyph) = self.rasterize_from_source(source, ch)
         {
@@ -183,21 +227,25 @@ impl GlyphAtlas {
             return true;
         }
 
+        #[cfg(feature = "local-fonts")]
         if let Some(glyph) = self
             .primary_face
             .as_ref()
             .and_then(|face| rasterize_primary_glyph(face, ch))
         {
             self.glyphs.insert(ch, glyph);
+            #[cfg(feature = "local-fonts")]
             self.glyph_sources.insert(ch, GlyphSource::Primary);
             return true;
         }
 
+        #[cfg(feature = "local-fonts")]
         if should_try_emoji_fallback(ch) {
             self.ensure_fallback_faces_loaded();
             for (index, face) in self.fallback_faces.iter().enumerate() {
                 if let Some(glyph) = face.as_ref().and_then(|face| rasterize_fallback_glyph(face, ch)) {
                     self.glyphs.insert(ch, glyph);
+                    #[cfg(feature = "local-fonts")]
                     self.glyph_sources.insert(ch, GlyphSource::Fallback(index));
                     return true;
                 }
@@ -427,10 +475,13 @@ impl GlyphAtlas {
     }
 
     pub fn drop_font_sources(&mut self) {
-        self.primary_face = None;
-        self.fallback_faces.clear();
+        #[cfg(feature = "local-fonts")]
+        {
+            self.primary_face = None;
+            self.fallback_faces.clear();
+            self.fallback_paths.clear();
+        }
         self.fallback_loaded = true;
-        self.fallback_paths.clear();
         #[cfg(feature = "ligatures")]
         {
             self.rb_face = None;
@@ -563,6 +614,7 @@ impl GlyphAtlas {
         }
     }
 
+    #[cfg(feature = "local-fonts")]
     fn rasterize_from_source(&self, source: GlyphSource, ch: u32) -> Option<RasterizedGlyph> {
         match source {
             GlyphSource::Primary => self
@@ -580,7 +632,9 @@ impl GlyphAtlas {
     fn rasterize_grapheme_fallback(&mut self, grapheme: &str) -> Option<RasterizedGlyph> {
         let ch = grapheme.chars().find(|ch| !ch.is_control())? as u32;
 
-        procedural_glyph(ch, self.cell_width, self.cell_height, self.baseline)
+        let glyph = procedural_glyph(ch, self.cell_width, self.cell_height, self.baseline);
+        #[cfg(feature = "local-fonts")]
+        let glyph = glyph
             .or_else(|| {
                 self.primary_face
                     .as_ref()
@@ -596,7 +650,8 @@ impl GlyphAtlas {
                 } else {
                     None
                 }
-            })
+            });
+        glyph
     }
 
     #[cfg(feature = "ligatures")]
@@ -635,6 +690,7 @@ impl GlyphAtlas {
             })
     }
 
+    #[cfg(feature = "local-fonts")]
     fn ensure_fallback_faces_loaded(&mut self) {
         if self.fallback_loaded {
             return;
@@ -645,6 +701,11 @@ impl GlyphAtlas {
             .iter()
             .map(|path| load_fallback_face(path, self.font_size_pt, self.dpi))
             .collect();
+        self.fallback_loaded = true;
+    }
+
+    #[cfg(not(feature = "local-fonts"))]
+    fn ensure_fallback_faces_loaded(&mut self) {
         self.fallback_loaded = true;
     }
 
@@ -671,14 +732,17 @@ pub struct ShapedGlyph {
     pub cells: usize,
 }
 
+#[cfg(feature = "local-fonts")]
 fn rasterize_primary_glyph(face: &freetype::Face, ch: u32) -> Option<RasterizedGlyph> {
     rasterize_char(face, ch, text_load_flags())
 }
 
+#[cfg(feature = "local-fonts")]
 fn rasterize_fallback_glyph(face: &freetype::Face, ch: u32) -> Option<RasterizedGlyph> {
     rasterize_char(face, ch, LoadFlag::RENDER | LoadFlag::COLOR)
 }
 
+#[cfg(feature = "local-fonts")]
 fn load_fallback_face(path: &str, font_size_pt: f64, dpi: u32) -> Option<Face> {
     let lib = freetype::Library::init().ok()?;
     let face = lib.new_face(path, 0).ok()?;
@@ -687,10 +751,12 @@ fn load_fallback_face(path: &str, font_size_pt: f64, dpi: u32) -> Option<Face> {
     Some(face)
 }
 
+#[cfg(feature = "local-fonts")]
 fn text_load_flags() -> LoadFlag {
     LoadFlag::RENDER | LoadFlag::TARGET_LIGHT
 }
 
+#[cfg(feature = "local-fonts")]
 fn measure_cell_width(face: &freetype::Face) -> Result<usize> {
     let mut max_advance = 0usize;
 
@@ -703,6 +769,7 @@ fn measure_cell_width(face: &freetype::Face) -> Result<usize> {
     Ok(max_advance.max(1))
 }
 
+#[cfg(feature = "local-fonts")]
 fn rasterize_char(face: &freetype::Face, ch: u32, flags: LoadFlag) -> Option<RasterizedGlyph> {
     face.load_char(ch as usize, flags).ok()?;
     rasterize_loaded(face)
@@ -904,6 +971,7 @@ fn procedural_glyph(
     })
 }
 
+#[cfg(feature = "local-fonts")]
 fn rasterize_loaded(face: &freetype::Face) -> Option<RasterizedGlyph> {
     let glyph = face.glyph();
     let bmp = glyph.bitmap();
@@ -926,6 +994,7 @@ fn rasterize_loaded(face: &freetype::Face) -> Option<RasterizedGlyph> {
     })
 }
 
+#[cfg(feature = "local-fonts")]
 fn copy_bitmap(
     buffer: &[u8],
     width: usize,
@@ -1034,6 +1103,7 @@ fn init_rustybuzz(font_path: &str) -> Option<rustybuzz::Face<'static>> {
     rustybuzz::Face::from_slice(font_data, 0)
 }
 
+#[cfg(feature = "local-fonts")]
 fn find_monospace_font(preferred_family: Option<&str>) -> Result<String> {
     let fc = fontconfig::Fontconfig::new().context("failed to init fontconfig")?;
 
@@ -1064,6 +1134,7 @@ fn find_monospace_font(preferred_family: Option<&str>) -> Result<String> {
     anyhow::bail!("no monospace font found via fontconfig")
 }
 
+#[cfg(feature = "local-fonts")]
 fn find_emoji_font_paths() -> Result<Vec<String>> {
     let fc = fontconfig::Fontconfig::new().context("failed to init fontconfig")?;
     let mut paths = Vec::new();
@@ -1141,6 +1212,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "local-fonts")]
     fn loads_system_monospace_font() {
         let mut atlas = GlyphAtlas::new(14.0).expect("should load a monospace font");
         assert!(atlas.cell_width > 0);
@@ -1150,6 +1222,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "local-fonts")]
     fn renders_glyph_to_buffer() {
         let mut atlas = GlyphAtlas::new(14.0).unwrap();
         let w = atlas.cell_width * 2;
@@ -1161,6 +1234,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "local-fonts")]
     fn converts_bgra_bitmap_to_rgba() {
         let bgra = [0x33, 0x22, 0x11, 0x80];
         let (pixels, format) = copy_bitmap(&bgra, 1, 1, 4, PixelMode::Bgra).unwrap();
@@ -1199,6 +1273,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "local-fonts")]
     fn grapheme_clusters_cache_as_single_glyphs() {
         let mut atlas = GlyphAtlas::new(14.0).expect("should load a monospace font");
         if !atlas.ensure_grapheme("❤️") {
@@ -1212,6 +1287,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "local-fonts")]
     fn grapheme_fallback_draws_visible_pixels_without_cluster_shape() {
         let mut atlas = GlyphAtlas::new(14.0).expect("should load a monospace font");
         let w = atlas.cell_width;

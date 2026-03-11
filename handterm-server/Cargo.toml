@@ -6,7 +6,8 @@ license = "MIT"
 publish = false
 
 [features]
-default = ["ligatures"]
+default = ["local-fonts", "ligatures"]
+local-fonts = ["handterm/local-fonts"]
 ligatures = ["handterm/ligatures"]
 
 [dependencies]

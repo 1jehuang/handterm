@@ -8,7 +8,7 @@ A Wayland-native terminal emulator focused on reaching the theoretical limits of
 [![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org)
 [![Wayland](https://img.shields.io/badge/wayland-native-green.svg)](https://wayland.freedesktop.org)
 
-~8,400 lines of Rust. 3.4 MB binary. 28ms to first frame.
+~8,400 lines of Rust. Workspace-split packages. Single-process host architecture for low-overhead multi-window scaling.
 
 ![handterm screenshot](assets/screenshot.png)
 
@@ -20,7 +20,7 @@ Every terminal emulator is "fast enough." Handterm asks a different question: **
 
 Each layer of the pipeline is independently benchmarked against its theoretical floor. The parser is measured against `memcpy`. Cell writes are timed in nanoseconds. Startup is measured in microseconds. The goal is not to be marginally faster, but to understand where the ceilings are and sit as close to them as the hardware allows.
 
-Handterm has both a CPU renderer (softbuffer) and a GPU renderer (wgpu), with a [roadmap to server/client architecture](OPTIMIZATION.md) that targets **<1 MB RSS per window** - roughly 3x less memory than foot's daemon mode.
+Handterm has both a CPU renderer (softbuffer) and a GPU renderer (wgpu). The current best low-memory path is now a **single-process host architecture**: one long-lived process owns many windows and shares the heavy renderer/runtime state across them. The long-term target remains **<1 MB RSS per additional window**, and the current shared-GPU host is already close to that regime in practice.
 
 ## Benchmarks
 
@@ -117,21 +117,30 @@ Total virtual address space mapped (not all resident).
 
 foot's high VSZ is from mmap'd font files and Wayland protocol buffers; most is not resident. GPU terminals reserve large virtual ranges for driver allocations.
 
-### Daemon mode (multi-window efficiency)
+### Multi-window efficiency
 
 | Setup | First window | Each additional |
 |-------|-------------:|----------------:|
 | foot standalone | 24 MB | +24 MB |
 | foot --server + footclient | 25 MB (server) + 1.6 MB | +1.6 MB |
-| **handterm** daemon mode | **~4.4 MB server-only (measured, live build)** | target: **<1 MB** |
+| handterm CPU host | ~37 MB | ~20 MB |
+| **handterm GPU host** | **~61 MB** | **~1-2 MB** |
+| handterm daemon mode | ~4.4 MB server-only | current clients still too heavy |
 
-handterm's daemon mode (see [OPTIMIZATION.md](OPTIMIZATION.md)) is implemented for both CPU and GPU thin clients. The current code shares PTYs, terminal state, kitty image state, and server-driven glyph/image updates over a Unix-socket protocol, with a long-term target of <1 MB per additional window once the client/server split is pushed further.
+Handterm still has a daemon/thin-client implementation, but after profiling both approaches the most promising low-RAM local architecture is the **shared-GPU single-process host**. In current live measurements, the first GPU host window pays the full GPU/runtime cost once, and each additional window adds only about **1-2 MB RSS**.
 
-| Windows | foot standalone | foot daemon | handterm daemon (target) |
-|--------:|---------------:|------------:|-------------------------:|
-| 1 | 24 MB | 27 MB | 13 MB |
-| 5 | 120 MB | 33 MB | 17 MB |
-| 10 | 240 MB | 41 MB | 22 MB |
+Measured shared-GPU host scaling on this machine/session:
+
+| Windows | handterm GPU host RSS |
+|--------:|-----------------------:|
+| 1 | ~61.3 MB |
+| 2 | ~63.1 MB |
+| 3 | ~64.0 MB |
+| 4 | ~65.0 MB |
+| 5 | ~67.2 MB |
+| 6 | ~68.1 MB |
+
+That puts the incremental cost in roughly the **1-2 MB/window** range after the first window.
 
 ### Feature comparison
 
@@ -144,6 +153,7 @@ handterm's daemon mode (see [OPTIMIZATION.md](OPTIMIZATION.md)) is implemented f
 | Sixel graphics | - | ✅ | - | - | ✅ |
 | Kitty image protocol | partial | - | - | ✅ | ✅ |
 | Daemon mode | ✅ | ✅ | - | - | - |
+| Single-process multi-window host | ✅ | - | - | ✅ | ✅ |
 | Tabs | - | - | - | ✅ | ✅ |
 | Splits/panes | - | - | - | ✅ | ✅ |
 | Bracketed paste | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -244,8 +254,9 @@ handterm bench
 - OSC 52 clipboard
 - OSC 0/2 window title
 
-**IPC**
+**IPC / host control**
 - Unix socket remote control (`handterm @ <command>`)
+- Host window creation via `handterm open-window`
 - Commands: get-text, send-text, send-key, get-cursor, get-size, set-title, close
 
 ## Install
@@ -261,7 +272,7 @@ cargo build --release
 ./target/release/handterm
 ```
 
-This default build includes both CPU and GPU frontends, and will prefer GPU automatically so `background_opacity` works out of the box on supported systems.
+This default build includes both CPU and GPU frontends. When a compatible host is already running, repeated launches reuse that host and open another window in the same process instead of spawning a full new renderer process.
 
 ### Build with GPU rendering only
 
@@ -313,22 +324,23 @@ sync_to_monitor = true
 ## Architecture
 
 ```
-PTY (forkpty)
+Single-process host
   |
-  v
-Parser (byte-at-a-time state machine)
+  +-- window #1
+  |     PTY -> parser -> terminal -> grid -> renderer -> Wayland surface
   |
-  v
-Terminal (CSI/SGR/OSC dispatch, mode tracking)
+  +-- window #2
+  |     PTY -> parser -> terminal -> grid -> renderer -> Wayland surface
   |
-  v
-Grid (ring buffer cells, damage tracking)
-  |
-  v
-Renderer (CPU: two-pass pixel blit / GPU: instanced wgpu pipeline)
-  |
-  v
-Wayland surface (softbuffer SHM / wgpu swapchain)
+  +-- window #N
+        PTY -> parser -> terminal -> grid -> renderer -> Wayland surface
+
+Shared across windows in the host:
+- event loop
+- IPC socket / control plane
+- CPU or GPU renderer runtime foundation
+- glyph/font resources per DPI
+- on the GPU path: shared `wgpu` instance / adapter / device / queue / pipeline cache
 ```
 
 Each layer is independently benchmarkable. The parser can be tested without a grid. The grid can be tested without a renderer. `handterm bench` measures every boundary.
@@ -336,29 +348,31 @@ Each layer is independently benchmarkable. The parser can be tested without a gr
 ### Source layout
 
 ```
+handterm-common/
+  src/
+    grid.rs       Cell storage / scrollback
+    parser.rs     VT parser
+    protocol.rs   daemon protocol types
+    terminal.rs   terminal state machine
+
 src/
-  main.rs        Entry point and CLI
-  parser.rs      VT state machine (439 lines)
-  terminal.rs    Sequence dispatch, mode state (1,458 lines)
-  grid.rs        Cell storage, ring buffer, dirty tracking (1,117 lines)
-  font.rs        FreeType rasterization, glyph cache, ligatures (696 lines)
-  render.rs      CPU renderer (546 lines)
-  gpu_app.rs     GPU renderer with wgpu + WGSL (1,197 lines)
-  app.rs         CPU app / winit event loop (504 lines)
-  frontend.rs    Shared input handling, frame scheduling (528 lines)
-  pty.rs         PTY spawn and I/O (132 lines)
-  ipc.rs         Unix socket IPC server (259 lines)
-  config.rs      TOML config loading (186 lines)
-  color.rs       Hex color type (114 lines)
-  metrics.rs     Built-in benchmarks (313 lines)
-  cli.rs         Clap CLI definitions (37 lines)
+  app.rs          CPU single-process host runtime
+  gpu_app.rs      GPU single-process host runtime
+  gpu_runtime.rs  shared/per-window GPU runtime pieces
+  render.rs       CPU renderer
+  frontend.rs     shared scheduling/input helpers
+  pty.rs          PTY spawn and I/O
+  ipc.rs          host IPC server
+  daemon.rs       daemon/server runtime
+  remote_app.rs   CPU thin client
+  remote_gpu_app.rs GPU thin client
 ```
 
 ## Development
 
 ```bash
-cargo test              # 88 tests (parser, terminal, grid, font, config, CLI)
-cargo run -- bench      # full pipeline benchmark
+cargo test --workspace
+cargo run -- bench
 cargo run -- print-config
 ```
 
@@ -370,12 +384,13 @@ See [OPTIMIZATION.md](OPTIMIZATION.md) for the full performance roadmap.
 |-------|------|--------|
 | CPU rendering | Functional terminal with softbuffer | ✅ |
 | GPU rendering | wgpu backend with instanced shaders | ✅ |
-| GPU as default | Eliminate CPU framebuffer memory overhead | planned |
+| Single-process CPU host | Shared-process multi-window CPU runtime | ✅ |
+| Shared-GPU host | Low-overhead multi-window GPU runtime | ✅ |
 | Server/client mode | Daemon architecture like foot --server | ✅ implemented |
 | Workspace split | Thin client/server/common Cargo packages | ✅ foundation implemented |
-| Zero-copy IPC | Shared memory cell grid between server and client | planned |
+| Startup/per-window polish | Push toward theoretical window-overhead floor | in progress |
 
-**Target: <1 MB per window, ~13 MB total for 10 windows** (vs foot's ~41 MB).
+**Current best path:** shared-GPU host at roughly **~1-2 MB per extra window** after the first window. The remaining work is shaving startup cost and pushing the incremental slope down further.
 
 ## License
 

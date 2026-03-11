@@ -4,24 +4,22 @@ Goal: reach the theoretical minimum resource usage for a Wayland terminal emulat
 
 ## Current state
 
-| Metric | handterm (CPU) | foot (standalone) | footclient |
-|--------|---------------|-------------------|------------|
-| Startup | ~25ms | ~30-35ms | ~25-30ms |
-| RSS | 21MB | 24MB | 1.6MB |
-| Binary | 3.3MB | 476KB | 27KB |
-| Rendering | CPU (softbuffer) | CPU (custom pixman) | shares server |
+| Metric | handterm CPU host | handterm GPU host | footclient |
+|--------|------------------|-------------------|------------|
+| First window RSS | ~37MB | ~61MB | 1.6MB |
+| Additional window RSS | ~20MB | ~1-2MB | 1.6MB |
+| New-window startup | ~16ms | ~34-110ms | ~25-30ms |
+| Architecture | single-process host | single-process host | daemon thin client |
 
-### Where the 21MB goes
+### What is currently limiting memory
 
-| Component | Size | Notes |
-|-----------|------|-------|
-| Softbuffer x2 (double-buffered framebuffer) | ~19.5MB | 93% of private memory |
-| Handterm binary code pages | ~3MB | |
-| Heap (font cache, terminal state) | ~1MB | Already small |
-| Shared libs (libc, freetype, xkbcommon, wayland) | ~3MB | Shared across processes |
-| Stack + misc | ~0.1MB | Irrelevant |
+| Path | Limiting factor | Notes |
+|------|-----------------|-------|
+| CPU host | Wayland/softbuffer SHM backbuffers | dominant per-window cost; terminal state is no longer the main issue |
+| GPU host | fixed GPU/runtime cost on first window | shared well across additional windows |
+| Daemon thin clients | client process/runtime duplication | still heavier than the host-based design |
 
-The two `memfd:softbuffer` SHM mappings at ~9.8MB each (2560x1600x4 bytes, double-buffered) dominate everything.
+The biggest architectural lesson from the current implementation is that **shared-GPU single-process hosting** is the strongest path toward the theoretical per-window floor. CPU host mode improved a lot, but it runs into a hard Wayland/softbuffer SHM ceiling. GPU host mode pays a large fixed first-window cost, then scales at roughly **1-2 MB per extra window**.
 
 ## Implemented
 
@@ -55,6 +53,10 @@ The two `memfd:softbuffer` SHM mappings at ~9.8MB each (2560x1600x4 bytes, doubl
 - The CPU frontends now keep their own persistent software framebuffer and copy that into softbuffer at present time, instead of relying on softbuffer backbuffer persistence across frames. This has automated coverage because the CPU renderer is now tested for the “persistent software framebuffer -> fresh presented front buffer” path that matches live CPU presentation more closely.
 - The font path now uses explicit FreeType light hinting for normal text, derives cell width from a representative monospace sample set instead of a single rendered `M`, and procedurally rasterizes shaded/block glyphs like `░▒▓` so they stay cell-aligned and crisp.
 - True configured background opacity is now wired through the GPU backend using transparent windows plus a non-opaque surface alpha mode when available. The current CPU backend cannot support real opacity on Wayland because `softbuffer` presents `Xrgb8888` there, so CPU remains intentionally opaque.
+- Standalone CPU mode is now a real **single-process multi-window host** with a stable control socket, shared event loop, and host-side `open-window` support.
+- Standalone GPU mode is now also a **single-process multi-window host**, with backend-specific host sockets and a shared `wgpu` instance/adapter/device/queue foundation reused across windows.
+- The GPU runtime now splits shared context from per-window surface state, and repeated windows reuse the same device/queue plus a shared render-pipeline cache keyed by surface format.
+- The CPU host path no longer keeps an extra full-window offscreen framebuffer per window; it renders directly into the presentation buffer, which materially reduced per-window memory.
 
 ## Verification Standard
 
@@ -78,7 +80,7 @@ Manual/live checks are useful for debugging, but they are not the primary accept
 | Wayland/runtime overhead | ~2MB |
 | **Total** | **~3-4MB** per standalone instance |
 
-With a daemon model on top of GPU rendering, each additional window could be **<1MB**.
+With a shared-GPU host model, each additional window can plausibly approach **~1 MB** in practice. The current implementation is already in the **~1-2 MB** range for added windows on the profiled machine.
 
 ---
 
@@ -115,7 +117,36 @@ With a daemon model on top of GPU rendering, each additional window could be **<
 
 ---
 
-## Phase 2: Daemon/server mode
+## Phase 2: Multi-window architecture
+
+This phase is now split into two parallel architectural tracks:
+
+1. **single-process host** (now the preferred local low-RAM path)
+2. daemon/server mode (still useful for separation and protocol experimentation)
+
+### 2a: Single-process host mode
+
+Status: materially implemented for both CPU and GPU.
+
+Current measured results:
+
+| Setup | First window | Each additional |
+|-------|-------------:|----------------:|
+| CPU host | ~37 MB | ~20 MB |
+| GPU host | ~61 MB | ~1-2 MB |
+
+Current conclusion:
+
+- **CPU host** improved substantially, but is limited by Wayland/softbuffer SHM backbuffers.
+- **GPU host** is now the best low-RAM path because the heavy GPU runtime cost is paid once and shared across all windows.
+
+Remaining work in this track:
+
+- reduce added-window startup time on the GPU host
+- continue shaving the GPU-host incremental slope below the current ~1-2 MB/window range where possible
+- keep the CPU host as a simpler/reference path, but treat GPU host as the primary route toward the theoretical limit
+
+### 2b: Daemon/server mode
 
 Split into a server process (owns PTYs, terminals, fonts) and thin client processes (own Wayland surfaces, GPU rendering).
 
@@ -237,13 +268,20 @@ This means the first `handterm` invocation starts the server and opens a window.
 
 ### Expected result
 
-- Server: ~4.4MB RSS measured in the current live-profiled build for `server-only`; earlier headless measurement was ~3.7MB on this machine
-- Client: ~2-3MB each (GPU surface + cell grid copy)
-- 10 windows: ~28MB total
+- Server: ~4.4MB RSS measured in the current live-profiled build for `server-only`
+- Client: still heavier than the shared-host approach in current code
+- Keep this path for architectural comparison, protocol experiments, and potential reconnect/isolation use cases
 
 ---
 
-## Phase 3: Optimize the client binary
+## Phase 3: Optimize the winning path
+
+The old assumption here was “optimize daemon thin clients until they win.”
+
+The newer conclusion is more nuanced:
+
+- **optimize the shared-GPU host first**, because it is already closest to the theoretical per-window floor
+- continue daemon work only where it still teaches us something useful or offers a separate UX/isolation advantage
 
 ### 3a: Workspace split
 
@@ -267,9 +305,13 @@ Status: materially implemented. The repository is now a real Cargo workspace wit
 
 The intended end state is still that the client binary drops: freetype (~600KB RSS), fontconfig, rustybuzz, and all their transitive deps.
 
-### 3b: Pre-compiled shader
+### 3b: Shared GPU startup optimization
 
-The WGSL shader is currently an inline string compiled at runtime. Cache the compiled pipeline or use `naga` for ahead-of-time compilation so subsequent launches skip shader compilation.
+The GPU host now shares device/queue state and caches pipelines across windows, but new-window startup is still higher than ideal. Remaining work includes:
+
+- reduce per-window setup in the GPU host further
+- continue avoiding repeated shader/pipeline work
+- measure where Wayland window creation vs GPU surface setup dominates the remaining latency
 
 ### 3c: Lazy GPU init
 
@@ -277,8 +319,8 @@ Don't create the wgpu instance until the Wayland surface is ready. Use async ada
 
 ### Expected result
 
-- Client: ~1-2MB each
-- 10 windows: ~15MB total
+- shared-GPU host additional window: push from ~1-2 MB toward ~1 MB
+- shared-GPU host added-window startup: continue pushing downward from current tens-of-ms regime
 
 ### Test gates
 
@@ -328,15 +370,14 @@ The existing dirty-tracking bitmap in `Grid` already identifies changed cells. U
 
 Use `memfd` to share the cell grid between server and client without copying. Server writes directly to shared memory, client reads from it. Synchronize with eventfd.
 
-### 4d: Connection pooling
+### 4d: Host/daemon coexistence cleanup
 
-Keep a single persistent connection per client. Multiplex window updates over it. Avoid reconnection overhead.
+Now that both CPU and GPU host modes exist alongside daemon mode, continue making the control plane and documentation explicit about which architecture is being exercised and why.
 
 ### Expected result
 
-- Client: <1MB each
-- Server: ~4MB
-- 10 windows: ~13MB total
+- shared-GPU host: approach **~1 MB** per extra window
+- daemon mode: only worth pushing further if it offers a compelling tradeoff beyond what the shared host already achieves locally
 
 ### Test gates
 
@@ -352,19 +393,19 @@ Keep a single persistent connection per client. Multiplex window updates over it
 
 ---
 
-## Projected results summary
+## Projected / measured results summary
 
-| Config | Per-window RSS | Server RSS | 10 windows total |
-|--------|---------------|-----------|-----------------|
-| Current (CPU standalone) | 21MB | N/A | 210MB |
-| Phase 1 (GPU standalone) | ~8-10MB | N/A | ~90MB |
-| Phase 2 (GPU + daemon) | ~2-3MB | ~5-6MB | ~28MB |
-| Phase 3 (optimized client) | ~1-2MB | ~4-5MB | ~15MB |
-| Phase 4 (zero-copy) | <1MB | ~4MB | ~13MB |
+| Config | First window RSS | Additional window RSS | Notes |
+|--------|------------------:|----------------------:|-------|
+| Old CPU standalone | ~21MB | +21MB | pre-host baseline |
+| CPU host | ~37MB | +20MB | limited by SHM backbuffers |
+| GPU host | ~61MB | ~1-2MB | current best path |
+| Daemon server-only | ~4.4MB | N/A | server only |
+| Old GPU daemon client | ~53MB | +53MB/process | heavier than host path |
 
-For comparison, foot daemon with 10 windows: ~1.6MB x 10 + ~25MB server = **~41MB**.
+For comparison, foot daemon with 10 windows is roughly **~41MB** total on the comparison system. The current shared-GPU host trajectory is much more promising for low incremental window overhead once the first window has paid the fixed GPU/runtime cost.
 
-Fully optimized handterm would use **~13MB** for the same setup - roughly 3x less than foot.
+The current best measured handterm path is not “10 tiny daemon clients,” but rather “one shared GPU host plus cheap added windows.”
 
 Foot can never close this gap because it is architecturally committed to CPU rendering (SHM buffers always count against RSS). GPU rendering is the fundamental advantage.
 
@@ -373,8 +414,7 @@ Foot can never close this gap because it is architecturally committed to CPU ren
 ## Recommended order of work
 
 1. Stabilize rendering correctness and expand automated coverage first.
-2. **Phase 1** - GPU parity plus measurement, then decide default backend.
-3. Kitty graphics protocol end-to-end before calling terminal functionality complete.
-4. **Phase 2** - daemon split. Start with protocol, then server, then client.
-5. **Phase 3** - workspace split. After daemon is working.
-6. **Phase 4** - only keep micro-optimizations that win in benchmarks.
+2. Treat **shared-GPU host** as the primary low-RAM architecture for local multi-window use.
+3. Keep profiling/optimizing added-window startup time on the GPU host.
+4. Keep daemon mode implemented and correct, but no longer assume it is the winning local low-memory architecture.
+5. Only keep micro-optimizations that show real benchmark wins.

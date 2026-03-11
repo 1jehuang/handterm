@@ -9,6 +9,7 @@ use crate::terminal::TerminalView;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use wgpu::util::DeviceExt;
 use winit::dpi::{LogicalSize, Size};
 use winit::event_loop::ActiveEventLoop;
@@ -53,6 +54,12 @@ pub struct SharedGpuContext {
     image_shader: wgpu::ShaderModule,
     pipeline_layout: wgpu::PipelineLayout,
     atlas_sampler: wgpu::Sampler,
+    pipeline_cache: Mutex<HashMap<wgpu::TextureFormat, SharedPipelines>>,
+}
+
+struct SharedPipelines {
+    text: wgpu::RenderPipeline,
+    image: wgpu::RenderPipeline,
 }
 
 pub struct GpuSurfaceState {
@@ -280,6 +287,153 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+fn cell_instance_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<CellInstance>() as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &[
+            wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x2,
+            },
+            wgpu::VertexAttribute {
+                offset: 8,
+                shader_location: 1,
+                format: wgpu::VertexFormat::Float32x2,
+            },
+            wgpu::VertexAttribute {
+                offset: 16,
+                shader_location: 2,
+                format: wgpu::VertexFormat::Float32x2,
+            },
+            wgpu::VertexAttribute {
+                offset: 24,
+                shader_location: 3,
+                format: wgpu::VertexFormat::Float32x2,
+            },
+            wgpu::VertexAttribute {
+                offset: 32,
+                shader_location: 4,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            wgpu::VertexAttribute {
+                offset: 48,
+                shader_location: 5,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            wgpu::VertexAttribute {
+                offset: 64,
+                shader_location: 6,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            wgpu::VertexAttribute {
+                offset: 80,
+                shader_location: 7,
+                format: wgpu::VertexFormat::Uint32,
+            },
+        ],
+    }
+}
+
+fn image_instance_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<ImageInstance>() as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &[
+            wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x2,
+            },
+            wgpu::VertexAttribute {
+                offset: 8,
+                shader_location: 1,
+                format: wgpu::VertexFormat::Float32x2,
+            },
+            wgpu::VertexAttribute {
+                offset: 16,
+                shader_location: 2,
+                format: wgpu::VertexFormat::Float32x2,
+            },
+            wgpu::VertexAttribute {
+                offset: 24,
+                shader_location: 3,
+                format: wgpu::VertexFormat::Float32x2,
+            },
+        ],
+    }
+}
+
+impl SharedGpuContext {
+    fn pipelines_for_format(&self, format: wgpu::TextureFormat) -> (wgpu::RenderPipeline, wgpu::RenderPipeline) {
+        let mut cache = self.pipeline_cache.lock().expect("gpu pipeline cache poisoned");
+        let entry = cache.entry(format).or_insert_with(|| {
+            let text = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("render_pipeline"),
+                layout: Some(&self.pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &self.shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[cell_instance_layout()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &self.shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+
+            let image = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("image_pipeline"),
+                layout: Some(&self.pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &self.image_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[image_instance_layout()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &self.image_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+
+            SharedPipelines { text, image }
+        });
+
+        (entry.text.clone(), entry.image.clone())
+    }
+}
+
 pub fn create_window_attributes(
     config: &AppConfig,
     atlas: &GlyphAtlas,
@@ -378,6 +532,7 @@ pub fn create_shared_gpu_context() -> Result<Arc<SharedGpuContext>> {
         image_shader,
         pipeline_layout,
         atlas_sampler,
+        pipeline_cache: Mutex::new(HashMap::new()),
     }))
 }
 
@@ -493,137 +648,7 @@ pub fn create_surface_state_with_shared(
         ],
     });
 
-    let instance_layout = wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<CellInstance>() as u64,
-        step_mode: wgpu::VertexStepMode::Instance,
-        attributes: &[
-            wgpu::VertexAttribute {
-                offset: 0,
-                shader_location: 0,
-                format: wgpu::VertexFormat::Float32x2,
-            },
-            wgpu::VertexAttribute {
-                offset: 8,
-                shader_location: 1,
-                format: wgpu::VertexFormat::Float32x2,
-            },
-            wgpu::VertexAttribute {
-                offset: 16,
-                shader_location: 2,
-                format: wgpu::VertexFormat::Float32x2,
-            },
-            wgpu::VertexAttribute {
-                offset: 24,
-                shader_location: 3,
-                format: wgpu::VertexFormat::Float32x2,
-            },
-            wgpu::VertexAttribute {
-                offset: 32,
-                shader_location: 4,
-                format: wgpu::VertexFormat::Float32x4,
-            },
-            wgpu::VertexAttribute {
-                offset: 48,
-                shader_location: 5,
-                format: wgpu::VertexFormat::Float32x4,
-            },
-            wgpu::VertexAttribute {
-                offset: 64,
-                shader_location: 6,
-                format: wgpu::VertexFormat::Float32x4,
-            },
-            wgpu::VertexAttribute {
-                offset: 80,
-                shader_location: 7,
-                format: wgpu::VertexFormat::Uint32,
-            },
-        ],
-    };
-
-    let pipeline = shared.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("render_pipeline"),
-        layout: Some(&shared.pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &shared.shader,
-            entry_point: Some("vs_main"),
-            buffers: &[instance_layout],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shared.shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: surface_config.format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            ..Default::default()
-        },
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    });
-
-    let image_instance_layout = wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<ImageInstance>() as u64,
-        step_mode: wgpu::VertexStepMode::Instance,
-        attributes: &[
-            wgpu::VertexAttribute {
-                offset: 0,
-                shader_location: 0,
-                format: wgpu::VertexFormat::Float32x2,
-            },
-            wgpu::VertexAttribute {
-                offset: 8,
-                shader_location: 1,
-                format: wgpu::VertexFormat::Float32x2,
-            },
-            wgpu::VertexAttribute {
-                offset: 16,
-                shader_location: 2,
-                format: wgpu::VertexFormat::Float32x2,
-            },
-            wgpu::VertexAttribute {
-                offset: 24,
-                shader_location: 3,
-                format: wgpu::VertexFormat::Float32x2,
-            },
-        ],
-    };
-
-    let image_pipeline = shared.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("image_pipeline"),
-        layout: Some(&shared.pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &shared.image_shader,
-            entry_point: Some("vs_main"),
-            buffers: &[image_instance_layout],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shared.image_shader,
-            entry_point: Some("fs_main"),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: surface_config.format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            ..Default::default()
-        },
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview_mask: None,
-        cache: None,
-    });
+    let (pipeline, image_pipeline) = shared.pipelines_for_format(surface_config.format);
 
     Ok(GpuSurfaceState {
         shared,

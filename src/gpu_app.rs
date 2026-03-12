@@ -2,12 +2,13 @@ use crate::config::AppConfig;
 use crate::font::GlyphAtlas;
 use crate::frontend::{
     FrameDecision, FrameScheduler, KeyEventKind, RedrawWork, base64_decode,
-    classify_redraw_work, copy_to_clipboard, key_to_bytes, open_url, paste_from_clipboard,
-    scroll_to_bytes, spawn_fd_watcher,
+    copy_to_clipboard, key_to_bytes, open_url, paste_from_clipboard, scroll_to_bytes,
+    should_skip_duplicate_ime_key_event, spawn_fd_watcher,
 };
 use crate::gpu_runtime::{
-    GpuSurfaceState, SharedGpuContext, create_shared_gpu_context, create_surface_state_with_shared,
-    render_surface_state, resize_surface_state,
+    GpuSurfaceState, SharedGpuContext, create_shared_gpu_context,
+    create_surface_state_with_shared_profiled, render_surface_state, render_surface_state_profiled,
+    resize_surface_state,
 };
 use crate::ipc::{IpcAction, IpcServer, Request, Response};
 use crate::pty::PtyChild;
@@ -81,11 +82,14 @@ struct GpuWindowState {
     dpi: u32,
     pty_closed: bool,
     modifiers: Modifiers,
+    pending_ime_commit: Option<String>,
     mouse_col: usize,
     mouse_row: usize,
     selecting: bool,
     scheduler: FrameScheduler,
     watcher_stop: Arc<AtomicBool>,
+    open_window_start: Option<Instant>,
+    first_frame_logged: bool,
 }
 
 impl GpuApp {
@@ -179,11 +183,18 @@ impl GpuApp {
         let start = Instant::now();
         let cols = cols.unwrap_or(self.config.window.columns).max(1);
         let rows = rows.unwrap_or(self.config.window.rows).max(1);
+        let before_dpi = Instant::now();
         let dpi = self.resolve_dpi(event_loop);
+        let dpi_ms = before_dpi.elapsed();
+        let before_atlas = Instant::now();
         self.ensure_atlas(dpi)?;
-        let atlas = self.atlas_cache.get(&dpi).expect("atlas should exist for dpi");
+        let atlas_ms = before_atlas.elapsed();
+        let atlas = self
+            .atlas_cache
+            .get(&dpi)
+            .expect("atlas should exist for dpi");
         let before_surface = Instant::now();
-        let renderer = create_surface_state_with_shared(
+        let (renderer, surface_profile) = create_surface_state_with_shared_profiled(
             self.shared.clone(),
             event_loop,
             &self.config,
@@ -191,14 +202,19 @@ impl GpuApp {
             atlas,
         )
         .expect("gpu surface state should initialize");
+        let surface_total_ms = before_surface.elapsed();
         eprintln!("handterm: {}", renderer.surface_debug_summary());
+        let before_terminal = Instant::now();
         let terminal = Terminal::new_with_scrollback(cols, rows, self.config.scrollback.lines);
+        let terminal_ms = before_terminal.elapsed();
         let before_pty = Instant::now();
         let pty = PtyChild::spawn_default_shell(cols, rows).expect("pty should spawn");
+        let pty_ms = before_pty.elapsed();
         let stop = Arc::new(AtomicBool::new(false));
         let id = self.next_window_id;
         self.next_window_id += 1;
 
+        let before_watcher = Instant::now();
         spawn_fd_watcher(
             &format!("handterm-gpu-pty-{id}"),
             pty.raw_fd(),
@@ -207,6 +223,7 @@ impl GpuApp {
             GpuAppEvent::PtyReadable(id),
             stop.clone(),
         );
+        let watcher_ms = before_watcher.elapsed();
 
         let winit_id = renderer.window.id();
         self.window_ids.insert(id, winit_id);
@@ -222,21 +239,47 @@ impl GpuApp {
                 dpi,
                 pty_closed: false,
                 modifiers: Modifiers::default(),
+                pending_ime_commit: None,
                 mouse_col: 0,
                 mouse_row: 0,
                 selecting: false,
                 scheduler: FrameScheduler::default(),
                 watcher_stop: stop,
+                open_window_start: Some(start),
+                first_frame_logged: false,
             },
         );
         if let Some(state) = self.windows.get(&winit_id) {
             state.renderer.window.request_redraw();
         }
+        let sp = &surface_profile;
         eprintln!(
-            "handterm gpu host: open-window total={}ms surface={}ms pty={}ms",
-            start.elapsed().as_millis(),
-            before_pty.duration_since(before_surface).as_millis(),
-            Instant::now().duration_since(before_pty).as_millis(),
+            "handterm gpu host: open-window id={id}\n\
+             \x20 total={:.2}ms dpi={:.2}ms atlas={:.2}ms terminal={:.2}ms pty={:.2}ms watcher={:.2}ms\n\
+             \x20 surface_total={:.2}ms\n\
+             \x20   window_create={:.2}ms ime={:.2}ms wgpu_surface={:.2}ms\n\
+             \x20   default_config={:.2}ms caps={:.2}ms configure={:.2}ms\n\
+             \x20   atlas_tex={:.2}ms uniform_buf={:.2}ms inst_bufs={:.2}ms\n\
+             \x20   bind_group={:.2}ms pipeline={:.2}ms (cache_hit={})",
+            start.elapsed().as_secs_f64() * 1000.0,
+            dpi_ms.as_secs_f64() * 1000.0,
+            atlas_ms.as_secs_f64() * 1000.0,
+            terminal_ms.as_secs_f64() * 1000.0,
+            pty_ms.as_secs_f64() * 1000.0,
+            watcher_ms.as_secs_f64() * 1000.0,
+            surface_total_ms.as_secs_f64() * 1000.0,
+            sp.window_create.as_secs_f64() * 1000.0,
+            sp.ime_setup.as_secs_f64() * 1000.0,
+            sp.surface_create.as_secs_f64() * 1000.0,
+            sp.default_config.as_secs_f64() * 1000.0,
+            sp.capabilities.as_secs_f64() * 1000.0,
+            sp.configure.as_secs_f64() * 1000.0,
+            sp.atlas_texture.as_secs_f64() * 1000.0,
+            sp.uniform_buffer.as_secs_f64() * 1000.0,
+            sp.instance_buffers.as_secs_f64() * 1000.0,
+            sp.bind_group.as_secs_f64() * 1000.0,
+            sp.pipeline_lookup.as_secs_f64() * 1000.0,
+            sp.pipeline_cache_hit,
         );
         Ok(id)
     }
@@ -309,20 +352,26 @@ impl GpuApp {
             );
         }
 
-        let Some(target_id) = self.resolve_target_window_id(Self::target_window_from_args(req)) else {
+        let Some(target_id) = self.resolve_target_window_id(Self::target_window_from_args(req))
+        else {
             return (Response::err("no target window available"), IpcAction::None);
         };
         let Some(winit_id) = self.window_ids.get(&target_id).copied() else {
             return (Response::err("unknown target window"), IpcAction::None);
         };
         let Some(state) = self.windows.get_mut(&winit_id) else {
-            return (Response::err("target window is not active"), IpcAction::None);
+            return (
+                Response::err("target window is not active"),
+                IpcAction::None,
+            );
         };
         handle_ipc_request(&mut state.terminal, req)
     }
 
     fn process_ipc_actions(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(mut ipc) = self.ipc.take() else { return };
+        let Some(mut ipc) = self.ipc.take() else {
+            return;
+        };
         let actions = ipc.poll(&mut |req| self.handle_host_ipc_request(req));
         self.ipc = Some(ipc);
 
@@ -379,7 +428,16 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                 if let Some(winit_id) = self.window_ids.get(&window_id)
                     && let Some(state) = self.windows.get_mut(winit_id)
                 {
-                    state.scheduler.mark_io_ready(Instant::now(), FRAME_INTERVAL);
+                    let bytes_read = drain_pty(state);
+                    if bytes_read > 0 {
+                        state
+                            .scheduler
+                            .mark_io_ready(Instant::now(), FRAME_INTERVAL);
+                    }
+                    if state.pty_closed {
+                        let winit_id = *winit_id;
+                        self.close_window(winit_id, event_loop);
+                    }
                 }
             }
             GpuAppEvent::IpcReadable => self.process_ipc_actions(event_loop),
@@ -435,6 +493,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                     }
                     WindowEvent::Ime(Ime::Commit(text)) => {
                         if !text.is_empty() {
+                            state.pending_ime_commit = Some(text.clone());
                             let _ = state.pty.write_all(text.as_bytes());
                             if state.terminal.grid.scroll_offset > 0 {
                                 state.terminal.grid.scroll_offset = 0;
@@ -448,7 +507,10 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                             let ctrl = state.modifiers.state().control_key();
                             let shift = state.modifiers.state().shift_key();
 
-                            if ctrl && shift && let Key::Character(s) = &event.logical_key {
+                            if ctrl
+                                && shift
+                                && let Key::Character(s) = &event.logical_key
+                            {
                                 let ch = s.chars().next().unwrap_or('\0').to_ascii_lowercase();
                                 if ch == 'v' {
                                     if let Some(text) = paste_from_clipboard() {
@@ -482,11 +544,8 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                                 }
                                 if let Key::Named(NamedKey::PageDown) = &event.logical_key {
                                     let half = state.terminal.rows as usize / 2;
-                                    state.terminal.grid.scroll_offset = state
-                                        .terminal
-                                        .grid
-                                        .scroll_offset
-                                        .saturating_sub(half);
+                                    state.terminal.grid.scroll_offset =
+                                        state.terminal.grid.scroll_offset.saturating_sub(half);
                                     state.scheduler.mark_redraw_needed();
                                     return;
                                 }
@@ -498,6 +557,14 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                             (ElementState::Pressed, false) => KeyEventKind::Press,
                             (ElementState::Released, _) => KeyEventKind::Release,
                         };
+
+                        if should_skip_duplicate_ime_key_event(
+                            &mut state.pending_ime_commit,
+                            event_kind,
+                            event.text.as_deref(),
+                        ) {
+                            return;
+                        }
 
                         if let Some(bytes) = key_to_bytes(
                             &event.logical_key,
@@ -530,7 +597,11 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                             state.scheduler.mark_redraw_needed();
                         }
                     }
-                    WindowEvent::MouseInput { state: btn_state, button, .. } => {
+                    WindowEvent::MouseInput {
+                        state: btn_state,
+                        button,
+                        ..
+                    } => {
                         let btn = match button {
                             MouseButton::Left => 0u8,
                             MouseButton::Middle => 1,
@@ -543,7 +614,10 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                             if pressed {
                                 let ctrl = state.modifiers.state().control_key();
                                 if ctrl {
-                                    let cell = state.terminal.grid.cell_at(state.mouse_row, state.mouse_col);
+                                    let cell = state
+                                        .terminal
+                                        .grid
+                                        .cell_at(state.mouse_row, state.mouse_col);
                                     if cell.hyperlink_id != 0
                                         && let Some(url) =
                                             state.terminal.grid.hyperlink_url(cell.hyperlink_id)
@@ -570,16 +644,21 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                         }
 
                         if state.terminal.mouse_mode != crate::terminal::MouseMode::Off
-                            && let Some(bytes) = state
-                                .terminal
-                                .encode_mouse(btn, state.mouse_col, state.mouse_row, pressed)
+                            && let Some(bytes) = state.terminal.encode_mouse(
+                                btn,
+                                state.mouse_col,
+                                state.mouse_row,
+                                pressed,
+                            )
                         {
                             let _ = state.pty.write_all(&bytes);
                         }
                     }
                     WindowEvent::MouseWheel { delta, .. } => {
                         let (up, lines) = match delta {
-                            MouseScrollDelta::LineDelta(_, y) => (y > 0.0, y.abs().max(1.0) as usize),
+                            MouseScrollDelta::LineDelta(_, y) => {
+                                (y > 0.0, y.abs().max(1.0) as usize)
+                            }
                             MouseScrollDelta::PixelDelta(pos) => {
                                 let ch = atlas.cell_height.max(1) as f64;
                                 (pos.y > 0.0, (pos.y.abs() / ch).max(1.0) as usize)
@@ -587,14 +666,17 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                         };
                         if state.terminal.mouse_mode != crate::terminal::MouseMode::Off {
                             for _ in 0..lines {
-                                if let Some(bytes) = state
-                                    .terminal
-                                    .encode_mouse_scroll(up, state.mouse_col, state.mouse_row)
-                                {
+                                if let Some(bytes) = state.terminal.encode_mouse_scroll(
+                                    up,
+                                    state.mouse_col,
+                                    state.mouse_row,
+                                ) {
                                     let _ = state.pty.write_all(&bytes);
                                 }
                             }
-                        } else if state.terminal.alternate_scroll_mode() && state.terminal.in_alt_screen() {
+                        } else if state.terminal.alternate_scroll_mode()
+                            && state.terminal.in_alt_screen()
+                        {
                             let bytes = scroll_to_bytes(up, state.terminal.application_cursor_keys);
                             for _ in 0..lines {
                                 let _ = state.pty.write_all(&bytes);
@@ -605,11 +687,8 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                                 state.terminal.grid.scroll_offset =
                                     (state.terminal.grid.scroll_offset + lines * 3).min(max);
                             } else {
-                                state.terminal.grid.scroll_offset = state
-                                    .terminal
-                                    .grid
-                                    .scroll_offset
-                                    .saturating_sub(lines * 3);
+                                state.terminal.grid.scroll_offset =
+                                    state.terminal.grid.scroll_offset.saturating_sub(lines * 3);
                             }
                             state.scheduler.mark_redraw_needed();
                         }
@@ -627,12 +706,45 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                         }
                     }
                     WindowEvent::RedrawRequested => {
-                        render_surface_state(
-                            &mut state.renderer,
-                            &mut state.terminal,
-                            atlas,
-                            &self.config,
-                        );
+                        if !state.first_frame_logged {
+                            let render_profile = render_surface_state_profiled(
+                                &mut state.renderer,
+                                &mut state.terminal,
+                                atlas,
+                                &self.config,
+                            );
+                            state.first_frame_logged = true;
+                            if let Some(rp) = render_profile {
+                                let open_to_present = state
+                                    .open_window_start
+                                    .map(|s| s.elapsed().as_secs_f64() * 1000.0)
+                                    .unwrap_or(0.0);
+                                eprintln!(
+                                    "handterm gpu host: first-frame id={}\n\
+                                     \x20 open_to_first_present={:.2}ms\n\
+                                     \x20 acquire={:.2}ms display_list={:.2}ms upload={:.2}ms\n\
+                                     \x20 encode={:.2}ms submit={:.2}ms present={:.2}ms\n\
+                                     \x20 render_total={:.2}ms",
+                                    state.id,
+                                    open_to_present,
+                                    rp.acquire_surface.as_secs_f64() * 1000.0,
+                                    rp.build_display_list.as_secs_f64() * 1000.0,
+                                    rp.upload_buffers.as_secs_f64() * 1000.0,
+                                    rp.encode_pass.as_secs_f64() * 1000.0,
+                                    rp.submit.as_secs_f64() * 1000.0,
+                                    rp.present.as_secs_f64() * 1000.0,
+                                    rp.total.as_secs_f64() * 1000.0,
+                                );
+                            }
+                            state.open_window_start = None;
+                        } else {
+                            render_surface_state(
+                                &mut state.renderer,
+                                &mut state.terminal,
+                                atlas,
+                                &self.config,
+                            );
+                        }
                     }
                     _ => {}
                 }
@@ -643,13 +755,11 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let mut earliest_deadline: Option<Instant> = None;
         let mut redraw_ids = Vec::new();
-        let mut closed_windows = Vec::new();
 
         for (winit_id, state) in &mut self.windows {
-            let mut scheduler = std::mem::take(&mut state.scheduler);
+            let scheduler = &mut state.scheduler;
             let decision: FrameDecision =
-                scheduler.prepare_redraw(Instant::now(), || process_pending_pty_io(state));
-            state.scheduler = scheduler;
+                scheduler.prepare_redraw(Instant::now(), || RedrawWork::default());
             if let Some(deadline) = decision.wait_until {
                 earliest_deadline = Some(match earliest_deadline {
                     Some(existing) => existing.min(deadline),
@@ -659,19 +769,12 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
             if decision.request_redraw {
                 redraw_ids.push(*winit_id);
             }
-            if state.pty_closed {
-                closed_windows.push(*winit_id);
-            }
         }
 
         for winit_id in redraw_ids {
             if let Some(state) = self.windows.get(&winit_id) {
                 state.renderer.window.request_redraw();
             }
-        }
-
-        for winit_id in closed_windows {
-            self.close_window(winit_id, event_loop);
         }
 
         if self.windows.is_empty() {
@@ -682,11 +785,6 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
             event_loop.set_control_flow(ControlFlow::Wait);
         }
     }
-}
-
-fn process_pending_pty_io(state: &mut GpuWindowState) -> RedrawWork {
-    let needs_redraw = drain_pty(state) > 0;
-    classify_redraw_work(&state.terminal, needs_redraw)
 }
 
 fn drain_pty(state: &mut GpuWindowState) -> usize {

@@ -236,6 +236,23 @@ pub fn scroll_to_bytes(up: bool, app_cursor: bool) -> Vec<u8> {
     }
 }
 
+pub fn should_skip_duplicate_ime_key_event(
+    pending_ime_commit: &mut Option<String>,
+    event_kind: KeyEventKind,
+    event_text: Option<&str>,
+) -> bool {
+    if !matches!(event_kind, KeyEventKind::Press) {
+        return false;
+    }
+
+    let should_skip = pending_ime_commit
+        .as_deref()
+        .filter(|text| !text.is_empty())
+        == event_text;
+    *pending_ime_commit = None;
+    should_skip
+}
+
 pub fn paste_from_clipboard() -> Option<Vec<u8>> {
     std::process::Command::new("wl-paste")
         .arg("--no-newline")
@@ -342,14 +359,24 @@ fn fd_watcher_thread<E: Clone + Send + 'static>(
     }
 
     while !stop.load(Ordering::Relaxed) {
-        match poll(&mut fds, PollTimeout::from(100u16)) {
+        match poll(&mut fds, PollTimeout::from(500u16)) {
             Ok(0) => continue,
             Ok(_) => {
-                let _ = proxy.send_event(event.clone());
+                let has_data = fds[0]
+                    .revents()
+                    .is_some_and(|r| r.intersects(PollFlags::POLLIN));
+                let secondary_data = fds.len() > 1
+                    && fds[1]
+                        .revents()
+                        .is_some_and(|r| r.intersects(PollFlags::POLLIN));
+                if has_data || secondary_data {
+                    let _ = proxy.send_event(event.clone());
+                }
                 if fds[0]
                     .revents()
                     .is_some_and(|revents| revents.contains(PollFlags::POLLHUP))
                 {
+                    let _ = proxy.send_event(event.clone());
                     break;
                 }
             }
@@ -427,7 +454,9 @@ mod tests {
         let mut terminal = Terminal::new(2, 1);
         terminal.process("❤️".as_bytes());
         let with_heart = visual_signature(&terminal);
-        terminal.grid.set_cell_with_grapheme(0, 0, crate::grid::Cell::BLANK, Some("♠️".into()));
+        terminal
+            .grid
+            .set_cell_with_grapheme(0, 0, crate::grid::Cell::BLANK, Some("♠️".into()));
         let with_suit = visual_signature(&terminal);
         assert_ne!(with_heart, with_suit);
     }
@@ -452,5 +481,27 @@ mod tests {
         });
         assert!(decision.request_redraw);
         assert!(decision.wait_until.is_none());
+    }
+
+    #[test]
+    fn ime_commit_dedupes_matching_followup_key_press() {
+        let mut pending = Some(" ".to_string());
+        assert!(should_skip_duplicate_ime_key_event(
+            &mut pending,
+            KeyEventKind::Press,
+            Some(" "),
+        ));
+        assert_eq!(pending, None);
+    }
+
+    #[test]
+    fn ime_commit_does_not_dedupe_different_key_press() {
+        let mut pending = Some(" ".to_string());
+        assert!(!should_skip_duplicate_ime_key_event(
+            &mut pending,
+            KeyEventKind::Press,
+            Some("a"),
+        ));
+        assert_eq!(pending, None);
     }
 }

@@ -86,6 +86,8 @@ struct HostWindowState {
     dpi: u32,
     pty_closed: bool,
     modifiers: Modifiers,
+    hyper_modifier: bool,
+    meta_modifier: bool,
     pending_ime_commit: Option<String>,
     recent_text_key_event: Option<RecentTextKeyEvent>,
     mouse_col: usize,
@@ -258,6 +260,8 @@ impl HandtermApp {
                 dpi,
                 pty_closed: false,
                 modifiers: Modifiers::default(),
+                hyper_modifier: false,
+                meta_modifier: false,
                 pending_ime_commit: None,
                 recent_text_key_event: None,
                 mouse_col: 0,
@@ -344,6 +348,8 @@ impl HandtermApp {
                 .or_else(|| args.get("super_key"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            hyper: args.get("hyper").and_then(|v| v.as_bool()).unwrap_or(false),
+            meta: args.get("meta").and_then(|v| v.as_bool()).unwrap_or(false),
         })
     }
 
@@ -382,6 +388,8 @@ impl HandtermApp {
             event.alt,
             event.shift,
             event.super_key,
+            event.hyper,
+            event.meta,
         );
         let ime_dedupe_text =
             crate::frontend::key_ime_dedupe_text(&logical_key, event.text.as_deref());
@@ -827,12 +835,20 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                             event.text.as_deref(),
                         );
 
+                        let modifiers = crate::frontend::effective_modifiers_for_key_event(
+                            state.modifiers.state(),
+                            state.hyper_modifier,
+                            state.meta_modifier,
+                            &event.logical_key,
+                            event_kind,
+                        );
+
                         if let Some(bytes) = key_to_bytes(
                             &event.logical_key,
                             event.text.as_deref(),
                             Some(&event.physical_key),
                             state.terminal.application_cursor_keys,
-                            state.modifiers.state(),
+                            modifiers,
                             state.terminal.kitty_keyboard_flags(),
                             event_kind,
                         ) {
@@ -892,6 +908,13 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                                 None,
                             );
                         }
+
+                        crate::frontend::apply_modifier_key_transition(
+                            &mut state.hyper_modifier,
+                            &mut state.meta_modifier,
+                            &event.logical_key,
+                            event_kind,
+                        );
                     }
                     WindowEvent::CursorMoved { position, .. } => {
                         state.mouse_col = position.x as usize / cell_width;

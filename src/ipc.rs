@@ -85,6 +85,8 @@ pub struct SyntheticKeyEvent {
     pub alt: bool,
     pub shift: bool,
     pub super_key: bool,
+    pub hyper: bool,
+    pub meta: bool,
 }
 
 pub struct IpcServer {

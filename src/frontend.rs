@@ -1,5 +1,8 @@
 use crate::grid::{Grid, Selection};
-pub use crate::input::{KeyEventKind, key_to_bytes};
+pub use crate::input::{
+    KeyEventKind, apply_modifier_key_transition, effective_modifiers_for_key_event, key_to_bytes,
+    modifiers_with_extra,
+};
 use crate::terminal::{CursorStyle, TerminalView};
 use std::io::Write;
 use std::sync::Arc;
@@ -51,13 +54,15 @@ pub fn synthetic_modifiers_state(
     alt: bool,
     shift: bool,
     super_key: bool,
+    hyper: bool,
+    meta: bool,
 ) -> ModifiersState {
     let mut modifiers = ModifiersState::empty();
     modifiers.set(ModifiersState::CONTROL, ctrl);
     modifiers.set(ModifiersState::ALT, alt);
     modifiers.set(ModifiersState::SHIFT, shift);
     modifiers.set(ModifiersState::SUPER, super_key);
-    modifiers
+    modifiers_with_extra(modifiers, hyper, meta)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1021,10 +1026,11 @@ mod tests {
 
     #[test]
     fn synthetic_modifiers_state_sets_requested_bits() {
-        let modifiers = synthetic_modifiers_state(true, false, true, true);
+        let modifiers = synthetic_modifiers_state(true, false, true, true, true, true);
         assert!(modifiers.control_key());
         assert!(!modifiers.alt_key());
         assert!(modifiers.shift_key());
         assert!(modifiers.super_key());
+        assert_ne!(modifiers.bits(), 0);
     }
 }

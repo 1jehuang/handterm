@@ -4,11 +4,57 @@ use crate::terminal::{
 };
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
+const HYPER_MODIFIER_BIT: u32 = 1 << 24;
+const META_MODIFIER_BIT: u32 = 1 << 25;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyEventKind {
     Press,
     Repeat,
     Release,
+}
+
+pub fn modifiers_with_extra(modifiers: ModifiersState, hyper: bool, meta: bool) -> ModifiersState {
+    let mut bits = modifiers.bits();
+    if hyper {
+        bits |= HYPER_MODIFIER_BIT;
+    }
+    if meta {
+        bits |= META_MODIFIER_BIT;
+    }
+    ModifiersState::from_bits_retain(bits)
+}
+
+pub fn effective_modifiers_for_key_event(
+    modifiers: ModifiersState,
+    hyper: bool,
+    meta: bool,
+    key: &Key,
+    event_kind: KeyEventKind,
+) -> ModifiersState {
+    let mut effective = modifiers_with_extra(modifiers, hyper, meta);
+    if !matches!(event_kind, KeyEventKind::Repeat) {
+        match key {
+            Key::Named(NamedKey::Hyper) => effective = modifiers_with_extra(modifiers, false, meta),
+            Key::Named(NamedKey::Meta) => effective = modifiers_with_extra(modifiers, hyper, false),
+            _ => {}
+        }
+    }
+    effective
+}
+
+pub fn apply_modifier_key_transition(
+    hyper: &mut bool,
+    meta: &mut bool,
+    key: &Key,
+    event_kind: KeyEventKind,
+) {
+    let pressed = matches!(event_kind, KeyEventKind::Press | KeyEventKind::Repeat);
+    match key {
+        Key::Named(NamedKey::Hyper) => *hyper = pressed,
+        Key::Named(NamedKey::Meta) => *meta = pressed,
+        _ => {}
+    }
 }
 
 pub fn key_to_bytes(
@@ -281,7 +327,12 @@ fn encode_kitty_key(
 }
 
 fn text_key_is_ambiguous(modifiers: ModifiersState) -> bool {
-    modifiers.shift_key() || modifiers.alt_key() || modifiers.control_key() || modifiers.super_key()
+    modifiers.shift_key()
+        || modifiers.alt_key()
+        || modifiers.control_key()
+        || modifiers.super_key()
+        || hyper_modifier_active(modifiers)
+        || meta_modifier_active(modifiers)
 }
 
 fn text_key_primary_codepoint(
@@ -353,6 +404,12 @@ fn kitty_modifier_field(
     if modifiers.super_key() {
         value += 8;
     }
+    if hyper_modifier_active(modifiers) {
+        value += 16;
+    }
+    if meta_modifier_active(modifiers) {
+        value += 32;
+    }
 
     if report_events {
         let event = match event_kind {
@@ -370,6 +427,14 @@ fn kitty_modifier_field(
     } else {
         Some(value.to_string())
     }
+}
+
+fn hyper_modifier_active(modifiers: ModifiersState) -> bool {
+    modifiers.bits() & HYPER_MODIFIER_BIT != 0
+}
+
+fn meta_modifier_active(modifiers: ModifiersState) -> bool {
+    modifiers.bits() & META_MODIFIER_BIT != 0
 }
 
 fn kitty_text_field(text: Option<&str>) -> Option<String> {
@@ -811,6 +876,110 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bytes, b"\x1b[57442u");
+
+        let hyper = key_to_bytes(
+            &Key::Named(NamedKey::Hyper),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::Hyper)),
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(hyper, b"\x1b[57445u");
+
+        let meta = key_to_bytes(
+            &Key::Named(NamedKey::Meta),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::Meta)),
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(meta, b"\x1b[57446u");
+    }
+
+    #[test]
+    fn kitty_modifier_field_includes_extra_meta_and_hyper_bits() {
+        let hyper_modifiers = effective_modifiers_for_key_event(
+            ModifiersState::CONTROL,
+            true,
+            false,
+            &Key::Character("x".into()),
+            KeyEventKind::Press,
+        );
+        let hyper = key_to_bytes(
+            &Key::Character("x".into()),
+            Some("x"),
+            Some(&PhysicalKey::Code(KeyCode::KeyX)),
+            false,
+            hyper_modifiers,
+            KITTY_KBD_DISAMBIGUATE,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(hyper, b"\x1b[120;21u");
+
+        let meta_modifiers = effective_modifiers_for_key_event(
+            ModifiersState::CONTROL,
+            false,
+            true,
+            &Key::Character("x".into()),
+            KeyEventKind::Press,
+        );
+        let meta = key_to_bytes(
+            &Key::Character("x".into()),
+            Some("x"),
+            Some(&PhysicalKey::Code(KeyCode::KeyX)),
+            false,
+            meta_modifiers,
+            KITTY_KBD_DISAMBIGUATE,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(meta, b"\x1b[120;37u");
+    }
+
+    #[test]
+    fn modifier_key_events_do_not_self_include_meta_or_hyper_bits() {
+        let hyper = key_to_bytes(
+            &Key::Named(NamedKey::Hyper),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::Hyper)),
+            false,
+            effective_modifiers_for_key_event(
+                ModifiersState::default(),
+                true,
+                false,
+                &Key::Named(NamedKey::Hyper),
+                KeyEventKind::Press,
+            ),
+            KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(hyper, b"\x1b[57445u");
+
+        let meta = key_to_bytes(
+            &Key::Named(NamedKey::Meta),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::Meta)),
+            false,
+            effective_modifiers_for_key_event(
+                ModifiersState::default(),
+                false,
+                true,
+                &Key::Named(NamedKey::Meta),
+                KeyEventKind::Press,
+            ),
+            KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(meta, b"\x1b[57446u");
     }
 
     #[test]

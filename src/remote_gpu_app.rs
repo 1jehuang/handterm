@@ -73,6 +73,8 @@ struct RemoteGpuState {
     pending_size: Option<(u16, u16)>,
     disconnected: bool,
     modifiers: Modifiers,
+    hyper_modifier: bool,
+    meta_modifier: bool,
     pending_ime_commit: Option<String>,
     recent_text_key_event: Option<RecentTextKeyEvent>,
     mouse_col: usize,
@@ -172,6 +174,8 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
             pending_size: None,
             disconnected: false,
             modifiers: Modifiers::default(),
+            hyper_modifier: false,
+            meta_modifier: false,
             pending_ime_commit: None,
             recent_text_key_event: None,
             mouse_col: 0,
@@ -319,12 +323,20 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
                 let ime_dedupe_text =
                     crate::frontend::key_ime_dedupe_text(&event.logical_key, event.text.as_deref());
 
+                let modifiers = crate::frontend::effective_modifiers_for_key_event(
+                    state.modifiers.state(),
+                    state.hyper_modifier,
+                    state.meta_modifier,
+                    &event.logical_key,
+                    event_kind,
+                );
+
                 if let Some(bytes) = key_to_bytes(
                     &event.logical_key,
                     event.text.as_deref(),
                     Some(&event.physical_key),
                     state.terminal.application_cursor_keys,
-                    state.modifiers.state(),
+                    modifiers,
                     state.terminal.kitty_keyboard_flags(),
                     event_kind,
                 ) {
@@ -369,6 +381,13 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
                         None,
                     );
                 }
+
+                crate::frontend::apply_modifier_key_transition(
+                    &mut state.hyper_modifier,
+                    &mut state.meta_modifier,
+                    &event.logical_key,
+                    event_kind,
+                );
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let cw = state.atlas.cell_width.max(1);

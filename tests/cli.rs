@@ -1,3 +1,8 @@
+use handterm::backend::Backend;
+#[cfg(feature = "cli")]
+use handterm::cli::Cli;
+#[cfg(feature = "cli")]
+use handterm::should_reuse_existing_host;
 use predicates::prelude::*;
 use std::fs;
 use tempfile::tempdir;
@@ -47,4 +52,23 @@ fn bench_command_prints_metrics() {
         .stdout(predicate::str::contains("Full Terminal Pipeline"))
         .stdout(predicate::str::contains("Per-Cell Metrics"))
         .stdout(predicate::str::contains("Startup"));
+}
+
+#[test]
+fn standalone_flag_bypasses_existing_host_reuse() {
+    let cli = Cli {
+        config: None,
+        backend: Some(Backend::Gpu),
+        standalone: true,
+        command: None,
+    };
+    assert!(!should_reuse_existing_host(&cli));
+
+    let cli = Cli {
+        config: None,
+        backend: Some(Backend::Gpu),
+        standalone: false,
+        command: None,
+    };
+    assert!(should_reuse_existing_host(&cli));
 }

@@ -118,6 +118,11 @@ pub fn print_daemon_mode_deprecation(mode: &str) {
 }
 
 #[cfg(feature = "cli")]
+pub fn should_reuse_existing_host(cli: &Cli) -> bool {
+    !cli.standalone
+}
+
+#[cfg(feature = "cli")]
 pub fn run_with_cli(cli: Cli) -> Result<()> {
     let backend = resolve_backend(cli.backend)?;
     let config = AppConfig::load(cli.config.as_deref())?;
@@ -205,7 +210,8 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
                 #[cfg(feature = "cpu")]
                 {
                     warn_if_cpu_opacity();
-                    if let Some(socket_path) = ipc::find_socket_for_backend(Backend::Cpu)
+                    if should_reuse_existing_host(&cli)
+                        && let Some(socket_path) = ipc::find_socket_for_backend(Backend::Cpu)
                         && ipc::send_command(
                             &socket_path,
                             &ipc::Request {
@@ -227,7 +233,8 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             Backend::Gpu => {
                 #[cfg(feature = "gpu")]
                 {
-                    if let Some(socket_path) = ipc::find_socket_for_backend(Backend::Gpu)
+                    if should_reuse_existing_host(&cli)
+                        && let Some(socket_path) = ipc::find_socket_for_backend(Backend::Gpu)
                         && ipc::send_command(
                             &socket_path,
                             &ipc::Request {

@@ -269,7 +269,7 @@ fn encode_kitty_key(
         return None;
     }
 
-    let primary = text_key_primary_codepoint(key, physical_key)?;
+    let primary = text_key_primary_codepoint(key, physical_key, modifiers)?;
     let first = kitty_first_param(primary, text, physical_key, modifiers, report_alternate);
     let modifier_field = kitty_modifier_field(modifiers, report_events, event_kind);
     let text_field = if report_text {
@@ -284,21 +284,25 @@ fn text_key_is_ambiguous(modifiers: ModifiersState) -> bool {
     modifiers.shift_key() || modifiers.alt_key() || modifiers.control_key() || modifiers.super_key()
 }
 
-fn text_key_primary_codepoint(key: &Key, physical_key: Option<&PhysicalKey>) -> Option<u32> {
-    if let Some(base) = physical_key.and_then(base_layout_codepoint) {
-        return Some(base);
-    }
-
+fn text_key_primary_codepoint(
+    key: &Key,
+    physical_key: Option<&PhysicalKey>,
+    modifiers: ModifiersState,
+) -> Option<u32> {
     match key {
         Key::Character(s) => {
             let ch = s.chars().next()?;
-            Some(if ch.is_ascii_alphabetic() {
-                ch.to_ascii_lowercase() as u32
+            Some(if ch.is_alphabetic() {
+                ch.to_lowercase().next().unwrap_or(ch) as u32
+            } else if modifiers.shift_key() {
+                physical_key
+                    .and_then(base_layout_codepoint)
+                    .unwrap_or(ch as u32)
             } else {
                 ch as u32
             })
         }
-        _ => None,
+        _ => physical_key.and_then(base_layout_codepoint),
     }
 }
 
@@ -954,6 +958,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bytes, b"\x1b[57414u");
+    }
+
+    #[test]
+    fn kitty_report_alternate_includes_shifted_symbol_variant() {
+        let bytes = key_to_bytes(
+            &Key::Character("+".into()),
+            Some("+"),
+            Some(&PhysicalKey::Code(KeyCode::Equal)),
+            false,
+            ModifiersState::SHIFT | ModifiersState::CONTROL,
+            KITTY_KBD_DISAMBIGUATE | KITTY_KBD_REPORT_ALTERNATE,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"\x1b[61:43;6u");
+    }
+
+    #[test]
+    fn kitty_report_alternate_preserves_current_layout_and_base_layout_key() {
+        let bytes = key_to_bytes(
+            &Key::Character("с".into()),
+            Some("с"),
+            Some(&PhysicalKey::Code(KeyCode::KeyC)),
+            false,
+            ModifiersState::CONTROL,
+            KITTY_KBD_DISAMBIGUATE | KITTY_KBD_REPORT_ALTERNATE,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, "\x1b[1089::99;5u".as_bytes());
+
+        let shifted = key_to_bytes(
+            &Key::Character("С".into()),
+            Some("С"),
+            Some(&PhysicalKey::Code(KeyCode::KeyC)),
+            false,
+            ModifiersState::SHIFT | ModifiersState::CONTROL,
+            KITTY_KBD_DISAMBIGUATE | KITTY_KBD_REPORT_ALTERNATE,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(shifted, "\x1b[1089:1057:99;6u".as_bytes());
     }
 
     #[test]

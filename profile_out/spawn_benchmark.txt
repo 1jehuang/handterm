@@ -1,13 +1,5 @@
-backend=gpu count=100
-window=2 startup_ms=60 rss_kb=64208
-window=10 startup_ms=100 rss_kb=150596
-window=20 startup_ms=267 rss_kb=261236
-window=30 startup_ms=171 rss_kb=383020
-window=40 startup_ms=1762 rss_kb=468004
-window=50 startup_ms=197 rss_kb=650576
-window=60 startup_ms=214 rss_kb=778276
-window=70 startup_ms=491 rss_kb=1009820
-window=80 startup_ms=182 rss_kb=1147960
-window=90 startup_ms=192 rss_kb=1295796
-window=100 startup_ms=252 rss_kb=1473948
-cpu_time_ms=190080 rss_delta_kb=1415428
+backend=gpu count=20
+window=2 startup_ms=74 rss_kb=82888
+window=10 startup_ms=58 rss_kb=122044
+window=20 startup_ms=116 rss_kb=221128
+cpu_time_ms=10860 rss_delta_kb=147308

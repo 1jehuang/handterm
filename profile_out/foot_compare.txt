@@ -1,0 +1,9 @@
+handterm vs foot comparison (2026-03-22T21:21:22-07:00)
+
+handterm gpu host        startup_ms=93     rss=78596 kB     threads=5 pid=738679
+handterm cpu host        startup_ms=32     rss=28964 kB     threads=3 pid=738807
+foot standalone          startup_ms=32     rss=27184 kB     threads=9 pid=738919
+foot server              startup_ms=n/a    rss=9660 kB      threads=1 pid=739033
+foot client              startup_ms=34     rss=27184 kB     threads=9 pid=739033
+
+results saved to /home/jeremy/handterm/profile_out/foot_compare.txt

@@ -122,7 +122,7 @@ With a shared-GPU host model, each additional window can plausibly approach **~1
 This phase is now split into two parallel architectural tracks:
 
 1. **single-process host** (now the preferred local low-RAM path)
-2. daemon/server mode (still useful for separation and protocol experimentation)
+2. daemon/server mode (still available for separation and protocol experimentation, but soft-deprecated for normal local use)
 
 ### 2a: Single-process host mode
 
@@ -147,6 +147,8 @@ Remaining work in this track:
 - keep the CPU host as a simpler/reference path, but treat GPU host as the primary route toward the theoretical limit
 
 ### 2b: Daemon/server mode
+
+Status: implemented, but soft-deprecated for normal local use. Keep it correct and documented, but treat the shared host path as the default architecture.
 
 Split into a server process (owns PTYs, terminals, fonts) and thin client processes (own Wayland surfaces, GPU rendering).
 
@@ -282,6 +284,7 @@ The newer conclusion is more nuanced:
 
 - **optimize the shared-GPU host first**, because it is already closest to the theoretical per-window floor
 - continue daemon work only where it still teaches us something useful or offers a separate UX/isolation advantage
+- keep daemon mode supported, but describe it as soft-deprecated so the default optimization story stays focused on the host path
 
 ### 3a: Workspace split
 
@@ -416,5 +419,5 @@ Foot can never close this gap because it is architecturally committed to CPU ren
 1. Stabilize rendering correctness and expand automated coverage first.
 2. Treat **shared-GPU host** as the primary low-RAM architecture for local multi-window use.
 3. Keep profiling/optimizing added-window startup time on the GPU host.
-4. Keep daemon mode implemented and correct, but no longer assume it is the winning local low-memory architecture.
+4. Keep daemon mode implemented and correct, but no longer assume it is the winning local low-memory architecture; treat it as a soft-deprecated secondary path.
 5. Only keep micro-optimizations that show real benchmark wins.

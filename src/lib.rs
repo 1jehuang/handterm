@@ -111,6 +111,12 @@ pub fn run_cli() -> Result<()> {
     run_with_cli(cli)
 }
 
+pub fn print_daemon_mode_deprecation(mode: &str) {
+    eprintln!(
+        "handterm: warning: {mode} uses the deprecated daemon/thin-client path.\nhandterm: the recommended local architecture is the default single-process host path."
+    );
+}
+
 #[cfg(feature = "cli")]
 pub fn run_with_cli(cli: Cli) -> Result<()> {
     let backend = resolve_backend(cli.backend)?;
@@ -143,8 +149,12 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
         Some(Command::OpenWindow { to, cols, rows }) => {
             open_window_in_existing_host(backend, to, cols, rows)
         }
-        Some(Command::ServerOnly { socket }) => daemon::run_server_only(socket, &config),
+        Some(Command::ServerOnly { socket }) => {
+            print_daemon_mode_deprecation("`server-only`");
+            daemon::run_server_only(socket, &config)
+        }
         Some(Command::ClientOnly { socket }) => {
+            print_daemon_mode_deprecation("`client-only`");
             let socket_path = socket.unwrap_or_else(daemon::default_server_socket_path);
             match backend {
                 Backend::Cpu => {

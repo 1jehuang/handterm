@@ -13,6 +13,7 @@ struct Args {
 }
 
 fn main() -> Result<()> {
+    handterm::print_daemon_mode_deprecation("`handterm-server`");
     let args = Args::parse();
     let config = AppConfig::load(args.config.as_deref())?;
     handterm::daemon::run_server_only(args.socket, &config)

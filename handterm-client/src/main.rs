@@ -22,6 +22,7 @@ struct Args {
 }
 
 fn main() -> Result<()> {
+    handterm::print_daemon_mode_deprecation("`handterm-client`");
     let args = Args::parse();
     let config = AppConfig::load(args.config.as_deref())?;
     let socket_path = args.socket.unwrap_or_else(default_server_socket_path);

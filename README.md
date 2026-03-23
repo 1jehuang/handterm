@@ -34,7 +34,7 @@ Handterm currently has three relevant local architectures:
 
 1. **CPU host** — one process, many CPU-rendered windows
 2. **GPU host** — one process, many GPU-rendered windows
-3. **daemon mode** — server plus separate thin clients (still implemented, but no longer the best local low-RAM path)
+3. **daemon mode** — server plus separate thin clients (**still implemented, but soft-deprecated for normal local use** and no longer the best local low-RAM path)
 
 ### Current measured memory
 
@@ -139,7 +139,7 @@ foot's high VSZ is from mmap'd font files and Wayland protocol buffers; most is 
 | **handterm GPU host** | **~61 MB** | **~1-2 MB** |
 | handterm daemon mode | ~4.4 MB server-only | current clients still too heavy |
 
-Handterm still has a daemon/thin-client implementation, but after profiling both approaches the most promising low-RAM local architecture is the **shared-GPU single-process host**. In current live measurements, the first GPU host window pays the full GPU/runtime cost once, and each additional window adds only about **1-2 MB RSS**.
+Handterm still has a daemon/thin-client implementation, but it is now **soft-deprecated** for normal local use. After profiling both approaches, the most promising low-RAM local architecture is the **shared-GPU single-process host**. In current live measurements, the first GPU host window pays the full GPU/runtime cost once, and each additional window adds only about **1-2 MB RSS**.
 
 Measured shared-GPU host scaling on this machine/session:
 
@@ -392,13 +392,15 @@ cargo run -- print-config
 
 See [OPTIMIZATION.md](OPTIMIZATION.md) for the full performance roadmap.
 
+**Architecture status:** the default and recommended path is the single-process host architecture. Daemon/thin-client mode remains available for compatibility and experimentation, but is soft-deprecated.
+
 | Phase | Goal | Status |
 |-------|------|--------|
 | CPU rendering | Functional terminal with softbuffer | ✅ |
 | GPU rendering | wgpu backend with instanced shaders | ✅ |
 | Single-process CPU host | Shared-process multi-window CPU runtime | ✅ |
 | Shared-GPU host | Low-overhead multi-window GPU runtime | ✅ |
-| Server/client mode | Daemon architecture like foot --server | ✅ implemented |
+| Server/client mode | Daemon architecture like foot --server | ✅ implemented, soft-deprecated |
 | Workspace split | Thin client/server/common Cargo packages | ✅ foundation implemented |
 | Startup/per-window polish | Push toward theoretical window-overhead floor | in progress |
 

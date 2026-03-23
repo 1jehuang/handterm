@@ -1070,15 +1070,15 @@ pub fn render_surface_state_profiled(
                     grapheme,
                     ci.cells,
                 )
-                    .map(|entry| GlyphAtlasEntry {
-                        x: entry.x,
-                        y: entry.y,
-                        width: entry.width,
-                        height: entry.height,
-                        left_pad: entry.left_pad,
-                        top_pad: entry.top_pad,
-                        is_color: entry.is_color,
-                    })
+                .map(|entry| GlyphAtlasEntry {
+                    x: entry.x,
+                    y: entry.y,
+                    width: entry.width,
+                    height: entry.height,
+                    left_pad: entry.left_pad,
+                    top_pad: entry.top_pad,
+                    is_color: entry.is_color,
+                })
             } else {
                 ensure_glyph_in_atlas(
                     &mut atlas_state,
@@ -1611,9 +1611,8 @@ mod tests {
     use crate::config::AppConfig;
     use crate::font::GlyphAtlas;
     use crate::gpu_frame::{
-        FLAG_COLOR_GLYPH, FLAG_CURSOR_BAR, FLAG_CURSOR_UNDERLINE, FLAG_CURLY_UL,
-        FLAG_DASHED_UL, FLAG_DOTTED_UL, FLAG_DOUBLE_UL, FLAG_HAS_GLYPH,
-        FLAG_STRIKETHROUGH, FLAG_UNDERLINE,
+        FLAG_COLOR_GLYPH, FLAG_CURLY_UL, FLAG_CURSOR_BAR, FLAG_CURSOR_UNDERLINE, FLAG_DASHED_UL,
+        FLAG_DOTTED_UL, FLAG_DOUBLE_UL, FLAG_HAS_GLYPH, FLAG_STRIKETHROUGH, FLAG_UNDERLINE,
     };
     use crate::render::OffscreenRenderer;
     use crate::terminal::Terminal;
@@ -1669,12 +1668,19 @@ mod tests {
     ) -> [f32; 4] {
         let mut color = instance.bg;
 
-        if instance.flags & FLAG_HAS_GLYPH != 0 && let Some(texture) = texture {
+        if instance.flags & FLAG_HAS_GLYPH != 0
+            && let Some(texture) = texture
+        {
             let glyph = sample_texture(texture, dx, dy, draw_w, draw_h);
             if instance.flags & FLAG_COLOR_GLYPH != 0 {
                 color = glyph;
             } else {
-                color = [instance.fg[0], instance.fg[1], instance.fg[2], glyph[3] * instance.fg[3]];
+                color = [
+                    instance.fg[0],
+                    instance.fg[1],
+                    instance.fg[2],
+                    glyph[3] * instance.fg[3],
+                ];
             }
         }
 
@@ -1844,7 +1850,9 @@ mod tests {
             |ci| {
                 let glyph = if let Some(grapheme) = ci.grapheme.as_deref() {
                     atlas.ensure_grapheme(grapheme);
-                    atlas.get_grapheme_glyph(grapheme).map(|glyph| (glyph, ci.cells))
+                    atlas
+                        .get_grapheme_glyph(grapheme)
+                        .map(|glyph| (glyph, ci.cells))
                 } else {
                     atlas.ensure_glyph(ci.ch);
                     atlas.get_glyph(ci.ch).map(|glyph| (glyph, ci.cells))
@@ -1910,9 +1918,27 @@ mod tests {
             },
         );
 
-        draw_cell_instances(&mut buffer, width, height, &batches.bg_instances, &glyph_textures);
-        draw_image_instances(&mut buffer, width, height, &image_instances, &image_textures);
-        draw_cell_instances(&mut buffer, width, height, &batches.fg_instances, &glyph_textures);
+        draw_cell_instances(
+            &mut buffer,
+            width,
+            height,
+            &batches.bg_instances,
+            &glyph_textures,
+        );
+        draw_image_instances(
+            &mut buffer,
+            width,
+            height,
+            &image_instances,
+            &image_textures,
+        );
+        draw_cell_instances(
+            &mut buffer,
+            width,
+            height,
+            &batches.fg_instances,
+            &glyph_textures,
+        );
         draw_cell_instances(
             &mut buffer,
             width,
@@ -1973,19 +1999,22 @@ mod tests {
                     |ci| {
                         let glyph = if let Some(grapheme) = ci.grapheme.as_deref() {
                             atlas.ensure_grapheme(grapheme);
-                            atlas.get_grapheme_glyph(grapheme).map(|glyph| (glyph, ci.cells))
+                            atlas
+                                .get_grapheme_glyph(grapheme)
+                                .map(|glyph| (glyph, ci.cells))
                         } else {
                             atlas.ensure_glyph(ci.ch);
                             atlas.get_glyph(ci.ch).map(|glyph| (glyph, ci.cells))
                         }?;
                         let is_color = glyph.0.format == GlyphFormat::Rgba;
-                        let (tile, tile_width, tile_height, left_pad, top_pad) = build_gpu_glyph_tile(
-                            &glyph.0,
-                            glyph.1,
-                            atlas.cell_width,
-                            atlas.cell_height,
-                            atlas.baseline,
-                        );
+                        let (tile, tile_width, tile_height, left_pad, top_pad) =
+                            build_gpu_glyph_tile(
+                                &glyph.0,
+                                glyph.1,
+                                atlas.cell_width,
+                                atlas.cell_height,
+                                atlas.baseline,
+                            );
                         let entry = GlyphAtlasEntry {
                             x: next_x,
                             y: 0,
@@ -2015,8 +2044,16 @@ mod tests {
                         && py >= instance.pos[1]
                         && py < instance.pos[1] + instance.size[1]
                 };
-                let bg_hits = batches.bg_instances.iter().filter(|i| pixel_in_instance(i)).count();
-                let fg_hits = batches.fg_instances.iter().filter(|i| pixel_in_instance(i)).count();
+                let bg_hits = batches
+                    .bg_instances
+                    .iter()
+                    .filter(|i| pixel_in_instance(i))
+                    .count();
+                let fg_hits = batches
+                    .fg_instances
+                    .iter()
+                    .filter(|i| pixel_in_instance(i))
+                    .count();
                 let overlay_hits = batches
                     .overlay_instances
                     .iter()
@@ -2282,17 +2319,22 @@ mod tests {
 
     #[test]
     fn gpu_framebuffer_matches_cpu_for_tui_help_image_transcript() {
-        assert_gpu_framebuffer_matches_cpu(32, 8, TUI_HELP_WITH_IMAGE_TRANSCRIPT, |terminal, idx| {
-            if idx == 2 {
-                assert_eq!(terminal.kitty_placements().len(), 1);
-            }
-            if idx == TUI_HELP_WITH_IMAGE_TRANSCRIPT.len() - 1 {
-                assert!(terminal.kitty_placements().is_empty());
-                assert!(
-                    terminal.kitty_image(5).is_some(),
-                    "image metadata should still exist even after the visible placement is cleared"
-                );
-            }
-        });
+        assert_gpu_framebuffer_matches_cpu(
+            32,
+            8,
+            TUI_HELP_WITH_IMAGE_TRANSCRIPT,
+            |terminal, idx| {
+                if idx == 2 {
+                    assert_eq!(terminal.kitty_placements().len(), 1);
+                }
+                if idx == TUI_HELP_WITH_IMAGE_TRANSCRIPT.len() - 1 {
+                    assert!(terminal.kitty_placements().is_empty());
+                    assert!(
+                        terminal.kitty_image(5).is_some(),
+                        "image metadata should still exist even after the visible placement is cleared"
+                    );
+                }
+            },
+        );
     }
 }

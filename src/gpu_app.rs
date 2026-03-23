@@ -8,8 +8,8 @@ use crate::frontend::{
 };
 use crate::gpu_runtime::{
     GpuSurfaceState, SharedGpuContext, create_shared_gpu_context,
-    create_surface_state_with_shared_profiled, render_surface_state, render_surface_state_profiled,
-    resize_surface_state,
+    create_surface_state_with_shared_profiled_with_defaults, render_surface_state,
+    render_surface_state_profiled, resize_surface_state,
 };
 use crate::ipc::{IpcAction, IpcServer, Request, Response};
 use crate::pty::PtyChild;
@@ -212,12 +212,18 @@ impl GpuApp {
         let pty_ms = before_pty.elapsed();
         let pty_spawned_at = Instant::now();
         let before_surface = Instant::now();
-        let (renderer, surface_profile) = create_surface_state_with_shared_profiled(
+        let preferred_surface_defaults = self
+            .windows
+            .values()
+            .next()
+            .map(|state| state.renderer.preferred_surface_defaults());
+        let (renderer, surface_profile) = create_surface_state_with_shared_profiled_with_defaults(
             self.shared.clone(),
             event_loop,
             &self.config,
             "handterm [gpu host]",
             atlas,
+            preferred_surface_defaults,
         )
         .expect("gpu surface state should initialize");
         let surface_total_ms = before_surface.elapsed();
@@ -278,7 +284,7 @@ impl GpuApp {
              \x20 total={:.2}ms dpi={:.2}ms atlas={:.2}ms terminal={:.2}ms pty={:.2}ms watcher={:.2}ms\n\
              \x20 surface_total={:.2}ms\n\
              \x20   window_create={:.2}ms ime={:.2}ms wgpu_surface={:.2}ms\n\
-             \x20   default_config={:.2}ms caps={:.2}ms configure={:.2}ms\n\
+             \x20   default_config={:.2}ms caps={:.2}ms configure={:.2}ms defaults_reused={}\n\
              \x20   atlas_tex={:.2}ms uniform_buf={:.2}ms inst_bufs={:.2}ms\n\
              \x20   bind_group={:.2}ms pipeline={:.2}ms (cache_hit={})",
             start.elapsed().as_secs_f64() * 1000.0,
@@ -294,6 +300,7 @@ impl GpuApp {
             sp.default_config.as_secs_f64() * 1000.0,
             sp.capabilities.as_secs_f64() * 1000.0,
             sp.configure.as_secs_f64() * 1000.0,
+            sp.reused_surface_defaults,
             sp.atlas_texture.as_secs_f64() * 1000.0,
             sp.uniform_buffer.as_secs_f64() * 1000.0,
             sp.instance_buffers.as_secs_f64() * 1000.0,

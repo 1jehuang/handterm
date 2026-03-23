@@ -97,6 +97,13 @@ pub struct GpuSurfaceState {
     pub last_presented_signature: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct GpuSurfaceDefaults {
+    pub format: wgpu::TextureFormat,
+    pub present_mode: wgpu::PresentMode,
+    pub alpha_mode: wgpu::CompositeAlphaMode,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GpuSurfaceCreateProfile {
     pub window_create: Duration,
@@ -112,6 +119,7 @@ pub struct GpuSurfaceCreateProfile {
     pub pipeline_lookup: Duration,
     pub total: Duration,
     pub pipeline_cache_hit: bool,
+    pub reused_surface_defaults: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -134,6 +142,14 @@ impl GpuSurfaceState {
             self.surface_config.width,
             self.surface_config.height
         )
+    }
+
+    pub fn preferred_surface_defaults(&self) -> GpuSurfaceDefaults {
+        GpuSurfaceDefaults {
+            format: self.surface_config.format,
+            present_mode: self.surface_config.present_mode,
+            alpha_mode: self.surface_config.alpha_mode,
+        }
     }
 }
 
@@ -642,8 +658,9 @@ pub fn create_surface_state_with_shared(
     title: &str,
     atlas: &GlyphAtlas,
 ) -> Result<GpuSurfaceState> {
-    let (state, _) =
-        create_surface_state_with_shared_profiled(shared, event_loop, config, title, atlas)?;
+    let (state, _) = create_surface_state_with_shared_profiled_with_defaults(
+        shared, event_loop, config, title, atlas, None,
+    )?;
     Ok(state)
 }
 
@@ -653,6 +670,19 @@ pub fn create_surface_state_with_shared_profiled(
     config: &AppConfig,
     title: &str,
     atlas: &GlyphAtlas,
+) -> Result<(GpuSurfaceState, GpuSurfaceCreateProfile)> {
+    create_surface_state_with_shared_profiled_with_defaults(
+        shared, event_loop, config, title, atlas, None,
+    )
+}
+
+pub fn create_surface_state_with_shared_profiled_with_defaults(
+    shared: Arc<SharedGpuContext>,
+    event_loop: &ActiveEventLoop,
+    config: &AppConfig,
+    title: &str,
+    atlas: &GlyphAtlas,
+    preferred_defaults: Option<GpuSurfaceDefaults>,
 ) -> Result<(GpuSurfaceState, GpuSurfaceCreateProfile)> {
     let total_start = Instant::now();
     let step_start = Instant::now();
@@ -677,29 +707,49 @@ pub fn create_surface_state_with_shared_profiled(
 
     let size = window.inner_size();
 
-    let step_start = Instant::now();
-    let surface_caps = surface.get_capabilities(&shared.adapter);
-    let capabilities = step_start.elapsed();
-    anyhow::ensure!(
-        !surface_caps.formats.is_empty(),
-        "surface should be compatible"
-    );
+    let (surface_config, capabilities, default_config, reused_surface_defaults) =
+        if let Some(defaults) = preferred_defaults {
+            (
+                wgpu::SurfaceConfiguration {
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    format: defaults.format,
+                    width: size.width.max(1),
+                    height: size.height.max(1),
+                    present_mode: defaults.present_mode,
+                    desired_maximum_frame_latency: 1,
+                    alpha_mode: defaults.alpha_mode,
+                    view_formats: vec![],
+                },
+                Duration::ZERO,
+                Duration::ZERO,
+                true,
+            )
+        } else {
+            let step_start = Instant::now();
+            let surface_caps = surface.get_capabilities(&shared.adapter);
+            let capabilities = step_start.elapsed();
+            anyhow::ensure!(
+                !surface_caps.formats.is_empty(),
+                "surface should be compatible"
+            );
 
-    let step_start = Instant::now();
-    let surface_config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format: select_surface_format(&surface_caps, surface_caps.formats[0]),
-        width: size.width.max(1),
-        height: size.height.max(1),
-        present_mode: select_present_mode(&surface_caps),
-        desired_maximum_frame_latency: 1,
-        alpha_mode: select_alpha_mode(
-            &surface_caps,
-            transparency_requested(config.style.background_opacity),
-        ),
-        view_formats: vec![],
-    };
-    let default_config = step_start.elapsed();
+            let step_start = Instant::now();
+            let surface_config = wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: select_surface_format(&surface_caps, surface_caps.formats[0]),
+                width: size.width.max(1),
+                height: size.height.max(1),
+                present_mode: select_present_mode(&surface_caps),
+                desired_maximum_frame_latency: 1,
+                alpha_mode: select_alpha_mode(
+                    &surface_caps,
+                    transparency_requested(config.style.background_opacity),
+                ),
+                view_formats: vec![],
+            };
+            let default_config = step_start.elapsed();
+            (surface_config, capabilities, default_config, false)
+        };
 
     let step_start = Instant::now();
     surface.configure(&shared.device, &surface_config);
@@ -814,6 +864,7 @@ pub fn create_surface_state_with_shared_profiled(
             pipeline_lookup,
             total: total_start.elapsed(),
             pipeline_cache_hit,
+            reused_surface_defaults,
         },
     ))
 }

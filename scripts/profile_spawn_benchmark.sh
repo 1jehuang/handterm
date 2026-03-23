@@ -2,30 +2,97 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$ROOT/target/release/handterm"
+BIN="${HANDTERM_BIN:-$ROOT/target/release/handterm}"
 OUT_DIR="${HANDTERM_PROFILE_OUT:-$ROOT/profile_out}"
 mkdir -p "$OUT_DIR"
 OUT_FILE="$OUT_DIR/spawn_benchmark.txt"
 COUNT="${1:-100}"
 BACKEND="${HANDTERM_SPAWN_BACKEND:-gpu}"
+WAYLAND_DISPLAY="${WAYLAND_DISPLAY:?WAYLAND_DISPLAY must be set}"
+XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR must be set}"
 
 cargo build -q --release --workspace --manifest-path "$ROOT/Cargo.toml"
 
-HOST_LOG=/tmp/handterm-host-bench.log
-"$BIN" --standalone --backend "$BACKEND" >"$HOST_LOG" 2>&1 &
-HOST_PID=$!
+TMPDIR="$(mktemp -d /tmp/handterm-spawn-benchmark.XXXXXX)"
+ln -s "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" "$TMPDIR/$WAYLAND_DISPLAY"
+HOST_LOG="$TMPDIR/host.log"
+
+capture_windows() {
+  local out_file="$1"
+  niri msg windows | awk '
+    /^Window ID / {
+      id=$3
+      sub(/:/, "", id)
+      pid=""
+      app=""
+      title=""
+      next
+    }
+    /^  Title: / {
+      title=$0
+      sub(/^  Title: "/, "", title)
+      sub(/"$/, "", title)
+      next
+    }
+    /^  App ID: / {
+      app=$0
+      sub(/^  App ID: "/, "", app)
+      sub(/"$/, "", app)
+      next
+    }
+    /^  PID: / {
+      pid=$2
+      if (id != "" && pid != "") {
+        printf "%s|%s|%s|%s\n", id, pid, app, title
+      }
+    }
+  ' > "$out_file"
+}
+
+find_new_window_pid() {
+  local before_file="$1"
+  local after_file="$2"
+  local expected_app_id="$3"
+  awk -F'|' -v app="$expected_app_id" '
+    NR==FNR { seen[$1]=1; next }
+    !seen[$1] && (app == "" || $3 == app) {
+      print $2
+      exit
+    }
+  ' "$before_file" "$after_file"
+}
+
+before_windows=$(mktemp)
+after_windows=$(mktemp)
+capture_windows "$before_windows"
+env_host() {
+  env XDG_RUNTIME_DIR="$TMPDIR" WAYLAND_DISPLAY="$WAYLAND_DISPLAY" "$@"
+}
+
+env_host "$BIN" --backend "$BACKEND" >"$HOST_LOG" 2>&1 &
+LAUNCH_PID=$!
+HOST_PID=""
 cleanup(){
-  kill "$HOST_PID" 2>/dev/null || true
-  wait "$HOST_PID" 2>/dev/null || true
+  kill "$LAUNCH_PID" 2>/dev/null || true
+  wait "$LAUNCH_PID" 2>/dev/null || true
+  rm -f "$before_windows" "$after_windows"
+  rm -rf "$TMPDIR"
 }
 trap cleanup EXIT
 
 for _ in $(seq 1 400); do
-  if "$BIN" --backend "$BACKEND" @ list-windows >/dev/null 2>&1; then
-    break
+  if env_host "$BIN" --backend "$BACKEND" @ list-windows >/dev/null 2>&1; then
+    HOST_PID=$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' "$HOST_LOG" | head -n1)
+    if [[ -n "$HOST_PID" ]] && [[ -r "/proc/$HOST_PID/status" ]]; then
+      break
+    fi
   fi
   sleep 0.01
 done
+
+if [[ -z "$HOST_PID" ]]; then
+  HOST_PID="$LAUNCH_PID"
+fi
 
 read_cpu_ticks() {
   awk '{print $14 + $15}' "/proc/$HOST_PID/stat"
@@ -39,10 +106,9 @@ printf 'backend=%s count=%s\n' "$BACKEND" "$COUNT" | tee -a "$OUT_FILE"
 
 for i in $(seq 2 "$COUNT"); do
   START_NS=$(date +%s%N)
-  "$BIN" --backend "$BACKEND" open-window >/dev/null 2>&1
+  env_host "$BIN" --backend "$BACKEND" open-window >/dev/null 2>&1
   for _ in $(seq 1 400); do
-    COUNT_NOW=$("$BIN" --backend "$BACKEND" @ list-windows 2>/dev/null | python -c "import sys,json; \
-data=json.load(sys.stdin); print((data.get('data') or {}).get('count', 0))" 2>/dev/null || echo 0)
+    COUNT_NOW=$(env_host "$BIN" --backend "$BACKEND" @ list-windows 2>/dev/null | python -c "import sys,json; data=json.load(sys.stdin); print((data.get('data') or {}).get('count', 0))" 2>/dev/null || echo 0)
     if [[ "$COUNT_NOW" -ge "$i" ]]; then
       break
     fi

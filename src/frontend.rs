@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use winit::event_loop::EventLoopProxy;
+use winit::keyboard::{Key, NamedKey};
 
 const IME_KEY_DEDUPE_WINDOW: Duration = Duration::from_millis(50);
 
@@ -390,6 +391,16 @@ pub fn scroll_to_bytes(up: bool, app_cursor: bool) -> Vec<u8> {
         (false, true) => b"\x1bOB".to_vec(),
         (true, false) => b"\x1b[A".to_vec(),
         (false, false) => b"\x1b[B".to_vec(),
+    }
+}
+
+pub fn named_key_ime_dedupe_text(key: &Key) -> Option<&'static str> {
+    match key {
+        Key::Named(NamedKey::Space) => Some(" "),
+        Key::Named(NamedKey::Tab) => Some("\t"),
+        Key::Named(NamedKey::Enter) => Some("\r"),
+        Key::Named(NamedKey::Backspace) => Some("\u{8}"),
+        _ => None,
     }
 }
 
@@ -839,6 +850,46 @@ mod tests {
             &mut recent,
             " ",
             now + Duration::from_millis(200),
+        ));
+        assert_eq!(recent, None);
+    }
+
+    #[test]
+    fn named_backspace_reports_canonical_ime_dedupe_text() {
+        assert_eq!(
+            named_key_ime_dedupe_text(&Key::Named(NamedKey::Backspace)),
+            Some("\u{8}")
+        );
+    }
+
+    #[test]
+    fn ime_commit_dedupes_matching_named_backspace_key_event() {
+        let mut pending = Some("\u{8}".to_string());
+        assert!(should_skip_duplicate_ime_input(
+            &mut pending,
+            KeyEventKind::Press,
+            named_key_ime_dedupe_text(&Key::Named(NamedKey::Backspace)),
+            Some(&[0x7f]),
+        ));
+        assert_eq!(pending, None);
+    }
+
+    #[test]
+    fn key_event_dedupes_matching_followup_backspace_ime_commit() {
+        let now = Instant::now();
+        let mut recent = None;
+        remember_text_key_event(
+            &mut recent,
+            KeyEventKind::Press,
+            named_key_ime_dedupe_text(&Key::Named(NamedKey::Backspace)),
+            Some(&[0x7f]),
+            now,
+        );
+
+        assert!(should_skip_ime_commit_after_key_event(
+            &mut recent,
+            "\u{8}",
+            now + Duration::from_millis(5),
         ));
         assert_eq!(recent, None);
     }

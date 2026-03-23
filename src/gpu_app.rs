@@ -620,6 +620,11 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                             (ElementState::Released, _) => KeyEventKind::Release,
                         };
 
+                        let ime_dedupe_text = event
+                            .text
+                            .as_deref()
+                            .or_else(|| crate::frontend::named_key_ime_dedupe_text(&event.logical_key));
+
                         if let Some(bytes) = key_to_bytes(
                             &event.logical_key,
                             event.text.as_deref(),
@@ -632,7 +637,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                             if should_skip_duplicate_ime_input(
                                 &mut state.pending_ime_commit,
                                 event_kind,
-                                event.text.as_deref(),
+                                ime_dedupe_text,
                                 Some(&bytes),
                             ) {
                                 return;
@@ -640,7 +645,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                             remember_text_key_event(
                                 &mut state.recent_text_key_event,
                                 event_kind,
-                                event.text.as_deref(),
+                                ime_dedupe_text,
                                 Some(&bytes),
                                 Instant::now(),
                             );
@@ -671,14 +676,14 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                             remember_text_key_event(
                                 &mut state.recent_text_key_event,
                                 event_kind,
-                                event.text.as_deref(),
+                                ime_dedupe_text,
                                 None,
                                 Instant::now(),
                             );
                             let _ = should_skip_duplicate_ime_input(
                                 &mut state.pending_ime_commit,
                                 event_kind,
-                                event.text.as_deref(),
+                                ime_dedupe_text,
                                 None,
                             );
                         }

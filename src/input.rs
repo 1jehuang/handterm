@@ -33,12 +33,38 @@ pub fn effective_modifiers_for_key_event(
     event_kind: KeyEventKind,
 ) -> ModifiersState {
     let mut effective = modifiers_with_extra(modifiers, hyper, meta);
-    if !matches!(event_kind, KeyEventKind::Repeat) {
-        match key {
-            Key::Named(NamedKey::Hyper) => effective = modifiers_with_extra(modifiers, false, meta),
-            Key::Named(NamedKey::Meta) => effective = modifiers_with_extra(modifiers, hyper, false),
-            _ => {}
+    match (key, event_kind) {
+        (Key::Named(NamedKey::Shift), KeyEventKind::Press | KeyEventKind::Repeat) => {
+            effective.set(ModifiersState::SHIFT, true);
         }
+        (Key::Named(NamedKey::Shift), KeyEventKind::Release) => {
+            effective.set(ModifiersState::SHIFT, false);
+        }
+        (Key::Named(NamedKey::Control), KeyEventKind::Press | KeyEventKind::Repeat) => {
+            effective.set(ModifiersState::CONTROL, true);
+        }
+        (Key::Named(NamedKey::Control), KeyEventKind::Release) => {
+            effective.set(ModifiersState::CONTROL, false);
+        }
+        (Key::Named(NamedKey::Alt), KeyEventKind::Press | KeyEventKind::Repeat) => {
+            effective.set(ModifiersState::ALT, true);
+        }
+        (Key::Named(NamedKey::Alt), KeyEventKind::Release) => {
+            effective.set(ModifiersState::ALT, false);
+        }
+        (Key::Named(NamedKey::Super), KeyEventKind::Press | KeyEventKind::Repeat) => {
+            effective.set(ModifiersState::SUPER, true);
+        }
+        (Key::Named(NamedKey::Super), KeyEventKind::Release) => {
+            effective.set(ModifiersState::SUPER, false);
+        }
+        (Key::Named(NamedKey::Hyper), KeyEventKind::Press | KeyEventKind::Release) => {
+            effective = modifiers_with_extra(modifiers, false, meta);
+        }
+        (Key::Named(NamedKey::Meta), KeyEventKind::Press | KeyEventKind::Release) => {
+            effective = modifiers_with_extra(modifiers, hyper, false);
+        }
+        _ => {}
     }
     effective
 }
@@ -273,6 +299,10 @@ fn encode_kitty_key(
     let report_text = report_all && (kitty_flags & KITTY_KBD_REPORT_TEXT != 0);
     let disambiguate = kitty_flags & KITTY_KBD_DISAMBIGUATE != 0;
     let produces_text = text.filter(|s| !s.is_empty()).is_some();
+
+    if !report_events && matches!(event_kind, KeyEventKind::Release) {
+        return None;
+    }
 
     if let Some(code) = kitty_keypad_code(physical_key, produces_text)
         && (report_all || (disambiguate && !produces_text))
@@ -870,12 +900,36 @@ mod tests {
             None,
             Some(&PhysicalKey::Code(KeyCode::ControlLeft)),
             false,
-            ModifiersState::default(),
+            effective_modifiers_for_key_event(
+                ModifiersState::default(),
+                false,
+                false,
+                &Key::Named(NamedKey::Control),
+                KeyEventKind::Press,
+            ),
             KITTY_KBD_REPORT_ALL,
             KeyEventKind::Press,
         )
         .unwrap();
-        assert_eq!(bytes, b"\x1b[57442u");
+        assert_eq!(bytes, b"\x1b[57442;5u");
+
+        let shift = key_to_bytes(
+            &Key::Named(NamedKey::Shift),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::ShiftLeft)),
+            false,
+            effective_modifiers_for_key_event(
+                ModifiersState::default(),
+                false,
+                false,
+                &Key::Named(NamedKey::Shift),
+                KeyEventKind::Press,
+            ),
+            KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(shift, b"\x1b[57441;2u");
 
         let hyper = key_to_bytes(
             &Key::Named(NamedKey::Hyper),
@@ -980,6 +1034,53 @@ mod tests {
         )
         .unwrap();
         assert_eq!(meta, b"\x1b[57446u");
+    }
+
+    #[test]
+    fn kitty_report_all_without_event_reporting_suppresses_release_only() {
+        let release = key_to_bytes(
+            &Key::Named(NamedKey::ArrowUp),
+            None,
+            None,
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Release,
+        );
+        assert_eq!(release, None);
+
+        let repeat = key_to_bytes(
+            &Key::Character("x".into()),
+            Some("x"),
+            Some(&PhysicalKey::Code(KeyCode::KeyX)),
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Repeat,
+        )
+        .unwrap();
+        assert_eq!(repeat, b"\x1b[120u");
+    }
+
+    #[test]
+    fn kitty_report_events_modifier_release_clears_own_modifier_bit() {
+        let release = key_to_bytes(
+            &Key::Named(NamedKey::Control),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::ControlLeft)),
+            false,
+            effective_modifiers_for_key_event(
+                ModifiersState::CONTROL,
+                false,
+                false,
+                &Key::Named(NamedKey::Control),
+                KeyEventKind::Release,
+            ),
+            KITTY_KBD_REPORT_ALL | KITTY_KBD_REPORT_EVENTS,
+            KeyEventKind::Release,
+        )
+        .unwrap();
+        assert_eq!(release, b"\x1b[57442;1:3u");
     }
 
     #[test]

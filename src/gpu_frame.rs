@@ -417,11 +417,14 @@ fn rgb_to_f32_alpha(rgb: u32, alpha: f32) -> [f32; 4] {
 mod tests {
     use super::*;
     use crate::config::AppConfig;
+    use crate::font::GlyphAtlas;
     use crate::grid::{ATTR_STRIKETHROUGH, ATTR_UNDERLINE};
+    use crate::render::OffscreenRenderer;
     use crate::terminal::Terminal;
     use crate::visual::{resolve_cell_colors, resolve_underline_color};
     use crate::workloads::{
-        FISH_STARTUP_TRANSCRIPT, STARSHIP_PROMPT_TRANSCRIPT, TUI_HELP_WITH_IMAGE_TRANSCRIPT,
+        EMOJI_AND_SHADE_TRANSCRIPT, FISH_STARTUP_TRANSCRIPT, STARSHIP_PROMPT_TRANSCRIPT,
+        TUI_HELP_WITH_IMAGE_TRANSCRIPT,
     };
 
     fn test_style() -> FrameBatchStyle {
@@ -595,6 +598,204 @@ mod tests {
                     placement.rows.max(1) as f32 * 16.0
                 ]
             );
+        }
+    }
+
+    fn new_atlas(config: &AppConfig) -> GlyphAtlas {
+        GlyphAtlas::new(config.style.font_size)
+            .expect("should load a monospace font for GPU parity tests")
+    }
+
+    fn cpu_cell_is_visibly_non_default(
+        renderer: &OffscreenRenderer,
+        col: usize,
+        row: usize,
+        cell_w: usize,
+        cell_h: usize,
+        base_bg: u32,
+    ) -> bool {
+        let px_x = col * cell_w;
+        let px_y = row * cell_h;
+        let x_end = (px_x + cell_w).min(renderer.width);
+        let y_end = (px_y + cell_h).min(renderer.height);
+
+        for y in px_y..y_end {
+            let row_start = y * renderer.width;
+            for x in px_x..x_end {
+                if renderer.pixels[row_start + x] != base_bg {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn mark_cells_for_pixel_rect(
+        visible: &mut [bool],
+        grid_size: (usize, usize),
+        rect: (i32, i32, usize, usize),
+        cell_size: (usize, usize),
+    ) {
+        let (cols, rows) = grid_size;
+        let (left, top, width, height) = rect;
+        let (cell_w, cell_h) = cell_size;
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        let right = left.saturating_add(width as i32);
+        let bottom = top.saturating_add(height as i32);
+        if right <= 0 || bottom <= 0 {
+            return;
+        }
+
+        let start_col = (left.max(0) as usize) / cell_w.max(1);
+        let start_row = (top.max(0) as usize) / cell_h.max(1);
+        let end_col = ((right.max(0) as usize).saturating_sub(1) / cell_w.max(1) + 1).min(cols);
+        let end_row = ((bottom.max(0) as usize).saturating_sub(1) / cell_h.max(1) + 1).min(rows);
+
+        for row in start_row.min(rows)..end_row {
+            let row_offset = row * cols;
+            for col in start_col.min(cols)..end_col {
+                visible[row_offset + col] = true;
+            }
+        }
+    }
+
+    fn assert_gpu_visible_cells_match_cpu_framebuffer(terminal: &mut Terminal) {
+        let config = AppConfig::default();
+        let mut atlas = new_atlas(&config);
+        let mut renderer = OffscreenRenderer::new(terminal.cols, terminal.rows, &atlas);
+        renderer.render(terminal, &mut atlas, &config);
+
+        let style = FrameBatchStyle {
+            base_fg: config.style.foreground.as_u32_rgb(),
+            base_bg: config.style.background.as_u32_rgb(),
+            base_fg_f: rgb_to_f32(config.style.foreground.as_u32_rgb()),
+            background_alpha: 1.0,
+            cell_w: atlas.cell_width as f32,
+            cell_h: atlas.cell_height as f32,
+        };
+
+        let mut cell_infos = Vec::new();
+        fill_cell_infos(terminal, &mut cell_infos);
+
+        let cols = terminal.cols as usize;
+        let rows = terminal.rows as usize;
+        let mut gpu_visible = vec![false; cols * rows];
+
+        for ci in &cell_infos {
+            let colors = resolve_cell_colors(
+                &ci.cell,
+                style.base_fg,
+                style.base_bg,
+                ci.is_cursor_block,
+                ci.selected,
+            );
+            if colors.bg != style.base_bg {
+                mark_cells_for_pixel_rect(
+                    &mut gpu_visible,
+                    (cols, rows),
+                    (
+                        (ci.col * atlas.cell_width) as i32,
+                        (ci.row * atlas.cell_height) as i32,
+                        atlas.cell_width * ci.cells.max(1),
+                        atlas.cell_height,
+                    ),
+                    (atlas.cell_width, atlas.cell_height),
+                );
+            }
+
+            if ci.ch > 0x20 || ci.grapheme.is_some() {
+                let glyph = if let Some(grapheme) = ci.grapheme.as_deref() {
+                    atlas.ensure_grapheme(grapheme);
+                    atlas.get_grapheme_glyph(grapheme)
+                } else {
+                    atlas.ensure_glyph(ci.ch);
+                    atlas.get_glyph(ci.ch)
+                };
+
+                if let Some(glyph) = glyph {
+                    let px_x = ci.col * atlas.cell_width;
+                    let px_y = ci.row * atlas.cell_height;
+                    let origin_y = px_y as i32 + (atlas.cell_height as i32 - atlas.baseline as i32);
+                    let glyph_top = origin_y - glyph.bearing_y;
+                    let glyph_left = px_x as i32 + glyph.bearing_x;
+                    mark_cells_for_pixel_rect(
+                        &mut gpu_visible,
+                        (cols, rows),
+                        (glyph_left, glyph_top, glyph.width, glyph.height),
+                        (atlas.cell_width, atlas.cell_height),
+                    );
+                }
+            }
+
+            if ci.cell.attrs & (ATTR_UNDERLINE | ATTR_STRIKETHROUGH) != 0 {
+                mark_cells_for_pixel_rect(
+                    &mut gpu_visible,
+                    (cols, rows),
+                    (
+                        (ci.col * atlas.cell_width) as i32,
+                        (ci.row * atlas.cell_height) as i32,
+                        atlas.cell_width * ci.cells.max(1),
+                        atlas.cell_height,
+                    ),
+                    (atlas.cell_width, atlas.cell_height),
+                );
+            }
+
+            if ci.cursor_style.is_some() {
+                mark_cells_for_pixel_rect(
+                    &mut gpu_visible,
+                    (cols, rows),
+                    (
+                        (ci.col * atlas.cell_width) as i32,
+                        (ci.row * atlas.cell_height) as i32,
+                        atlas.cell_width,
+                        atlas.cell_height,
+                    ),
+                    (atlas.cell_width, atlas.cell_height),
+                );
+            }
+        }
+
+        for placement in terminal.kitty_placements() {
+            mark_cells_for_pixel_rect(
+                &mut gpu_visible,
+                (cols, rows),
+                (
+                    (placement.col * atlas.cell_width) as i32,
+                    (placement.row * atlas.cell_height) as i32,
+                    placement.cols.max(1) * atlas.cell_width,
+                    placement.rows.max(1) * atlas.cell_height,
+                ),
+                (atlas.cell_width, atlas.cell_height),
+            );
+        }
+
+        for row in 0..terminal.rows as usize {
+            for col in 0..terminal.cols as usize {
+                let gpu_visible = gpu_visible[row * cols + col];
+
+                let cpu_visible = cpu_cell_is_visibly_non_default(
+                    &renderer,
+                    col,
+                    row,
+                    atlas.cell_width,
+                    atlas.cell_height,
+                    style.base_bg,
+                );
+
+                assert_eq!(
+                    gpu_visible,
+                    cpu_visible,
+                    "GPU/CPU visible-cell parity diverged at row={} col={} char={:?} grapheme={:?}",
+                    row,
+                    col,
+                    terminal.grid.cell_char(row, col),
+                    terminal.grid.cell_grapheme_at(row, col),
+                );
+            }
         }
     }
 
@@ -1056,6 +1257,39 @@ mod tests {
             terminal.process(chunk);
             assert_batches_match_terminal_visuals(&terminal);
             assert_images_match_terminal_placements(&terminal);
+        }
+    }
+
+    #[test]
+    fn emoji_and_shade_transcript_batches_match_visual_expectations() {
+        let mut terminal = Terminal::new(16, 4);
+
+        for chunk in EMOJI_AND_SHADE_TRANSCRIPT {
+            terminal.process(chunk);
+            assert_batches_match_terminal_visuals(&terminal);
+        }
+
+        let plan = build_frame_plan(&terminal);
+        assert!(
+            plan.cell_infos
+                .iter()
+                .any(|ci| ci.grapheme.as_deref() == Some("❤️"))
+        );
+        assert!(
+            plan.cell_infos
+                .iter()
+                .any(|ci| ci.grapheme.as_deref() == Some("👨‍💻"))
+        );
+        assert!(plan.cell_infos.iter().any(|ci| ci.ch == '░' as u32));
+    }
+
+    #[test]
+    fn emoji_and_shade_transcript_gpu_visible_cells_match_cpu_render() {
+        let mut terminal = Terminal::new(16, 4);
+
+        for chunk in EMOJI_AND_SHADE_TRANSCRIPT {
+            terminal.process(chunk);
+            assert_gpu_visible_cells_match_cpu_framebuffer(&mut terminal);
         }
     }
 }

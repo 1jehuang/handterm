@@ -601,6 +601,19 @@ mod tests {
         }
     }
 
+    fn image_instances_for_terminal(terminal: &Terminal) -> Vec<ImageInstance> {
+        build_image_instances(terminal.kitty_placements(), 8.0, 16.0, |placement| {
+            terminal
+                .kitty_image(placement.image_id)
+                .map(|image| AtlasImageRect {
+                    x: 0,
+                    y: 0,
+                    width: image.width,
+                    height: image.height,
+                })
+        })
+    }
+
     fn new_atlas(config: &AppConfig) -> GlyphAtlas {
         GlyphAtlas::new(config.style.font_size)
             .expect("should load a monospace font for GPU parity tests")
@@ -1258,6 +1271,71 @@ mod tests {
             assert_batches_match_terminal_visuals(&terminal);
             assert_images_match_terminal_placements(&terminal);
         }
+    }
+
+    #[test]
+    fn kitty_image_clear_screen_drops_gpu_image_instances() {
+        let mut terminal = Terminal::new(8, 4);
+        terminal.process(b"\x1b_Ga=T,i=7,f=32,s=1,v=1,c=2,r=1;/wAA/w==\x1b\\");
+
+        let plan = build_frame_plan(&terminal);
+        assert_eq!(plan.image_placements.len(), 1);
+        let images = image_instances_for_terminal(&terminal);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].pos, [0.0, 0.0]);
+        assert_eq!(images[0].size, [16.0, 16.0]);
+
+        terminal.process(b"\x1b[2J");
+        let plan = build_frame_plan(&terminal);
+        assert!(plan.image_placements.is_empty());
+        assert!(image_instances_for_terminal(&terminal).is_empty());
+    }
+
+    #[test]
+    fn kitty_image_alt_screen_hides_and_restores_gpu_instances() {
+        let mut terminal = Terminal::new(8, 4);
+        terminal.process(b"\x1b_Ga=T,i=7,f=32,s=1,v=1,c=1,r=1;/wAA/w==\x1b\\");
+
+        assert_eq!(build_frame_plan(&terminal).image_placements.len(), 1);
+        assert_eq!(image_instances_for_terminal(&terminal).len(), 1);
+
+        terminal.process(b"\x1b[?1049h");
+        assert!(build_frame_plan(&terminal).image_placements.is_empty());
+        assert!(image_instances_for_terminal(&terminal).is_empty());
+
+        terminal.process(b"\x1b[?1049l");
+        let plan = build_frame_plan(&terminal);
+        assert_eq!(plan.image_placements.len(), 1);
+        let images = image_instances_for_terminal(&terminal);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].pos, [0.0, 0.0]);
+        assert_eq!(images[0].size, [8.0, 16.0]);
+    }
+
+    #[test]
+    fn kitty_image_delete_drops_gpu_instances_and_matches_cpu() {
+        let mut terminal = Terminal::new(8, 4);
+        terminal.process(b"\x1b_Ga=T,i=7,f=32,s=1,v=1,c=1,r=1;/wAA/w==\x1b\\");
+        assert_gpu_visible_cells_match_cpu_framebuffer(&mut terminal);
+        assert_eq!(image_instances_for_terminal(&terminal).len(), 1);
+
+        terminal.process(b"\x1b_Ga=d,i=7\x1b\\");
+        assert!(build_frame_plan(&terminal).image_placements.is_empty());
+        assert!(image_instances_for_terminal(&terminal).is_empty());
+        assert_gpu_visible_cells_match_cpu_framebuffer(&mut terminal);
+    }
+
+    #[test]
+    fn kitty_image_alt_screen_visibility_matches_cpu_render() {
+        let mut terminal = Terminal::new(8, 4);
+        terminal.process(b"\x1b_Ga=T,i=7,f=32,s=1,v=1,c=1,r=1;/wAA/w==\x1b\\");
+        assert_gpu_visible_cells_match_cpu_framebuffer(&mut terminal);
+
+        terminal.process(b"\x1b[?1049h");
+        assert_gpu_visible_cells_match_cpu_framebuffer(&mut terminal);
+
+        terminal.process(b"\x1b[?1049l");
+        assert_gpu_visible_cells_match_cpu_framebuffer(&mut terminal);
     }
 
     #[test]

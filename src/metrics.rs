@@ -372,6 +372,7 @@ fn bench_gpu_frame_pipeline(cols: u16, rows: u16) -> (f64, f64, f64, f64, f64, f
                     width: (ci.cells * 8) as u32,
                     height: 16,
                     left_pad: 0,
+                    top_pad: 0,
                     is_color: ci.ch > 0xffff,
                 })
             },
@@ -507,6 +508,7 @@ fn bench_gpu_transcript_replay() -> (f64, f64, f64) {
                     width: (ci.cells * 8) as u32,
                     height: 16,
                     left_pad: 0,
+                    top_pad: 0,
                     is_color: ci.ch > 0xffff,
                 })
             });
@@ -530,6 +532,7 @@ fn bench_gpu_transcript_replay() -> (f64, f64, f64) {
                     width: (ci.cells * 8) as u32,
                     height: 16,
                     left_pad: 0,
+                    top_pad: 0,
                     is_color: ci.ch > 0xffff,
                 })
             });
@@ -566,6 +569,7 @@ fn bench_gpu_transcript_replay() -> (f64, f64, f64) {
                     width: (ci.cells * 8) as u32,
                     height: 16,
                     left_pad: 0,
+                    top_pad: 0,
                     is_color: ci.ch > 0xffff,
                 })
             });

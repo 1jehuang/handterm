@@ -35,6 +35,7 @@ pub(crate) struct GpuGlyphEntry {
     width: u32,
     height: u32,
     left_pad: u32,
+    top_pad: u32,
     is_color: bool,
 }
 
@@ -262,9 +263,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (in.flags & 1u) != 0u {
         let glyph = textureSample(atlas_tex, atlas_sampler, in.uv);
         if (in.flags & 128u) != 0u {
-            color = glyph + color * (1.0 - glyph.a);
+            color = glyph;
         } else {
-            color = mix(color, in.fg, glyph.a);
+            color = vec4<f32>(in.fg.rgb, glyph.a * in.fg.a);
         }
     }
 
@@ -276,7 +277,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (in.flags & 2u) != 0u {
         let ul_y = h - 2.0;
         if y >= ul_y && y < ul_y + 1.0 {
-            color = in.deco;
+            color = vec4<f32>(in.deco.rgb, 1.0);
         }
     }
     if (in.flags & 8u) != 0u {
@@ -284,20 +285,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let phase = x / w * 6.28318530718;
         let wave = sin(phase) * 2.0;
         if abs(y - (ul_y + wave)) < 1.5 {
-            color = in.deco;
+            color = vec4<f32>(in.deco.rgb, 1.0);
         }
     }
     if (in.flags & 16u) != 0u {
         let ul_y1 = h - 2.0;
         let ul_y2 = h - 4.0;
         if (y >= ul_y1 && y < ul_y1 + 1.0) || (y >= ul_y2 && y < ul_y2 + 1.0) {
-            color = in.deco;
+            color = vec4<f32>(in.deco.rgb, 1.0);
         }
     }
     if (in.flags & 32u) != 0u {
         let ul_y = h - 2.0;
         if y >= ul_y && y < ul_y + 1.0 && u32(x) % 3u == 0u {
-            color = in.deco;
+            color = vec4<f32>(in.deco.rgb, 1.0);
         }
     }
     if (in.flags & 64u) != 0u {
@@ -305,24 +306,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let dash = u32(w) / 3u;
         let offset = u32(x);
         if y >= ul_y && y < ul_y + 1.0 && (offset < dash || (offset >= dash * 2u && offset < dash * 3u)) {
-            color = in.deco;
+            color = vec4<f32>(in.deco.rgb, 1.0);
         }
     }
 
     if (in.flags & 4u) != 0u {
         let mid_y = h / 2.0;
         if y >= mid_y && y < mid_y + 1.0 {
-            color = in.fg;
+            color = vec4<f32>(in.fg.rgb, 1.0);
         }
     }
 
     if (in.flags & 256u) != 0u && x < min(2.0, w) {
-        color = in.fg;
+        color = vec4<f32>(in.fg.rgb, 1.0);
     }
     if (in.flags & 512u) != 0u {
         let cursor_y = h - min(2.0, h);
         if y >= cursor_y {
-            color = in.fg;
+            color = vec4<f32>(in.fg.rgb, 1.0);
         }
     }
 
@@ -1062,13 +1063,20 @@ pub fn render_surface_state_profiled(
         &mut text_batches,
         |ci| {
             if let Some(ref grapheme) = ci.grapheme {
-                ensure_grapheme_in_atlas(&mut atlas_state, &state.shared.queue, atlas, grapheme)
+                ensure_grapheme_in_atlas(
+                    &mut atlas_state,
+                    &state.shared.queue,
+                    atlas,
+                    grapheme,
+                    ci.cells,
+                )
                     .map(|entry| GlyphAtlasEntry {
                         x: entry.x,
                         y: entry.y,
                         width: entry.width,
                         height: entry.height,
                         left_pad: entry.left_pad,
+                        top_pad: entry.top_pad,
                         is_color: entry.is_color,
                     })
             } else {
@@ -1085,6 +1093,7 @@ pub fn render_surface_state_profiled(
                     width: entry.width,
                     height: entry.height,
                     left_pad: entry.left_pad,
+                    top_pad: entry.top_pad,
                     is_color: entry.is_color,
                 })
             }
@@ -1233,17 +1242,27 @@ fn build_gpu_glyph_tile(
     cell_width: usize,
     cell_height: usize,
     baseline: usize,
-) -> (Vec<u8>, u32, u32, u32) {
+) -> (Vec<u8>, u32, u32, u32, u32) {
     let nominal_width = (cells.max(1) * cell_width) as i32;
     let left_pad = (-glyph.bearing_x).max(0) as u32;
     let glyph_right = glyph.bearing_x + glyph.width as i32;
     let tile_width = (nominal_width + left_pad as i32)
         .max(glyph_right + left_pad as i32)
         .max(1) as u32;
-    let tile_height = cell_height as u32;
+    let tile_height = {
+        let origin_y = cell_height as i32 - baseline as i32;
+        let glyph_top = origin_y - glyph.bearing_y;
+        let top_pad = (-glyph_top).max(0) as u32;
+        let glyph_bottom = glyph_top + glyph.height as i32;
+        (cell_height as i32 + top_pad as i32)
+            .max(glyph_bottom + top_pad as i32)
+            .max(1) as u32
+    };
     let mut tile = vec![0u8; tile_width as usize * tile_height as usize * 4];
     let origin_y = cell_height as i32 - baseline as i32;
     let glyph_top = origin_y - glyph.bearing_y;
+    let top_pad = (-glyph_top).max(0) as u32;
+    let glyph_top = glyph_top + top_pad as i32;
     let glyph_left = glyph.bearing_x + left_pad as i32;
 
     for gy in 0..glyph.height {
@@ -1276,7 +1295,7 @@ fn build_gpu_glyph_tile(
         }
     }
 
-    (tile, tile_width, tile_height, left_pad)
+    (tile, tile_width, tile_height, left_pad, top_pad)
 }
 
 fn ensure_glyph_in_atlas<'a>(
@@ -1304,6 +1323,7 @@ fn ensure_glyph_in_atlas<'a>(
                 width: 0,
                 height: 0,
                 left_pad: 0,
+                top_pad: 0,
                 is_color: glyph.format == GlyphFormat::Rgba,
             },
         );
@@ -1311,7 +1331,7 @@ fn ensure_glyph_in_atlas<'a>(
     }
 
     let is_color = glyph.format == GlyphFormat::Rgba;
-    let (upload, upload_width, upload_height, left_pad) = build_gpu_glyph_tile(
+    let (upload, upload_width, upload_height, left_pad, top_pad) = build_gpu_glyph_tile(
         &glyph,
         cells,
         atlas.cell_width,
@@ -1359,6 +1379,7 @@ fn ensure_glyph_in_atlas<'a>(
         width: upload_width,
         height: upload_height,
         left_pad,
+        top_pad,
         is_color,
     };
     atlas_state.atlas_cursor_x += upload_width + 1;
@@ -1372,6 +1393,7 @@ fn ensure_grapheme_in_atlas<'a>(
     queue: &wgpu::Queue,
     atlas: &mut GlyphAtlas,
     grapheme: &str,
+    cells: usize,
 ) -> Option<&'a GpuGlyphEntry> {
     if atlas_state.grapheme_map.contains_key(grapheme) {
         return atlas_state.grapheme_map.get(grapheme);
@@ -1391,15 +1413,16 @@ fn ensure_grapheme_in_atlas<'a>(
                 width: 0,
                 height: 0,
                 left_pad: 0,
+                top_pad: 0,
                 is_color: glyph.format == GlyphFormat::Rgba,
             },
         );
         return atlas_state.grapheme_map.get(grapheme);
     }
 
-    let (upload, upload_width, upload_height, left_pad) = build_gpu_glyph_tile(
+    let (upload, upload_width, upload_height, left_pad, top_pad) = build_gpu_glyph_tile(
         &glyph,
-        1,
+        cells,
         atlas.cell_width,
         atlas.cell_height,
         atlas.baseline,
@@ -1444,6 +1467,7 @@ fn ensure_grapheme_in_atlas<'a>(
         width: upload_width,
         height: upload_height,
         left_pad,
+        top_pad,
         is_color: glyph.format == GlyphFormat::Rgba,
     };
     atlas_state.atlas_cursor_x += upload_width + 1;
@@ -1583,6 +1607,437 @@ fn select_alpha_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::blend_rgba_over_rgb;
+    use crate::config::AppConfig;
+    use crate::font::GlyphAtlas;
+    use crate::gpu_frame::{
+        FLAG_COLOR_GLYPH, FLAG_CURSOR_BAR, FLAG_CURSOR_UNDERLINE, FLAG_CURLY_UL,
+        FLAG_DASHED_UL, FLAG_DOTTED_UL, FLAG_DOUBLE_UL, FLAG_HAS_GLYPH,
+        FLAG_STRIKETHROUGH, FLAG_UNDERLINE,
+    };
+    use crate::render::OffscreenRenderer;
+    use crate::terminal::Terminal;
+    use crate::workloads::{
+        EMOJI_AND_SHADE_TRANSCRIPT, STARSHIP_PROMPT_TRANSCRIPT, TUI_HELP_WITH_IMAGE_TRANSCRIPT,
+    };
+
+    #[derive(Clone)]
+    struct TestAtlasTexture {
+        pixels: Vec<u8>,
+        width: u32,
+        height: u32,
+    }
+
+    fn rgba_bytes(color: [f32; 4]) -> [u8; 4] {
+        [
+            (color[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+            (color[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+            (color[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+            (color[3].clamp(0.0, 1.0) * 255.0).round() as u8,
+        ]
+    }
+
+    fn sample_texture(
+        texture: &TestAtlasTexture,
+        dx: usize,
+        dy: usize,
+        draw_w: usize,
+        draw_h: usize,
+    ) -> [f32; 4] {
+        let src_x = ((((dx as f32) + 0.5) * texture.width as f32 / draw_w.max(1) as f32) - 0.5)
+            .round() as isize;
+        let src_y = ((((dy as f32) + 0.5) * texture.height as f32 / draw_h.max(1) as f32) - 0.5)
+            .round() as isize;
+        let src_x = src_x.clamp(0, texture.width.saturating_sub(1) as isize) as usize;
+        let src_y = src_y.clamp(0, texture.height.saturating_sub(1) as isize) as usize;
+        let offset = (src_y * texture.width as usize + src_x) * 4;
+        [
+            texture.pixels[offset] as f32 / 255.0,
+            texture.pixels[offset + 1] as f32 / 255.0,
+            texture.pixels[offset + 2] as f32 / 255.0,
+            texture.pixels[offset + 3] as f32 / 255.0,
+        ]
+    }
+
+    fn shader_color_for_cell_instance(
+        instance: &CellInstance,
+        texture: Option<&TestAtlasTexture>,
+        dx: usize,
+        dy: usize,
+        draw_w: usize,
+        draw_h: usize,
+    ) -> [f32; 4] {
+        let mut color = instance.bg;
+
+        if instance.flags & FLAG_HAS_GLYPH != 0 && let Some(texture) = texture {
+            let glyph = sample_texture(texture, dx, dy, draw_w, draw_h);
+            if instance.flags & FLAG_COLOR_GLYPH != 0 {
+                color = glyph;
+            } else {
+                color = [instance.fg[0], instance.fg[1], instance.fg[2], glyph[3] * instance.fg[3]];
+            }
+        }
+
+        let x = dx as f32 + 0.5;
+        let y = dy as f32 + 0.5;
+        let h = instance.size[1].max(1.0);
+        let w = instance.size[0].max(1.0);
+
+        if instance.flags & FLAG_UNDERLINE != 0 {
+            let ul_y = h - 2.0;
+            if y >= ul_y && y < ul_y + 1.0 {
+                color = [instance.deco[0], instance.deco[1], instance.deco[2], 1.0];
+            }
+        }
+        if instance.flags & FLAG_CURLY_UL != 0 {
+            let ul_y = h - 2.0;
+            let phase = x / w * std::f32::consts::TAU;
+            let wave = phase.sin() * 2.0;
+            if (y - (ul_y + wave)).abs() < 1.5 {
+                color = [instance.deco[0], instance.deco[1], instance.deco[2], 1.0];
+            }
+        }
+        if instance.flags & FLAG_DOUBLE_UL != 0 {
+            let ul_y1 = h - 2.0;
+            let ul_y2 = h - 4.0;
+            if (y >= ul_y1 && y < ul_y1 + 1.0) || (y >= ul_y2 && y < ul_y2 + 1.0) {
+                color = [instance.deco[0], instance.deco[1], instance.deco[2], 1.0];
+            }
+        }
+        if instance.flags & FLAG_DOTTED_UL != 0 {
+            let ul_y = h - 2.0;
+            if y >= ul_y && y < ul_y + 1.0 && dx.is_multiple_of(3) {
+                color = [instance.deco[0], instance.deco[1], instance.deco[2], 1.0];
+            }
+        }
+        if instance.flags & FLAG_DASHED_UL != 0 {
+            let ul_y = h - 2.0;
+            let dash = (w as u32 / 3).max(1);
+            let offset = dx as u32;
+            if y >= ul_y
+                && y < ul_y + 1.0
+                && (offset < dash || (offset >= dash * 2 && offset < dash * 3))
+            {
+                color = [instance.deco[0], instance.deco[1], instance.deco[2], 1.0];
+            }
+        }
+        if instance.flags & FLAG_STRIKETHROUGH != 0 {
+            let mid_y = h / 2.0;
+            if y >= mid_y && y < mid_y + 1.0 {
+                color = [instance.fg[0], instance.fg[1], instance.fg[2], 1.0];
+            }
+        }
+        if instance.flags & FLAG_CURSOR_BAR != 0 && x < 2.0_f32.min(w) {
+            color = [instance.fg[0], instance.fg[1], instance.fg[2], 1.0];
+        }
+        if instance.flags & FLAG_CURSOR_UNDERLINE != 0 {
+            let cursor_y = h - h.min(2.0);
+            if y >= cursor_y {
+                color = [instance.fg[0], instance.fg[1], instance.fg[2], 1.0];
+            }
+        }
+
+        color
+    }
+
+    fn draw_cell_instances(
+        buffer: &mut [u32],
+        buf_w: usize,
+        buf_h: usize,
+        instances: &[CellInstance],
+        textures: &std::collections::HashMap<(u32, u32, u32, u32), TestAtlasTexture>,
+    ) {
+        for instance in instances {
+            let px_x = instance.pos[0].floor().max(0.0) as usize;
+            let px_y = instance.pos[1].floor().max(0.0) as usize;
+            let draw_w = instance.size[0].ceil().max(0.0) as usize;
+            let draw_h = instance.size[1].ceil().max(0.0) as usize;
+            let x_end = (px_x + draw_w).min(buf_w);
+            let y_end = (px_y + draw_h).min(buf_h);
+            let texture = textures.get(&(
+                instance.uv_offset[0] as u32,
+                instance.uv_offset[1] as u32,
+                instance.uv_size[0] as u32,
+                instance.uv_size[1] as u32,
+            ));
+
+            for y in px_y..y_end {
+                for x in px_x..x_end {
+                    let dx = x - px_x;
+                    let dy = y - px_y;
+                    let rgba = rgba_bytes(shader_color_for_cell_instance(
+                        instance, texture, dx, dy, draw_w, draw_h,
+                    ));
+                    blend_rgba_over_rgb(&mut buffer[y * buf_w + x], &rgba);
+                }
+            }
+        }
+    }
+
+    fn draw_image_instances(
+        buffer: &mut [u32],
+        buf_w: usize,
+        buf_h: usize,
+        instances: &[ImageInstance],
+        textures: &std::collections::HashMap<(u32, u32, u32, u32), TestAtlasTexture>,
+    ) {
+        for instance in instances {
+            let px_x = instance.pos[0].floor().max(0.0) as usize;
+            let px_y = instance.pos[1].floor().max(0.0) as usize;
+            let draw_w = instance.size[0].ceil().max(0.0) as usize;
+            let draw_h = instance.size[1].ceil().max(0.0) as usize;
+            let x_end = (px_x + draw_w).min(buf_w);
+            let y_end = (px_y + draw_h).min(buf_h);
+            let Some(texture) = textures.get(&(
+                instance.uv_offset[0] as u32,
+                instance.uv_offset[1] as u32,
+                instance.uv_size[0] as u32,
+                instance.uv_size[1] as u32,
+            )) else {
+                continue;
+            };
+
+            for y in px_y..y_end {
+                for x in px_x..x_end {
+                    let dx = x - px_x;
+                    let dy = y - px_y;
+                    let rgba = rgba_bytes(sample_texture(texture, dx, dy, draw_w, draw_h));
+                    blend_rgba_over_rgb(&mut buffer[y * buf_w + x], &rgba);
+                }
+            }
+        }
+    }
+
+    fn render_like_gpu(
+        terminal: &mut Terminal,
+        atlas: &mut GlyphAtlas,
+        config: &AppConfig,
+    ) -> Vec<u32> {
+        let width = terminal.cols as usize * atlas.cell_width;
+        let height = terminal.rows as usize * atlas.cell_height;
+        let base_bg = config.style.background.as_u32_rgb();
+        let base_fg = config.style.foreground.as_u32_rgb();
+        let mut buffer = vec![base_bg; width * height];
+
+        let mut cell_infos = Vec::new();
+        fill_cell_infos(terminal, &mut cell_infos);
+
+        let mut glyph_textures = std::collections::HashMap::new();
+        let mut next_x = 0u32;
+        let mut batches = FrameTextBatches::default();
+        fill_text_batches(
+            &cell_infos,
+            FrameBatchStyle {
+                base_fg,
+                base_bg,
+                base_fg_f: [
+                    ((base_fg >> 16) & 0xff) as f32 / 255.0,
+                    ((base_fg >> 8) & 0xff) as f32 / 255.0,
+                    (base_fg & 0xff) as f32 / 255.0,
+                    1.0,
+                ],
+                background_alpha: clamp_background_alpha(config.style.background_opacity),
+                cell_w: atlas.cell_width as f32,
+                cell_h: atlas.cell_height as f32,
+            },
+            &mut batches,
+            |ci| {
+                let glyph = if let Some(grapheme) = ci.grapheme.as_deref() {
+                    atlas.ensure_grapheme(grapheme);
+                    atlas.get_grapheme_glyph(grapheme).map(|glyph| (glyph, ci.cells))
+                } else {
+                    atlas.ensure_glyph(ci.ch);
+                    atlas.get_glyph(ci.ch).map(|glyph| (glyph, ci.cells))
+                }?;
+                let is_color = glyph.0.format == GlyphFormat::Rgba;
+                let (tile, tile_width, tile_height, left_pad, top_pad) = build_gpu_glyph_tile(
+                    &glyph.0,
+                    glyph.1,
+                    atlas.cell_width,
+                    atlas.cell_height,
+                    atlas.baseline,
+                );
+                let entry = GlyphAtlasEntry {
+                    x: next_x,
+                    y: 0,
+                    width: tile_width,
+                    height: tile_height,
+                    left_pad,
+                    top_pad,
+                    is_color,
+                };
+                glyph_textures.insert(
+                    (entry.x, entry.y, entry.width, entry.height),
+                    TestAtlasTexture {
+                        pixels: tile,
+                        width: tile_width,
+                        height: tile_height,
+                    },
+                );
+                next_x = next_x.saturating_add(tile_width + 1);
+                Some(entry)
+            },
+        );
+
+        let mut image_textures = std::collections::HashMap::new();
+        let mut image_instances = Vec::new();
+        fill_image_instances(
+            terminal.kitty_placements(),
+            atlas.cell_width as f32,
+            atlas.cell_height as f32,
+            &mut image_instances,
+            |placement| {
+                let image = terminal.kitty_image(placement.image_id)?;
+                if image.data.len() != (image.width as usize) * (image.height as usize) * 4 {
+                    return None;
+                }
+                let rect = AtlasImageRect {
+                    x: next_x,
+                    y: 1,
+                    width: image.width,
+                    height: image.height,
+                };
+                image_textures.insert(
+                    (rect.x, rect.y, rect.width, rect.height),
+                    TestAtlasTexture {
+                        pixels: image.data.clone(),
+                        width: image.width,
+                        height: image.height,
+                    },
+                );
+                next_x = next_x.saturating_add(image.width.max(1) + 1);
+                Some(rect)
+            },
+        );
+
+        draw_cell_instances(&mut buffer, width, height, &batches.bg_instances, &glyph_textures);
+        draw_image_instances(&mut buffer, width, height, &image_instances, &image_textures);
+        draw_cell_instances(&mut buffer, width, height, &batches.fg_instances, &glyph_textures);
+        draw_cell_instances(
+            &mut buffer,
+            width,
+            height,
+            &batches.overlay_instances,
+            &glyph_textures,
+        );
+
+        buffer
+    }
+
+    fn assert_gpu_framebuffer_matches_cpu(
+        cols: u16,
+        rows: u16,
+        chunks: &[&[u8]],
+        per_step_assert: impl Fn(&Terminal, usize),
+    ) {
+        let config = AppConfig::default();
+        let mut atlas = GlyphAtlas::new(config.style.font_size)
+            .expect("should load font atlas for GPU framebuffer parity");
+        let mut terminal = Terminal::new(cols, rows);
+        let mut cpu = OffscreenRenderer::new(cols, rows, &atlas);
+
+        for (idx, chunk) in chunks.iter().enumerate() {
+            terminal.process(chunk);
+            cpu.reset();
+            cpu.render(&mut terminal, &mut atlas, &config);
+            let gpu = render_like_gpu(&mut terminal, &mut atlas, &config);
+            if let Some((pixel_idx, (gpu_px, cpu_px))) = gpu
+                .iter()
+                .zip(cpu.pixels.iter())
+                .enumerate()
+                .find(|(_, (gpu_px, cpu_px))| gpu_px != cpu_px)
+            {
+                let x = pixel_idx % cpu.width;
+                let y = pixel_idx / cpu.width;
+                let mut cell_infos = Vec::new();
+                fill_cell_infos(&terminal, &mut cell_infos);
+                let mut batches = FrameTextBatches::default();
+                let mut glyph_textures = std::collections::HashMap::new();
+                let mut next_x = 0u32;
+                fill_text_batches(
+                    &cell_infos,
+                    FrameBatchStyle {
+                        base_fg: config.style.foreground.as_u32_rgb(),
+                        base_bg: config.style.background.as_u32_rgb(),
+                        base_fg_f: [
+                            ((config.style.foreground.as_u32_rgb() >> 16) & 0xff) as f32 / 255.0,
+                            ((config.style.foreground.as_u32_rgb() >> 8) & 0xff) as f32 / 255.0,
+                            (config.style.foreground.as_u32_rgb() & 0xff) as f32 / 255.0,
+                            1.0,
+                        ],
+                        background_alpha: clamp_background_alpha(config.style.background_opacity),
+                        cell_w: atlas.cell_width as f32,
+                        cell_h: atlas.cell_height as f32,
+                    },
+                    &mut batches,
+                    |ci| {
+                        let glyph = if let Some(grapheme) = ci.grapheme.as_deref() {
+                            atlas.ensure_grapheme(grapheme);
+                            atlas.get_grapheme_glyph(grapheme).map(|glyph| (glyph, ci.cells))
+                        } else {
+                            atlas.ensure_glyph(ci.ch);
+                            atlas.get_glyph(ci.ch).map(|glyph| (glyph, ci.cells))
+                        }?;
+                        let is_color = glyph.0.format == GlyphFormat::Rgba;
+                        let (tile, tile_width, tile_height, left_pad, top_pad) = build_gpu_glyph_tile(
+                            &glyph.0,
+                            glyph.1,
+                            atlas.cell_width,
+                            atlas.cell_height,
+                            atlas.baseline,
+                        );
+                        let entry = GlyphAtlasEntry {
+                            x: next_x,
+                            y: 0,
+                            width: tile_width,
+                            height: tile_height,
+                            left_pad,
+                            top_pad,
+                            is_color,
+                        };
+                        glyph_textures.insert(
+                            (entry.x, entry.y, entry.width, entry.height),
+                            TestAtlasTexture {
+                                pixels: tile,
+                                width: tile_width,
+                                height: tile_height,
+                            },
+                        );
+                        next_x = next_x.saturating_add(tile_width + 1);
+                        Some(entry)
+                    },
+                );
+                let pixel_in_instance = |instance: &CellInstance| {
+                    let px = x as f32 + 0.5;
+                    let py = y as f32 + 0.5;
+                    px >= instance.pos[0]
+                        && px < instance.pos[0] + instance.size[0]
+                        && py >= instance.pos[1]
+                        && py < instance.pos[1] + instance.size[1]
+                };
+                let bg_hits = batches.bg_instances.iter().filter(|i| pixel_in_instance(i)).count();
+                let fg_hits = batches.fg_instances.iter().filter(|i| pixel_in_instance(i)).count();
+                let overlay_hits = batches
+                    .overlay_instances
+                    .iter()
+                    .filter(|i| pixel_in_instance(i))
+                    .count();
+                let first_cell = cell_infos.first();
+                let first_fg = batches.fg_instances.first();
+                panic!(
+                    "GPU framebuffer parity diverged after replay chunk {idx} at pixel ({x},{y}): gpu=0x{gpu_px:06x} cpu=0x{cpu_px:06x} cell=({}, {}) bg_hits={} fg_hits={} overlay_hits={} first_cell={:?} first_fg={:?}",
+                    x / atlas.cell_width,
+                    y / atlas.cell_height,
+                    bg_hits,
+                    fg_hits,
+                    overlay_hits,
+                    first_cell,
+                    first_fg,
+                );
+            }
+            per_step_assert(&terminal, idx);
+        }
+    }
 
     #[test]
     fn gpu_glyph_tile_spans_requested_cells() {
@@ -1596,11 +2051,12 @@ mod tests {
             bearing_y: 2,
         };
 
-        let (tile, width, height, left_pad) = build_gpu_glyph_tile(&glyph, 2, 8, 4, 2);
+        let (tile, width, height, left_pad, top_pad) = build_gpu_glyph_tile(&glyph, 2, 8, 4, 2);
 
         assert_eq!(width, 16);
         assert_eq!(height, 4);
         assert_eq!(left_pad, 0);
+        assert_eq!(top_pad, 0);
         assert_eq!(tile.len(), 16 * 4 * 4);
         assert_eq!(&tile[0..8], &[0xff, 0xff, 0xff, 255, 0xff, 0xff, 0xff, 128]);
     }
@@ -1617,11 +2073,12 @@ mod tests {
             bearing_y: 1,
         };
 
-        let (_tile, width, height, left_pad) = build_gpu_glyph_tile(&glyph, 1, 8, 4, 1);
+        let (_tile, width, height, left_pad, top_pad) = build_gpu_glyph_tile(&glyph, 1, 8, 4, 1);
 
         assert_eq!(width, 10);
         assert_eq!(height, 4);
         assert_eq!(left_pad, 0);
+        assert_eq!(top_pad, 0);
     }
 
     #[test]
@@ -1636,11 +2093,32 @@ mod tests {
             bearing_y: 1,
         };
 
-        let (_tile, width, height, left_pad) = build_gpu_glyph_tile(&glyph, 1, 8, 4, 1);
+        let (_tile, width, height, left_pad, top_pad) = build_gpu_glyph_tile(&glyph, 1, 8, 4, 1);
 
         assert_eq!(width, 10);
         assert_eq!(height, 4);
         assert_eq!(left_pad, 2);
+        assert_eq!(top_pad, 0);
+    }
+
+    #[test]
+    fn gpu_glyph_tile_preserves_top_overhang() {
+        let pixels = [255u8, 255, 255, 255];
+        let glyph = crate::font::GlyphData {
+            pixels: &pixels,
+            width: 2,
+            height: 2,
+            format: GlyphFormat::Alpha,
+            bearing_x: 0,
+            bearing_y: 5,
+        };
+
+        let (_tile, width, height, left_pad, top_pad) = build_gpu_glyph_tile(&glyph, 1, 8, 4, 1);
+
+        assert_eq!(width, 8);
+        assert_eq!(height, 6);
+        assert_eq!(left_pad, 0);
+        assert_eq!(top_pad, 2);
     }
 
     #[test]
@@ -1775,5 +2253,46 @@ mod tests {
         assert_eq!(config.format, wgpu::TextureFormat::Bgra8Unorm);
         assert_eq!(config.present_mode, wgpu::PresentMode::Fifo);
         assert_eq!(config.alpha_mode, wgpu::CompositeAlphaMode::PostMultiplied);
+    }
+
+    #[test]
+    fn gpu_framebuffer_matches_cpu_for_emoji_and_shade_transcript() {
+        assert_gpu_framebuffer_matches_cpu(16, 4, EMOJI_AND_SHADE_TRANSCRIPT, |terminal, idx| {
+            if idx == EMOJI_AND_SHADE_TRANSCRIPT.len() - 1 {
+                assert_eq!(terminal.grid.cell_grapheme_at(0, 7), Some("❤️"));
+                assert_eq!(terminal.grid.cell_grapheme_at(0, 10), Some("👨‍💻"));
+            }
+        });
+    }
+
+    #[test]
+    fn gpu_framebuffer_matches_cpu_for_starship_prompt_transcript() {
+        assert_gpu_framebuffer_matches_cpu(80, 24, STARSHIP_PROMPT_TRANSCRIPT, |terminal, idx| {
+            if idx == STARSHIP_PROMPT_TRANSCRIPT.len() - 1 {
+                let row = (0..80)
+                    .filter_map(|col| match terminal.grid.cell_char(1, col) {
+                        ' ' | '\0' => None,
+                        ch => Some(ch),
+                    })
+                    .collect::<String>();
+                assert!(row.contains("jeremy"));
+            }
+        });
+    }
+
+    #[test]
+    fn gpu_framebuffer_matches_cpu_for_tui_help_image_transcript() {
+        assert_gpu_framebuffer_matches_cpu(32, 8, TUI_HELP_WITH_IMAGE_TRANSCRIPT, |terminal, idx| {
+            if idx == 2 {
+                assert_eq!(terminal.kitty_placements().len(), 1);
+            }
+            if idx == TUI_HELP_WITH_IMAGE_TRANSCRIPT.len() - 1 {
+                assert!(terminal.kitty_placements().is_empty());
+                assert!(
+                    terminal.kitty_image(5).is_some(),
+                    "image metadata should still exist even after the visible placement is cleared"
+                );
+            }
+        });
     }
 }

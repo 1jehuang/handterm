@@ -42,6 +42,7 @@ pub(crate) struct GlyphAtlasEntry {
     pub width: u32,
     pub height: u32,
     pub left_pad: u32,
+    pub top_pad: u32,
     pub is_color: bool,
 }
 
@@ -197,6 +198,7 @@ pub(crate) fn build_cell_instances(
     let mut uv_offset = [0.0, 0.0];
     let mut uv_size = [0.0, 0.0];
     let mut glyph_left_pad = 0.0f32;
+    let mut glyph_top_pad = 0.0f32;
 
     if (ci.ch > 0x20 || ci.grapheme.is_some())
         && let Some(entry) = glyph_entry
@@ -209,6 +211,7 @@ pub(crate) fn build_cell_instances(
         uv_offset = [entry.x as f32, entry.y as f32];
         uv_size = [entry.width as f32, entry.height as f32];
         glyph_left_pad = entry.left_pad as f32;
+        glyph_top_pad = entry.top_pad as f32;
     }
 
     if ci.cell.attrs & crate::grid::ATTR_UNDERLINE != 0 {
@@ -244,11 +247,11 @@ pub(crate) fn build_cell_instances(
         Some(CellInstance {
             pos: [
                 ci.col as f32 * style.cell_w - glyph_left_pad,
-                ci.row as f32 * style.cell_h,
+                ci.row as f32 * style.cell_h - glyph_top_pad,
             ],
             size: [
                 glyph_width.max(style.cell_w * ci.cells as f32 + glyph_left_pad),
-                style.cell_h,
+                uv_size[1].max(style.cell_h + glyph_top_pad),
             ],
             uv_offset,
             uv_size,
@@ -445,6 +448,7 @@ mod tests {
             width: 8 * ci.cells as u32,
             height: 16,
             left_pad: 0,
+            top_pad: 0,
             is_color: ci.ch > 0xffff,
         })
     }
@@ -603,14 +607,16 @@ mod tests {
 
     fn image_instances_for_terminal(terminal: &Terminal) -> Vec<ImageInstance> {
         build_image_instances(terminal.kitty_placements(), 8.0, 16.0, |placement| {
-            terminal
-                .kitty_image(placement.image_id)
-                .map(|image| AtlasImageRect {
-                    x: 0,
-                    y: 0,
-                    width: image.width,
-                    height: image.height,
-                })
+            let image = terminal.kitty_image(placement.image_id)?;
+            if image.data.len() != (image.width as usize) * (image.height as usize) * 4 {
+                return None;
+            }
+            Some(AtlasImageRect {
+                x: 0,
+                y: 0,
+                width: image.width,
+                height: image.height,
+            })
         })
     }
 
@@ -962,6 +968,7 @@ mod tests {
                 width: 16,
                 height: 16,
                 left_pad: 0,
+                top_pad: 0,
                 is_color: true,
             }),
         );
@@ -1001,6 +1008,7 @@ mod tests {
                     width: 8,
                     height: 16,
                     left_pad: 0,
+                    top_pad: 0,
                     is_color: false,
                 })
             },
@@ -1080,6 +1088,7 @@ mod tests {
                 width: 8,
                 height: 16,
                 left_pad: 0,
+                top_pad: 0,
                 is_color: false,
             }),
         );
@@ -1127,6 +1136,7 @@ mod tests {
                 width: 13,
                 height: 16,
                 left_pad: 0,
+                top_pad: 0,
                 is_color: false,
             }),
         );
@@ -1164,6 +1174,7 @@ mod tests {
                 width: 9,
                 height: 16,
                 left_pad: 1,
+                top_pad: 0,
                 is_color: false,
             }),
         );

@@ -104,6 +104,48 @@ pub struct GpuSurfaceDefaults {
     pub alpha_mode: wgpu::CompositeAlphaMode,
 }
 
+fn build_surface_config(
+    size: winit::dpi::PhysicalSize<u32>,
+    transparency: bool,
+    preferred_defaults: Option<GpuSurfaceDefaults>,
+    surface_caps: Option<&wgpu::SurfaceCapabilities>,
+) -> Result<(wgpu::SurfaceConfiguration, bool)> {
+    if let Some(defaults) = preferred_defaults {
+        return Ok((
+            wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: defaults.format,
+                width: size.width.max(1),
+                height: size.height.max(1),
+                present_mode: defaults.present_mode,
+                desired_maximum_frame_latency: 1,
+                alpha_mode: defaults.alpha_mode,
+                view_formats: vec![],
+            },
+            true,
+        ));
+    }
+
+    let surface_caps = surface_caps.context("surface should be compatible")?;
+    anyhow::ensure!(
+        !surface_caps.formats.is_empty(),
+        "surface should be compatible"
+    );
+    Ok((
+        wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: select_surface_format(surface_caps, surface_caps.formats[0]),
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: select_present_mode(surface_caps),
+            desired_maximum_frame_latency: 1,
+            alpha_mode: select_alpha_mode(surface_caps, transparency),
+            view_formats: vec![],
+        },
+        false,
+    ))
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GpuSurfaceCreateProfile {
     pub window_create: Duration,
@@ -708,47 +750,38 @@ pub fn create_surface_state_with_shared_profiled_with_defaults(
     let size = window.inner_size();
 
     let (surface_config, capabilities, default_config, reused_surface_defaults) =
-        if let Some(defaults) = preferred_defaults {
+        if preferred_defaults.is_some() {
+            let (surface_config, reused_surface_defaults) = build_surface_config(
+                size,
+                transparency_requested(config.style.background_opacity),
+                preferred_defaults,
+                None,
+            )?;
             (
-                wgpu::SurfaceConfiguration {
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    format: defaults.format,
-                    width: size.width.max(1),
-                    height: size.height.max(1),
-                    present_mode: defaults.present_mode,
-                    desired_maximum_frame_latency: 1,
-                    alpha_mode: defaults.alpha_mode,
-                    view_formats: vec![],
-                },
+                surface_config,
                 Duration::ZERO,
                 Duration::ZERO,
-                true,
+                reused_surface_defaults,
             )
         } else {
             let step_start = Instant::now();
             let surface_caps = surface.get_capabilities(&shared.adapter);
             let capabilities = step_start.elapsed();
-            anyhow::ensure!(
-                !surface_caps.formats.is_empty(),
-                "surface should be compatible"
-            );
 
             let step_start = Instant::now();
-            let surface_config = wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: select_surface_format(&surface_caps, surface_caps.formats[0]),
-                width: size.width.max(1),
-                height: size.height.max(1),
-                present_mode: select_present_mode(&surface_caps),
-                desired_maximum_frame_latency: 1,
-                alpha_mode: select_alpha_mode(
-                    &surface_caps,
-                    transparency_requested(config.style.background_opacity),
-                ),
-                view_formats: vec![],
-            };
+            let (surface_config, reused_surface_defaults) = build_surface_config(
+                size,
+                transparency_requested(config.style.background_opacity),
+                None,
+                Some(&surface_caps),
+            )?;
             let default_config = step_start.elapsed();
-            (surface_config, capabilities, default_config, false)
+            (
+                surface_config,
+                capabilities,
+                default_config,
+                reused_surface_defaults,
+            )
         };
 
     let step_start = Instant::now();
@@ -1695,5 +1728,52 @@ mod tests {
             select_alpha_mode(&capabilities, true),
             wgpu::CompositeAlphaMode::Opaque
         );
+    }
+
+    #[test]
+    fn build_surface_config_reuses_preferred_defaults_without_capabilities() {
+        let size = winit::dpi::PhysicalSize::new(800, 600);
+        let defaults = GpuSurfaceDefaults {
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            present_mode: wgpu::PresentMode::Mailbox,
+            alpha_mode: wgpu::CompositeAlphaMode::PreMultiplied,
+        };
+
+        let (config, reused) = build_surface_config(size, true, Some(defaults), None)
+            .expect("preferred defaults should build a surface config");
+
+        assert!(reused);
+        assert_eq!(config.width, 800);
+        assert_eq!(config.height, 600);
+        assert_eq!(config.format, defaults.format);
+        assert_eq!(config.present_mode, defaults.present_mode);
+        assert_eq!(config.alpha_mode, defaults.alpha_mode);
+    }
+
+    #[test]
+    fn build_surface_config_uses_capabilities_when_defaults_absent() {
+        let size = winit::dpi::PhysicalSize::new(640, 480);
+        let capabilities = wgpu::SurfaceCapabilities {
+            formats: vec![
+                wgpu::TextureFormat::Bgra8UnormSrgb,
+                wgpu::TextureFormat::Bgra8Unorm,
+            ],
+            present_modes: vec![wgpu::PresentMode::Fifo, wgpu::PresentMode::AutoVsync],
+            alpha_modes: vec![
+                wgpu::CompositeAlphaMode::Opaque,
+                wgpu::CompositeAlphaMode::PostMultiplied,
+            ],
+            usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        };
+
+        let (config, reused) = build_surface_config(size, true, None, Some(&capabilities))
+            .expect("capabilities should build a surface config");
+
+        assert!(!reused);
+        assert_eq!(config.width, 640);
+        assert_eq!(config.height, 480);
+        assert_eq!(config.format, wgpu::TextureFormat::Bgra8Unorm);
+        assert_eq!(config.present_mode, wgpu::PresentMode::Fifo);
+        assert_eq!(config.alpha_mode, wgpu::CompositeAlphaMode::PostMultiplied);
     }
 }

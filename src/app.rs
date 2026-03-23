@@ -1,9 +1,11 @@
 use crate::config::AppConfig;
 use crate::font::GlyphAtlas;
 use crate::frontend::{
-    FrameDecision, FrameScheduler, KeyEventKind, RedrawWork, VisualState, base64_decode,
-    classify_redraw_work, copy_to_clipboard, key_to_bytes, open_url, paste_from_clipboard,
-    scroll_to_bytes, spawn_fd_watcher, visual_signature,
+    FrameDecision, FrameScheduler, KeyEventKind, RecentTextKeyEvent, RedrawWork, StartupTiming,
+    VisualState, base64_decode, classify_redraw_work, copy_to_clipboard, key_to_bytes, open_url,
+    paste_from_clipboard, remember_text_key_event, scroll_to_bytes,
+    should_skip_duplicate_ime_input, should_skip_ime_commit_after_key_event, spawn_fd_watcher,
+    visual_signature,
 };
 use crate::ipc::{IpcAction, IpcServer, Request, Response};
 use crate::pty::PtyChild;
@@ -84,6 +86,8 @@ struct HostWindowState {
     dpi: u32,
     pty_closed: bool,
     modifiers: Modifiers,
+    pending_ime_commit: Option<String>,
+    recent_text_key_event: Option<RecentTextKeyEvent>,
     mouse_col: usize,
     mouse_row: usize,
     selecting: bool,
@@ -91,6 +95,7 @@ struct HostWindowState {
     last_presented_signature: Option<u64>,
     scheduler: FrameScheduler,
     watcher_stop: Arc<AtomicBool>,
+    startup_timing: StartupTiming,
 }
 
 impl HandtermApp {
@@ -177,7 +182,13 @@ impl HandtermApp {
         (atlas.cell_width.max(1), atlas.cell_height.max(1))
     }
 
-    fn create_window_attributes(&self, cell_width: usize, cell_height: usize, cols: u16, rows: u16) -> WindowAttributes {
+    fn create_window_attributes(
+        &self,
+        cell_width: usize,
+        cell_height: usize,
+        cols: u16,
+        rows: u16,
+    ) -> WindowAttributes {
         let width = cols as f64 * cell_width as f64;
         let height = rows as f64 * cell_height as f64;
 
@@ -216,6 +227,7 @@ impl HandtermApp {
         let terminal = Terminal::new_with_scrollback(cols, rows, self.config.scrollback.lines);
         let before_pty = Instant::now();
         let pty = PtyChild::spawn_default_shell(cols, rows).context("pty should spawn")?;
+        let pty_spawned_at = Instant::now();
         let stop = Arc::new(AtomicBool::new(false));
         let id = self.next_window_id;
         self.next_window_id += 1;
@@ -246,6 +258,8 @@ impl HandtermApp {
                 dpi,
                 pty_closed: false,
                 modifiers: Modifiers::default(),
+                pending_ime_commit: None,
+                recent_text_key_event: None,
                 mouse_col: 0,
                 mouse_row: 0,
                 selecting: false,
@@ -253,6 +267,11 @@ impl HandtermApp {
                 last_presented_signature: None,
                 scheduler: FrameScheduler::default(),
                 watcher_stop: stop,
+                startup_timing: {
+                    let mut timing = StartupTiming::new(start);
+                    timing.mark_pty_spawned(pty_spawned_at);
+                    timing
+                },
             },
         );
         if let Some(state) = self.windows.get(&winit_id) {
@@ -359,13 +378,18 @@ impl HandtermApp {
             return (Response::err("unknown target window"), IpcAction::None);
         };
         let Some(state) = self.windows.get_mut(&winit_id) else {
-            return (Response::err("target window is not active"), IpcAction::None);
+            return (
+                Response::err("target window is not active"),
+                IpcAction::None,
+            );
         };
         handle_ipc_request(&mut state.terminal, req)
     }
 
     fn process_ipc_actions(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(mut ipc) = self.ipc.take() else { return };
+        let Some(mut ipc) = self.ipc.take() else {
+            return;
+        };
         let actions = ipc.poll(&mut |req| self.handle_host_ipc_request(req));
         self.ipc = Some(ipc);
 
@@ -422,7 +446,26 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                 if let Some(winit_id) = self.window_ids.get(&window_id)
                     && let Some(state) = self.windows.get_mut(winit_id)
                 {
-                    state.scheduler.mark_io_ready(Instant::now(), FRAME_INTERVAL);
+                    state.startup_timing.mark_pty_event(Instant::now());
+                    let bytes_read = drain_pty(state);
+                    if bytes_read > 0 {
+                        let work = classify_redraw_work(&state.terminal, true);
+                        let should_redraw_now = if self.focused_window == Some(state.id) {
+                            state.scheduler.mark_redraw_needed();
+                            true
+                        } else {
+                            state
+                                .scheduler
+                                .mark_io_processed(Instant::now(), FRAME_INTERVAL, work)
+                        };
+                        if should_redraw_now {
+                            state.window.request_redraw();
+                        }
+                    }
+                    if state.pty_closed {
+                        let winit_id = *winit_id;
+                        self.close_window(winit_id, event_loop);
+                    }
                 }
             }
             AppEvent::IpcReadable => self.process_ipc_actions(event_loop),
@@ -465,8 +508,7 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                                 .resize(width, height)
                                 .expect("surface resize should succeed");
                             state.surface_size = (width.get(), height.get());
-                            state
-                                .last_visual_state = None;
+                            state.last_visual_state = None;
                             state.last_presented_signature = None;
 
                             let new_cols = (width.get() as usize / cell_width) as u16;
@@ -487,12 +529,35 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                     }
                     WindowEvent::Ime(Ime::Commit(text)) => {
                         if !text.is_empty() {
+                            if should_skip_ime_commit_after_key_event(
+                                &mut state.recent_text_key_event,
+                                &text,
+                                Instant::now(),
+                            ) {
+                                return;
+                            }
+                            state.pending_ime_commit = Some(text.clone());
                             let _ = state.pty.write_all(text.as_bytes());
                             if state.terminal.grid.scroll_offset > 0 {
                                 state.terminal.grid.scroll_offset = 0;
                                 state.terminal.grid.all_dirty = true;
                             }
                             state.terminal.grid.selection = None;
+                            let changed = drain_pty(state) > 0;
+                            let work = classify_redraw_work(&state.terminal, changed);
+                            let should_redraw_now = if *focused_window == Some(state.id) {
+                                state.scheduler.mark_redraw_needed();
+                                true
+                            } else {
+                                state.scheduler.mark_io_processed(
+                                    Instant::now(),
+                                    FRAME_INTERVAL,
+                                    work,
+                                )
+                            };
+                            if should_redraw_now {
+                                state.window.request_redraw();
+                            }
                         }
                     }
                     WindowEvent::KeyboardInput { event, .. } => {
@@ -500,7 +565,8 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                             let ctrl = state.modifiers.state().control_key();
                             let shift = state.modifiers.state().shift_key();
 
-                            if ctrl && shift
+                            if ctrl
+                                && shift
                                 && let Key::Character(s) = &event.logical_key
                             {
                                 let ch = s.chars().next().unwrap_or('\0').to_ascii_lowercase();
@@ -535,11 +601,8 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                                 }
                                 if let Key::Named(NamedKey::PageDown) = &event.logical_key {
                                     let half = state.terminal.rows as usize / 2;
-                                    state.terminal.grid.scroll_offset = state
-                                        .terminal
-                                        .grid
-                                        .scroll_offset
-                                        .saturating_sub(half);
+                                    state.terminal.grid.scroll_offset =
+                                        state.terminal.grid.scroll_offset.saturating_sub(half);
                                     state.scheduler.mark_redraw_needed();
                                     return;
                                 }
@@ -561,12 +624,56 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                             state.terminal.kitty_keyboard_flags(),
                             event_kind,
                         ) {
+                            if should_skip_duplicate_ime_input(
+                                &mut state.pending_ime_commit,
+                                event_kind,
+                                event.text.as_deref(),
+                                Some(&bytes),
+                            ) {
+                                return;
+                            }
+                            remember_text_key_event(
+                                &mut state.recent_text_key_event,
+                                event_kind,
+                                event.text.as_deref(),
+                                Some(&bytes),
+                                Instant::now(),
+                            );
                             let _ = state.pty.write_all(&bytes);
                             if state.terminal.grid.scroll_offset > 0 {
                                 state.terminal.grid.scroll_offset = 0;
                                 state.terminal.grid.all_dirty = true;
                             }
                             state.terminal.grid.selection = None;
+                            let changed = drain_pty(state) > 0;
+                            let work = classify_redraw_work(&state.terminal, changed);
+                            let should_redraw_now = if *focused_window == Some(state.id) {
+                                state.scheduler.mark_redraw_needed();
+                                true
+                            } else {
+                                state.scheduler.mark_io_processed(
+                                    Instant::now(),
+                                    FRAME_INTERVAL,
+                                    work,
+                                )
+                            };
+                            if should_redraw_now {
+                                state.window.request_redraw();
+                            }
+                        } else {
+                            remember_text_key_event(
+                                &mut state.recent_text_key_event,
+                                event_kind,
+                                event.text.as_deref(),
+                                None,
+                                Instant::now(),
+                            );
+                            let _ = should_skip_duplicate_ime_input(
+                                &mut state.pending_ime_commit,
+                                event_kind,
+                                event.text.as_deref(),
+                                None,
+                            );
                         }
                     }
                     WindowEvent::CursorMoved { position, .. } => {
@@ -581,7 +688,11 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                             state.scheduler.mark_redraw_needed();
                         }
                     }
-                    WindowEvent::MouseInput { state: btn_state, button, .. } => {
+                    WindowEvent::MouseInput {
+                        state: btn_state,
+                        button,
+                        ..
+                    } => {
                         let btn = match button {
                             MouseButton::Left => 0u8,
                             MouseButton::Middle => 1,
@@ -594,7 +705,10 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                             if pressed {
                                 let ctrl = state.modifiers.state().control_key();
                                 if ctrl {
-                                    let cell = state.terminal.grid.cell_at(state.mouse_row, state.mouse_col);
+                                    let cell = state
+                                        .terminal
+                                        .grid
+                                        .cell_at(state.mouse_row, state.mouse_col);
                                     if cell.hyperlink_id != 0
                                         && let Some(url) =
                                             state.terminal.grid.hyperlink_url(cell.hyperlink_id)
@@ -621,16 +735,21 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                         }
 
                         if state.terminal.mouse_mode != crate::terminal::MouseMode::Off
-                            && let Some(bytes) = state
-                                .terminal
-                                .encode_mouse(btn, state.mouse_col, state.mouse_row, pressed)
+                            && let Some(bytes) = state.terminal.encode_mouse(
+                                btn,
+                                state.mouse_col,
+                                state.mouse_row,
+                                pressed,
+                            )
                         {
                             let _ = state.pty.write_all(&bytes);
                         }
                     }
                     WindowEvent::MouseWheel { delta, .. } => {
                         let (up, lines) = match delta {
-                            MouseScrollDelta::LineDelta(_, y) => (y > 0.0, y.abs().max(1.0) as usize),
+                            MouseScrollDelta::LineDelta(_, y) => {
+                                (y > 0.0, y.abs().max(1.0) as usize)
+                            }
                             MouseScrollDelta::PixelDelta(pos) => {
                                 let ch = cell_height as f64;
                                 (pos.y > 0.0, (pos.y.abs() / ch).max(1.0) as usize)
@@ -638,14 +757,17 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                         };
                         if state.terminal.mouse_mode != crate::terminal::MouseMode::Off {
                             for _ in 0..lines {
-                                if let Some(bytes) = state
-                                    .terminal
-                                    .encode_mouse_scroll(up, state.mouse_col, state.mouse_row)
-                                {
+                                if let Some(bytes) = state.terminal.encode_mouse_scroll(
+                                    up,
+                                    state.mouse_col,
+                                    state.mouse_row,
+                                ) {
                                     let _ = state.pty.write_all(&bytes);
                                 }
                             }
-                        } else if state.terminal.alternate_scroll_mode() && state.terminal.in_alt_screen() {
+                        } else if state.terminal.alternate_scroll_mode()
+                            && state.terminal.in_alt_screen()
+                        {
                             let bytes = scroll_to_bytes(up, state.terminal.application_cursor_keys);
                             for _ in 0..lines {
                                 let _ = state.pty.write_all(&bytes);
@@ -656,11 +778,8 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                                 state.terminal.grid.scroll_offset =
                                     (state.terminal.grid.scroll_offset + lines * 3).min(max);
                             } else {
-                                state.terminal.grid.scroll_offset = state
-                                    .terminal
-                                    .grid
-                                    .scroll_offset
-                                    .saturating_sub(lines * 3);
+                                state.terminal.grid.scroll_offset =
+                                    state.terminal.grid.scroll_offset.saturating_sub(lines * 3);
                             }
                             state.scheduler.mark_redraw_needed();
                         }
@@ -682,6 +801,8 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                             .get_mut(&state.dpi)
                             .expect("atlas should exist for redraw");
                         render_grid(state, atlas, config).expect("frame render should succeed");
+                        state.startup_timing.mark_present(Instant::now());
+                        state.startup_timing.emit_if_ready("cpu host", state.id);
                     }
                     _ => {}
                 }
@@ -695,10 +816,9 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
         let mut closed_windows = Vec::new();
 
         for (winit_id, state) in &mut self.windows {
-            let mut scheduler = std::mem::take(&mut state.scheduler);
+            let scheduler = &mut state.scheduler;
             let decision: FrameDecision =
-                scheduler.prepare_redraw(Instant::now(), || process_pending_pty_io(state));
-            state.scheduler = scheduler;
+                scheduler.prepare_redraw(Instant::now(), RedrawWork::default);
             if let Some(deadline) = decision.wait_until {
                 earliest_deadline = Some(match earliest_deadline {
                     Some(existing) => existing.min(deadline),
@@ -733,11 +853,6 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
     }
 }
 
-fn process_pending_pty_io(state: &mut HostWindowState) -> RedrawWork {
-    let needs_redraw = drain_pty(state) > 0;
-    classify_redraw_work(&state.terminal, needs_redraw)
-}
-
 fn drain_pty(state: &mut HostWindowState) -> usize {
     if state.pty_closed {
         return 0;
@@ -747,6 +862,7 @@ fn drain_pty(state: &mut HostWindowState) -> usize {
         match state.pty.try_read(&mut state.pty_buf) {
             Ok(0) => break,
             Ok(n) => {
+                state.startup_timing.mark_pty_read(Instant::now(), n);
                 state.terminal.process(&state.pty_buf[..n]);
                 total += n;
             }
@@ -757,6 +873,9 @@ fn drain_pty(state: &mut HostWindowState) -> usize {
         }
     }
     if total > 0 {
+        state
+            .startup_timing
+            .maybe_mark_visible(Instant::now(), &state.terminal);
         if let Some(resp) = state.terminal.drain_responses() {
             let _ = state.pty.write_all(&resp);
         }
@@ -772,7 +891,11 @@ fn drain_pty(state: &mut HostWindowState) -> usize {
     total
 }
 
-fn render_grid(state: &mut HostWindowState, atlas: &mut GlyphAtlas, config: &AppConfig) -> Result<()> {
+fn render_grid(
+    state: &mut HostWindowState,
+    atlas: &mut GlyphAtlas,
+    config: &AppConfig,
+) -> Result<()> {
     let size = state.window.inner_size();
     let (Some(width), Some(height)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
     else {

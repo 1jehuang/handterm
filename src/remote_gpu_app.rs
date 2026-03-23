@@ -2,11 +2,14 @@ use crate::client::{ProtocolClient, TryRecvStatus};
 use crate::config::AppConfig;
 use crate::font::GlyphAtlas;
 use crate::frontend::{
-    FrameScheduler, KeyEventKind, RedrawWork, base64_decode, classify_redraw_work,
-    copy_to_clipboard, key_to_bytes, open_url, paste_from_clipboard, scroll_to_bytes,
-    spawn_fd_watcher,
+    FrameScheduler, KeyEventKind, RecentTextKeyEvent, RedrawWork, base64_decode,
+    classify_redraw_work, copy_to_clipboard, key_to_bytes, open_url, paste_from_clipboard,
+    remember_text_key_event, scroll_to_bytes, should_skip_duplicate_ime_input,
+    should_skip_ime_commit_after_key_event, spawn_fd_watcher,
 };
-use crate::gpu_runtime::{GpuSurfaceState, create_surface_state, render_surface_state, resize_surface_state};
+use crate::gpu_runtime::{
+    GpuSurfaceState, create_surface_state, render_surface_state, resize_surface_state,
+};
 use crate::protocol::{
     ClientMessage, KeyEvent as ProtocolKeyEvent, KeyEventKind as ProtocolKeyEventKind,
     MouseButton as ProtocolMouseButton, MouseEvent as ProtocolMouseEvent,
@@ -70,6 +73,8 @@ struct RemoteGpuState {
     pending_size: Option<(u16, u16)>,
     disconnected: bool,
     modifiers: Modifiers,
+    pending_ime_commit: Option<String>,
+    recent_text_key_event: Option<RecentTextKeyEvent>,
     mouse_col: usize,
     mouse_row: usize,
     selecting: bool,
@@ -135,17 +140,16 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
             .expect("remote frontend should receive window creation response");
         let (window_id, metrics) = match created {
             ServerMessage::WindowCreated {
-                window_id,
-                metrics,
-                ..
+                window_id, metrics, ..
             } => (window_id, metrics),
             other => panic!("expected WindowCreated from server, got {other:?}"),
         };
 
         let atlas = GlyphAtlas::protocol_only(metrics);
 
-        let renderer = create_surface_state(event_loop, &self.config, "handterm [gpu remote]", &atlas)
-            .expect("gpu surface state should initialize");
+        let renderer =
+            create_surface_state(event_loop, &self.config, "handterm [gpu remote]", &atlas)
+                .expect("gpu surface state should initialize");
         eprintln!("handterm: {}", renderer.surface_debug_summary());
 
         let mut terminal = RemoteTerminalState::new(cols, rows);
@@ -168,6 +172,8 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
             pending_size: None,
             disconnected: false,
             modifiers: Modifiers::default(),
+            pending_ime_commit: None,
+            recent_text_key_event: None,
             mouse_col: 0,
             mouse_row: 0,
             selecting: false,
@@ -229,6 +235,14 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 if !text.is_empty() {
+                    if should_skip_ime_commit_after_key_event(
+                        &mut state.recent_text_key_event,
+                        &text,
+                        Instant::now(),
+                    ) {
+                        return;
+                    }
+                    state.pending_ime_commit = Some(text.clone());
                     let _ = send_key_input(
                         state,
                         KeyEventKind::Press,
@@ -247,7 +261,10 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
                     let ctrl = state.modifiers.state().control_key();
                     let shift = state.modifiers.state().shift_key();
 
-                    if ctrl && shift && let Key::Character(s) = &event.logical_key {
+                    if ctrl
+                        && shift
+                        && let Key::Character(s) = &event.logical_key
+                    {
                         let ch = s.chars().next().unwrap_or('\0').to_ascii_lowercase();
                         if ch == 'v' {
                             if let Some(mut text) = paste_from_clipboard() {
@@ -306,6 +323,21 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
                     state.terminal.kitty_keyboard_flags(),
                     event_kind,
                 ) {
+                    if should_skip_duplicate_ime_input(
+                        &mut state.pending_ime_commit,
+                        event_kind,
+                        event.text.as_deref(),
+                        Some(&bytes),
+                    ) {
+                        return;
+                    }
+                    remember_text_key_event(
+                        &mut state.recent_text_key_event,
+                        event_kind,
+                        event.text.as_deref(),
+                        Some(&bytes),
+                        Instant::now(),
+                    );
                     let _ = send_key_input(
                         state,
                         event_kind,
@@ -317,6 +349,20 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
                         state.terminal.grid.all_dirty = true;
                     }
                     state.terminal.grid.selection = None;
+                } else {
+                    remember_text_key_event(
+                        &mut state.recent_text_key_event,
+                        event_kind,
+                        event.text.as_deref(),
+                        None,
+                        Instant::now(),
+                    );
+                    let _ = should_skip_duplicate_ime_input(
+                        &mut state.pending_ime_commit,
+                        event_kind,
+                        event.text.as_deref(),
+                        None,
+                    );
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -333,7 +379,11 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
                     self.scheduler.mark_redraw_needed();
                 }
             }
-            WindowEvent::MouseInput { state: btn_state, button, .. } => {
+            WindowEvent::MouseInput {
+                state: btn_state,
+                button,
+                ..
+            } => {
                 let protocol_button = match button {
                     MouseButton::Left => ProtocolMouseButton::Left,
                     MouseButton::Middle => ProtocolMouseButton::Middle,
@@ -346,9 +396,13 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
                     if pressed {
                         let ctrl = state.modifiers.state().control_key();
                         if ctrl {
-                            let cell = state.terminal.grid.cell_at(state.mouse_row, state.mouse_col);
+                            let cell = state
+                                .terminal
+                                .grid
+                                .cell_at(state.mouse_row, state.mouse_col);
                             if cell.hyperlink_id != 0
-                                && let Some(url) = state.terminal.grid.hyperlink_url(cell.hyperlink_id)
+                                && let Some(url) =
+                                    state.terminal.grid.hyperlink_url(cell.hyperlink_id)
                             {
                                 open_url(url);
                                 return;
@@ -433,7 +487,11 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
             }
             WindowEvent::Focused(focused) => {
                 if state.terminal.focus_events_mode() {
-                    let bytes = if focused { b"\x1b[I".to_vec() } else { b"\x1b[O".to_vec() };
+                    let bytes = if focused {
+                        b"\x1b[I".to_vec()
+                    } else {
+                        b"\x1b[O".to_vec()
+                    };
                     let _ = send_key_input(state, KeyEventKind::Press, bytes, None);
                 }
             }
@@ -451,9 +509,9 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(state) = &mut self.state {
-            let decision = self.scheduler.prepare_redraw(Instant::now(), || {
-                process_pending_io(state, event_loop)
-            });
+            let decision = self
+                .scheduler
+                .prepare_redraw(Instant::now(), || process_pending_io(state, event_loop));
             if let Some(deadline) = decision.wait_until {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
             } else {
@@ -539,7 +597,9 @@ fn apply_server_message(
 }
 
 fn maybe_send_resize(state: &mut RemoteGpuState) {
-    let Some(window_id) = state.window_id else { return };
+    let Some(window_id) = state.window_id else {
+        return;
+    };
     let Some((cols, rows)) = state.pending_size else {
         return;
     };
@@ -547,7 +607,11 @@ fn maybe_send_resize(state: &mut RemoteGpuState) {
         state.pending_size = None;
         return;
     }
-    let _ = state.client.send(&ClientMessage::Resize { window_id, cols, rows });
+    let _ = state.client.send(&ClientMessage::Resize {
+        window_id,
+        cols,
+        rows,
+    });
     state.pending_size = None;
 }
 
@@ -586,5 +650,7 @@ fn send_mouse_input(state: &mut RemoteGpuState, event: ProtocolMouseEvent) -> Re
     let Some(window_id) = state.window_id else {
         return Ok(());
     };
-    state.client.send(&ClientMessage::MouseInput { window_id, event })
+    state
+        .client
+        .send(&ClientMessage::MouseInput { window_id, event })
 }

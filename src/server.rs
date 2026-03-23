@@ -1,8 +1,8 @@
+use crate::font::{GlyphAtlas, GlyphFormat};
 use crate::protocol::{
     CellMetrics, ClientMessage, CursorState, DirtyCell, GlyphBitmap, KittyImageData,
     KittyImagePlacement, MouseEvent, ServerMessage, WindowId,
 };
-use crate::font::{GlyphAtlas, GlyphFormat};
 use crate::terminal::Terminal;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -78,7 +78,11 @@ impl ServerCore {
 
     pub fn new_with_scrollback(scrollback_limit: usize) -> Self {
         let defaults = crate::config::AppConfig::default();
-        Self::new_with_style(scrollback_limit, defaults.style.font_family, defaults.style.font_size)
+        Self::new_with_style(
+            scrollback_limit,
+            defaults.style.font_family,
+            defaults.style.font_size,
+        )
     }
 
     pub fn new_with_style(scrollback_limit: usize, font_family: String, font_size: f64) -> Self {
@@ -97,7 +101,9 @@ impl ServerCore {
     }
 
     pub fn window_scrollback_limit(&self, window_id: WindowId) -> Option<usize> {
-        self.windows.get(&window_id).map(|window| window.terminal.scrollback_limit())
+        self.windows
+            .get(&window_id)
+            .map(|window| window.terminal.scrollback_limit())
     }
 
     pub fn window_scrollback_len(&self, window_id: WindowId) -> Option<usize> {
@@ -133,14 +139,25 @@ impl ServerCore {
         }
     }
 
-    pub fn close_window(&mut self, window_id: WindowId, exit_code: Option<i32>) -> Option<ServerMessage> {
-        self.windows.remove(&window_id).map(|_| ServerMessage::WindowClosed {
-            window_id,
-            exit_code,
-        })
+    pub fn close_window(
+        &mut self,
+        window_id: WindowId,
+        exit_code: Option<i32>,
+    ) -> Option<ServerMessage> {
+        self.windows
+            .remove(&window_id)
+            .map(|_| ServerMessage::WindowClosed {
+                window_id,
+                exit_code,
+            })
     }
 
-    pub fn resize_window(&mut self, window_id: WindowId, cols: u16, rows: u16) -> Option<Vec<ServerMessage>> {
+    pub fn resize_window(
+        &mut self,
+        window_id: WindowId,
+        cols: u16,
+        rows: u16,
+    ) -> Option<Vec<ServerMessage>> {
         let dpi = self.windows.get(&window_id)?.dpi;
         let metrics = self.cell_metrics_for_dpi(dpi);
         let window = self.windows.get_mut(&window_id)?;
@@ -156,7 +173,11 @@ impl ServerCore {
         Some(messages)
     }
 
-    pub fn process_output(&mut self, window_id: WindowId, bytes: &[u8]) -> Option<ServerHandleResult> {
+    pub fn process_output(
+        &mut self,
+        window_id: WindowId,
+        bytes: &[u8],
+    ) -> Option<ServerHandleResult> {
         let window = self.windows.get_mut(&window_id)?;
         window.terminal.process(bytes);
         Some(self.collect_update_batch(window_id))
@@ -207,7 +228,10 @@ impl ServerCore {
                 self.require_window(window_id)?;
                 Ok(ServerHandleResult {
                     messages: Vec::new(),
-                    io_actions: vec![ServerIoAction::Write { window_id, bytes: text }],
+                    io_actions: vec![ServerIoAction::Write {
+                        window_id,
+                        bytes: text,
+                    }],
                 })
             }
             ClientMessage::MouseInput { window_id, event } => {
@@ -288,7 +312,8 @@ impl ServerCore {
         });
         let dirty_cells = dirty_cells_from_terminal(terminal);
         let cursor = cursor_state_from_terminal(terminal);
-        let atlas_updates = atlas_updates_from_dirty_cells(atlas, &dirty_cells, &mut window.sent_glyphs);
+        let atlas_updates =
+            atlas_updates_from_dirty_cells(atlas, &dirty_cells, &mut window.sent_glyphs);
         if !dirty_cells.is_empty() || terminal.grid.all_dirty {
             result.messages.push(ServerMessage::CellUpdate {
                 window_id,
@@ -367,7 +392,11 @@ fn atlas_updates_from_dirty_cells(
             continue;
         }
 
-        let cells = if (cell.flags & crate::grid::FLAG_WIDE) != 0 { 2 } else { 1 };
+        let cells = if (cell.flags & crate::grid::FLAG_WIDE) != 0 {
+            2
+        } else {
+            1
+        };
         if let Some(grapheme) = key.1 {
             let protocol_key = ProtocolGlyphKey::Grapheme(grapheme.clone().into_boxed_str());
             if sent_glyphs.contains(&protocol_key) {
@@ -620,7 +649,11 @@ mod tests {
     fn handle_client_message_emits_spawn_and_forward_actions() {
         let mut server = ServerCore::new();
         let created = server
-            .handle_client_message(ClientMessage::NewWindow { cols: 80, rows: 24, dpi: 96 })
+            .handle_client_message(ClientMessage::NewWindow {
+                cols: 80,
+                rows: 24,
+                dpi: 96,
+            })
             .expect("new window should succeed");
 
         let window_id = match created.messages.as_slice() {
@@ -694,10 +727,7 @@ mod tests {
                 exit_code: None,
             }]
         );
-        assert_eq!(
-            closed.io_actions,
-            vec![ServerIoAction::Close { window_id }]
-        );
+        assert_eq!(closed.io_actions, vec![ServerIoAction::Close { window_id }]);
     }
 
     #[test]
@@ -734,7 +764,10 @@ mod tests {
     fn handle_client_mouse_input_encodes_pty_bytes() {
         let mut server = ServerCore::new();
         let window_id = created_window_id(server.create_window(8, 2, 96));
-        let window = server.windows.get_mut(&window_id).expect("window should exist");
+        let window = server
+            .windows
+            .get_mut(&window_id)
+            .expect("window should exist");
         window.terminal.process(b"\x1b[?1006h\x1b[?1000h");
 
         let result = server
@@ -783,7 +816,10 @@ mod tests {
         let window_id = created_window_id(server.create_window(8, 2, 96));
 
         let updates = server
-            .process_output(window_id, b"\x1b_Ga=T,i=7,f=32,s=1,v=1,c=1,r=1;/wAA/w==\x1b\\")
+            .process_output(
+                window_id,
+                b"\x1b_Ga=T,i=7,f=32,s=1,v=1,c=1,r=1;/wAA/w==\x1b\\",
+            )
             .expect("window should exist");
 
         let kitty = updates
@@ -820,7 +856,10 @@ mod tests {
             .iter()
             .filter(|message| matches!(message, ServerMessage::AtlasUpdate { .. }))
             .count();
-        assert!(first_atlas_updates >= 1, "first glyph upload batch should not be empty");
+        assert!(
+            first_atlas_updates >= 1,
+            "first glyph upload batch should not be empty"
+        );
 
         let second = server
             .process_output(window_id, b"a")
@@ -830,6 +869,9 @@ mod tests {
             .iter()
             .filter(|message| matches!(message, ServerMessage::AtlasUpdate { .. }))
             .count();
-        assert_eq!(second_atlas_updates, 0, "already-uploaded glyphs should not be resent");
+        assert_eq!(
+            second_atlas_updates, 0,
+            "already-uploaded glyphs should not be resent"
+        );
     }
 }

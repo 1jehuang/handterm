@@ -14,10 +14,7 @@ pub fn handle_ipc_request(terminal: &mut Terminal, req: &Request) -> (Response, 
     match req.cmd.as_str() {
         "get-text" => {
             let text = if let Some(obj) = req.args.as_object() {
-                let start = obj
-                    .get("start_row")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
+                let start = obj.get("start_row").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 let end = obj
                     .get("end_row")
                     .and_then(|v| v.as_u64())

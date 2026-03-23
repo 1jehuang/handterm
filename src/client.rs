@@ -112,7 +112,9 @@ mod tests {
         let reply = ServerMessage::Bell { window_id: 7 };
         crate::protocol::write_server_message(&mut server, &reply)
             .expect("server frame should send");
-        let echoed = client.recv().expect("client should read framed server message");
+        let echoed = client
+            .recv()
+            .expect("client should read framed server message");
         assert_eq!(echoed, reply);
     }
 

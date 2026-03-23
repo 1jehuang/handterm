@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use winit::event_loop::EventLoopProxy;
 
+const IME_KEY_DEDUPE_WINDOW: Duration = Duration::from_millis(50);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VisualState {
     cursor: Option<(usize, usize, CursorStyle)>,
@@ -35,6 +37,26 @@ pub struct RedrawWork {
     pub heavy: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct StartupTiming {
+    started_at: Instant,
+    pty_spawned_at: Option<Instant>,
+    first_pty_event_at: Option<Instant>,
+    first_pty_read_at: Option<Instant>,
+    first_visible_output_at: Option<Instant>,
+    first_present_at: Option<Instant>,
+    first_present_after_visible_at: Option<Instant>,
+    bytes_read: usize,
+    bytes_before_visible: Option<usize>,
+    logged: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentTextKeyEvent {
+    text: String,
+    at: Instant,
+}
+
 impl VisualState {
     pub fn capture<T: TerminalView + ?Sized>(terminal: &T) -> Self {
         let grid = terminal.grid();
@@ -53,14 +75,160 @@ impl VisualState {
     }
 }
 
+impl StartupTiming {
+    pub fn new(started_at: Instant) -> Self {
+        Self {
+            started_at,
+            pty_spawned_at: None,
+            first_pty_event_at: None,
+            first_pty_read_at: None,
+            first_visible_output_at: None,
+            first_present_at: None,
+            first_present_after_visible_at: None,
+            bytes_read: 0,
+            bytes_before_visible: None,
+            logged: false,
+        }
+    }
+
+    pub fn mark_pty_spawned(&mut self, at: Instant) {
+        let _ = self.pty_spawned_at.get_or_insert(at);
+    }
+
+    pub fn mark_pty_event(&mut self, at: Instant) {
+        let _ = self.first_pty_event_at.get_or_insert(at);
+    }
+
+    pub fn mark_pty_read(&mut self, at: Instant, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        self.bytes_read += bytes;
+        let _ = self.first_pty_read_at.get_or_insert(at);
+    }
+
+    pub fn maybe_mark_visible<T: TerminalView + ?Sized>(&mut self, at: Instant, terminal: &T) {
+        if self.first_visible_output_at.is_some() || !terminal_has_visible_content(terminal) {
+            return;
+        }
+        self.first_visible_output_at = Some(at);
+        self.bytes_before_visible = Some(self.bytes_read);
+    }
+
+    pub fn mark_present(&mut self, at: Instant) {
+        let _ = self.first_present_at.get_or_insert(at);
+        if self.first_visible_output_at.is_some() {
+            let _ = self.first_present_after_visible_at.get_or_insert(at);
+        }
+    }
+
+    pub fn emit_if_ready(&mut self, label: &str, id: u64) {
+        if self.logged
+            || self.first_present_at.is_none()
+            || self.first_visible_output_at.is_none()
+            || self.first_present_after_visible_at.is_none()
+        {
+            return;
+        }
+
+        fn fmt_ms(started_at: Instant, at: Option<Instant>) -> String {
+            at.map(|instant| {
+                format!(
+                    "{:.2}ms",
+                    instant.duration_since(started_at).as_secs_f64() * 1000.0
+                )
+            })
+            .unwrap_or_else(|| "n/a".to_string())
+        }
+
+        let read_to_present = match (self.first_pty_read_at, self.first_present_after_visible_at) {
+            (Some(read), Some(present)) => {
+                Some(present.duration_since(read).as_secs_f64() * 1000.0)
+            }
+            _ => None,
+        };
+        let visible_to_present = match (
+            self.first_visible_output_at,
+            self.first_present_after_visible_at,
+        ) {
+            (Some(visible), Some(present)) => {
+                Some(present.duration_since(visible).as_secs_f64() * 1000.0)
+            }
+            _ => None,
+        };
+
+        eprintln!(
+            "handterm {label}: startup id={id}\n\
+             \x20 open_to_pty_spawn={} open_to_first_pty_event={} open_to_first_pty_read={}\n\
+             \x20 open_to_first_visible_output={} bytes_before_visible={} open_to_first_present={}\n\
+             \x20 open_to_first_visible_present={} first_read_to_visible_present={} first_visible_to_present={}",
+            fmt_ms(self.started_at, self.pty_spawned_at),
+            fmt_ms(self.started_at, self.first_pty_event_at),
+            fmt_ms(self.started_at, self.first_pty_read_at),
+            fmt_ms(self.started_at, self.first_visible_output_at),
+            self.bytes_before_visible
+                .map(|bytes| bytes.to_string())
+                .unwrap_or_else(|| "n/a".to_string()),
+            fmt_ms(self.started_at, self.first_present_at),
+            fmt_ms(self.started_at, self.first_present_after_visible_at),
+            read_to_present
+                .map(|ms| format!("{ms:.2}ms"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            visible_to_present
+                .map(|ms| format!("{ms:.2}ms"))
+                .unwrap_or_else(|| "n/a".to_string()),
+        );
+        self.logged = true;
+    }
+}
+
 impl FrameScheduler {
     pub fn mark_io_ready(&mut self, now: Instant, frame_interval: Duration) {
         self.frame_interval = frame_interval;
         self.io_pending = true;
-        let burst_started_at = *self.burst_started_at.get_or_insert(now);
-        let quiet_deadline = now + frame_interval;
-        let max_deadline = burst_started_at + frame_interval.saturating_mul(3);
-        self.redraw_at = Some(quiet_deadline.min(max_deadline));
+        if self.burst_started_at.is_none() {
+            self.burst_started_at = Some(now);
+        }
+    }
+
+    pub fn mark_io_processed(
+        &mut self,
+        now: Instant,
+        frame_interval: Duration,
+        work: RedrawWork,
+    ) -> bool {
+        self.frame_interval = frame_interval;
+        self.io_pending = false;
+
+        if !work.changed {
+            return false;
+        }
+
+        if work.heavy {
+            let burst_started_at = *self.burst_started_at.get_or_insert(now);
+            let burst_age = now.saturating_duration_since(burst_started_at);
+            if burst_age < self.frame_interval.saturating_mul(2) {
+                self.redraw_pending = true;
+                self.redraw_at = Some(now + self.frame_interval);
+                return false;
+            }
+        }
+
+        self.redraw_at = None;
+        self.redraw_pending = true;
+        self.burst_started_at = None;
+        true
+    }
+
+    pub fn mark_io_ready_light(&mut self) -> bool {
+        self.mark_io_processed(
+            Instant::now(),
+            self.frame_interval,
+            RedrawWork {
+                changed: true,
+                heavy: false,
+            },
+        )
     }
 
     pub fn mark_redraw_needed(&mut self) {
@@ -86,21 +254,17 @@ impl FrameScheduler {
             if work.changed {
                 self.redraw_pending = true;
             }
-            if work.changed && work.heavy && !self.frame_interval.is_zero() {
+            if work.changed && work.heavy {
                 let burst_started_at = self.burst_started_at.unwrap_or(now);
                 let burst_age = now.saturating_duration_since(burst_started_at);
-                if burst_age >= self.frame_interval.saturating_mul(3) {
-                    let settle_deadline = now + self.frame_interval;
-                    let max_deadline = burst_started_at + self.frame_interval.saturating_mul(6);
-                    let deadline = settle_deadline.min(max_deadline);
-                    if now < deadline {
-                        self.io_pending = false;
-                        self.redraw_at = Some(deadline);
-                        return FrameDecision {
-                            request_redraw: false,
-                            wait_until: Some(deadline),
-                        };
-                    }
+                if burst_age < self.frame_interval.saturating_mul(2) {
+                    let deadline = now + self.frame_interval;
+                    self.io_pending = false;
+                    self.redraw_at = Some(deadline);
+                    return FrameDecision {
+                        request_redraw: false,
+                        wait_until: Some(deadline),
+                    };
                 }
             }
             self.io_pending = false;
@@ -127,6 +291,24 @@ pub fn classify_redraw_work<T: TerminalView + ?Sized>(terminal: &T, changed: boo
     let heavy = grid.all_dirty || dirty_cells.saturating_mul(3) >= total_cells.max(1);
 
     RedrawWork { changed, heavy }
+}
+
+pub fn terminal_has_visible_content<T: TerminalView + ?Sized>(terminal: &T) -> bool {
+    let grid = terminal.grid();
+    for row in 0..grid.rows {
+        for col in 0..grid.cols {
+            if let Some(grapheme) = grid.cell_grapheme_at_scroll(row, col)
+                && grapheme.chars().any(|ch| !ch.is_whitespace())
+            {
+                return true;
+            }
+            let ch = grid.cell_at_scroll(row, col).char_display();
+            if !ch.is_whitespace() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub fn sync_visual_damage(grid: &mut Grid, previous: Option<VisualState>, current: VisualState) {
@@ -156,14 +338,6 @@ pub fn visual_signature<T: TerminalView + ?Sized>(terminal: &T) -> u64 {
         *hash = hash.wrapping_mul(FNV_PRIME);
     }
 
-    #[inline]
-    fn mix_bytes(hash: &mut u64, bytes: &[u8]) {
-        mix(hash, bytes.len() as u64);
-        for &byte in bytes {
-            mix(hash, byte as u64);
-        }
-    }
-
     let mut hash = FNV_OFFSET;
     let grid = terminal.grid();
 
@@ -189,24 +363,7 @@ pub fn visual_signature<T: TerminalView + ?Sized>(terminal: &T) -> u64 {
         mix(&mut hash, cursor_col as u64);
     }
 
-    for row in 0..grid.rows {
-        for col in 0..grid.cols {
-            let cell = grid.cell_at_scroll(row, col);
-            mix(&mut hash, cell.ch as u64);
-            if let Some(grapheme) = grid.cell_grapheme_at_scroll(row, col) {
-                mix(&mut hash, 1);
-                mix_bytes(&mut hash, grapheme.as_bytes());
-            } else {
-                mix(&mut hash, 0);
-            }
-            mix(&mut hash, cell.fg as u64);
-            mix(&mut hash, cell.bg as u64);
-            mix(&mut hash, cell.underline_color as u64);
-            mix(&mut hash, cell.attrs as u64);
-            mix(&mut hash, cell.flags as u64);
-            mix(&mut hash, cell.underline_style as u64);
-        }
-    }
+    mix(&mut hash, terminal.content_generation());
 
     mix(&mut hash, terminal.kitty_generation());
     mix(&mut hash, terminal.kitty_placements().len() as u64);
@@ -253,6 +410,78 @@ pub fn should_skip_duplicate_ime_key_event(
     should_skip
 }
 
+pub fn should_skip_duplicate_ime_input(
+    pending_ime_commit: &mut Option<String>,
+    event_kind: KeyEventKind,
+    event_text: Option<&str>,
+    encoded_bytes: Option<&[u8]>,
+) -> bool {
+    if !matches!(event_kind, KeyEventKind::Press) {
+        return false;
+    }
+
+    let should_skip = pending_ime_commit
+        .as_deref()
+        .filter(|text| !text.is_empty())
+        .is_some_and(|text| {
+            event_text == Some(text) || encoded_bytes.is_some_and(|bytes| text.as_bytes() == bytes)
+        });
+    *pending_ime_commit = None;
+    should_skip
+}
+
+fn text_for_ime_key_dedupe(
+    event_text: Option<&str>,
+    encoded_bytes: Option<&[u8]>,
+) -> Option<String> {
+    if let Some(text) = event_text.filter(|text| !text.is_empty()) {
+        return Some(text.to_string());
+    }
+
+    let bytes = encoded_bytes?;
+    let text = std::str::from_utf8(bytes).ok()?.trim_matches('\0');
+    if text.is_empty() {
+        return None;
+    }
+    if text
+        .chars()
+        .any(|ch| ch.is_control() && !matches!(ch, ' ' | '\t' | '\n' | '\r'))
+    {
+        return None;
+    }
+    Some(text.to_string())
+}
+
+pub fn remember_text_key_event(
+    recent_text_key_event: &mut Option<RecentTextKeyEvent>,
+    event_kind: KeyEventKind,
+    event_text: Option<&str>,
+    encoded_bytes: Option<&[u8]>,
+    now: Instant,
+) {
+    if !matches!(event_kind, KeyEventKind::Press) {
+        return;
+    }
+
+    *recent_text_key_event = text_for_ime_key_dedupe(event_text, encoded_bytes)
+        .map(|text| RecentTextKeyEvent { text, at: now });
+}
+
+pub fn should_skip_ime_commit_after_key_event(
+    recent_text_key_event: &mut Option<RecentTextKeyEvent>,
+    text: &str,
+    now: Instant,
+) -> bool {
+    let Some(recent) = recent_text_key_event.take() else {
+        return false;
+    };
+
+    recent.text == text
+        && now
+            .checked_duration_since(recent.at)
+            .is_some_and(|elapsed| elapsed <= IME_KEY_DEDUPE_WINDOW)
+}
+
 pub fn paste_from_clipboard() -> Option<Vec<u8>> {
     std::process::Command::new("wl-paste")
         .arg("--no-newline")
@@ -278,7 +507,12 @@ pub fn open_url(url: &str) {
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
-pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, ()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Base64DecodeError {
+    InvalidByte,
+}
+
+pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Base64DecodeError> {
     const TABLE: [u8; 256] = {
         let mut table = [0xffu8; 256];
         let mut i = 0u8;
@@ -307,7 +541,7 @@ pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, ()> {
         }
         let val = TABLE[b as usize];
         if val == 0xff {
-            return Err(());
+            return Err(Base64DecodeError::InvalidByte);
         }
         buf = (buf << 6) | val as u32;
         bits += 6;
@@ -462,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn frame_scheduler_defers_redraw_until_quiet_period() {
+    fn frame_scheduler_immediate_for_light_changes() {
         let start = Instant::now();
         let frame_interval = Duration::from_millis(8);
         let mut scheduler = FrameScheduler::default();
@@ -472,6 +706,21 @@ mod tests {
             changed: true,
             heavy: false,
         });
+        assert!(decision.request_redraw);
+        assert!(decision.wait_until.is_none());
+    }
+
+    #[test]
+    fn frame_scheduler_defers_heavy_burst() {
+        let start = Instant::now();
+        let frame_interval = Duration::from_millis(8);
+        let mut scheduler = FrameScheduler::default();
+        scheduler.mark_io_ready(start, frame_interval);
+
+        let decision = scheduler.prepare_redraw(start + Duration::from_millis(1), || RedrawWork {
+            changed: true,
+            heavy: true,
+        });
         assert!(!decision.request_redraw);
         assert!(decision.wait_until.is_some());
 
@@ -480,7 +729,18 @@ mod tests {
             heavy: false,
         });
         assert!(decision.request_redraw);
-        assert!(decision.wait_until.is_none());
+    }
+
+    #[test]
+    fn frame_scheduler_light_io_ready_redraws_immediately() {
+        let mut scheduler = FrameScheduler::default();
+        scheduler.mark_io_ready_light();
+
+        let decision = scheduler.prepare_redraw(Instant::now(), || RedrawWork {
+            changed: true,
+            heavy: false,
+        });
+        assert!(decision.request_redraw);
     }
 
     #[test]
@@ -503,5 +763,83 @@ mod tests {
             Some("a"),
         ));
         assert_eq!(pending, None);
+    }
+
+    #[test]
+    fn ime_commit_dedupes_matching_named_key_bytes() {
+        let mut pending = Some(" ".to_string());
+        assert!(should_skip_duplicate_ime_input(
+            &mut pending,
+            KeyEventKind::Press,
+            None,
+            Some(b" "),
+        ));
+        assert_eq!(pending, None);
+    }
+
+    #[test]
+    fn ime_commit_does_not_dedupe_different_named_key_bytes() {
+        let mut pending = Some(" ".to_string());
+        assert!(!should_skip_duplicate_ime_input(
+            &mut pending,
+            KeyEventKind::Press,
+            None,
+            Some(b"a"),
+        ));
+        assert_eq!(pending, None);
+    }
+
+    #[test]
+    fn ime_commit_dedupes_when_text_or_bytes_match() {
+        let mut pending = Some(" ".to_string());
+        assert!(should_skip_duplicate_ime_input(
+            &mut pending,
+            KeyEventKind::Press,
+            Some(" "),
+            Some(b"x"),
+        ));
+        assert_eq!(pending, None);
+    }
+
+    #[test]
+    fn key_event_dedupes_matching_followup_ime_commit_text() {
+        let now = Instant::now();
+        let mut recent = None;
+        remember_text_key_event(&mut recent, KeyEventKind::Press, Some(" "), Some(b" "), now);
+
+        assert!(should_skip_ime_commit_after_key_event(
+            &mut recent,
+            " ",
+            now + Duration::from_millis(5),
+        ));
+        assert_eq!(recent, None);
+    }
+
+    #[test]
+    fn key_event_dedupes_matching_followup_ime_commit_bytes_only_space() {
+        let now = Instant::now();
+        let mut recent = None;
+        remember_text_key_event(&mut recent, KeyEventKind::Press, None, Some(b" "), now);
+
+        assert!(should_skip_ime_commit_after_key_event(
+            &mut recent,
+            " ",
+            now + Duration::from_millis(5),
+        ));
+        assert_eq!(recent, None);
+    }
+
+    #[test]
+    fn stale_key_event_does_not_dedupe_later_ime_commit() {
+        let now = Instant::now();
+        let mut recent = None;
+        remember_text_key_event(&mut recent, KeyEventKind::Press, Some(" "), Some(b" "), now);
+
+        assert!(!should_skip_ime_commit_after_key_event(
+            &mut recent,
+            " ",
+            now + Duration::from_millis(200),
+        ));
+        assert_eq!(recent, None);
     }
 }

@@ -271,9 +271,7 @@ pub fn send_command(socket_path: &Path, req: &Request) -> Result<Response> {
 
     let mut data = serde_json::to_vec(req).context("failed to serialize request")?;
     data.push(b'\n');
-    stream
-        .write_all(&data)
-        .context("failed to send request")?;
+    stream.write_all(&data).context("failed to send request")?;
 
     let mut resp_buf = vec![0u8; 65536];
     let mut total = 0;

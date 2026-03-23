@@ -256,7 +256,11 @@ fn encode_kitty_key(
     let primary = text_key_primary_codepoint(key, physical_key)?;
     let first = kitty_first_param(primary, text, physical_key, modifiers, report_alternate);
     let modifier_field = kitty_modifier_field(modifiers, report_events, event_kind);
-    let text_field = if report_text { kitty_text_field(text) } else { None };
+    let text_field = if report_text {
+        kitty_text_field(text)
+    } else {
+        None
+    };
     Some(format_kitty_csi_u(&first, modifier_field, text_field))
 }
 
@@ -362,7 +366,11 @@ fn kitty_text_field(text: Option<&str>) -> Option<String> {
     }
 }
 
-fn format_kitty_csi_u(first: &str, modifier_field: Option<String>, text_field: Option<String>) -> Vec<u8> {
+fn format_kitty_csi_u(
+    first: &str,
+    modifier_field: Option<String>,
+    text_field: Option<String>,
+) -> Vec<u8> {
     let mut seq = String::from("\x1b[");
     seq.push_str(first);
     if modifier_field.is_some() || text_field.is_some() {
@@ -390,18 +398,22 @@ fn encode_kitty_named_key(
 ) -> Option<Vec<u8>> {
     let mods = kitty_modifier_field(modifiers, report_events, event_kind);
     let letter_form = |prefix_o: bool, suffix: char| {
-        let mut seq = String::from("\x1b[");
         if let Some(mods) = mods.clone() {
+            let mut seq = String::from("\x1b[");
             seq.push('1');
             seq.push(';');
             seq.push_str(&mods);
-        } else if prefix_o {
-            seq.push('O');
             seq.push(suffix);
-            return seq.into_bytes();
+            seq.into_bytes()
+        } else if prefix_o {
+            let mut seq = String::from("\x1bO");
+            seq.push(suffix);
+            seq.into_bytes()
+        } else {
+            let mut seq = String::from("\x1b[");
+            seq.push(suffix);
+            seq.into_bytes()
         }
-        seq.push(suffix);
-        seq.into_bytes()
     };
     let tilde_form = |number: u16| {
         let mut seq = String::from("\x1b[");
@@ -655,5 +667,64 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bytes, b"\x1b[57442u");
+    }
+
+    #[test]
+    fn legacy_release_events_do_not_emit_bytes() {
+        let bytes = key_to_bytes(
+            &Key::Character("x".into()),
+            Some("x"),
+            None,
+            false,
+            ModifiersState::default(),
+            0,
+            KeyEventKind::Release,
+        );
+        assert!(bytes.is_none());
+    }
+
+    #[test]
+    fn alt_modified_enter_keeps_escape_prefix() {
+        let bytes = key_to_bytes(
+            &Key::Named(NamedKey::Enter),
+            Some("\r"),
+            None,
+            false,
+            ModifiersState::ALT,
+            0,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"\x1b\r");
+    }
+
+    #[test]
+    fn kitty_plain_text_key_falls_back_to_legacy_when_not_ambiguous() {
+        let bytes = key_to_bytes(
+            &Key::Character("a".into()),
+            Some("a"),
+            Some(&PhysicalKey::Code(KeyCode::KeyA)),
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_DISAMBIGUATE,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"a");
+    }
+
+    #[test]
+    fn kitty_app_cursor_uses_ss3_sequence_without_modifiers() {
+        let bytes = key_to_bytes(
+            &Key::Named(NamedKey::ArrowUp),
+            None,
+            None,
+            true,
+            ModifiersState::default(),
+            KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"\x1bOA");
     }
 }

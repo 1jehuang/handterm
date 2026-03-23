@@ -1,10 +1,10 @@
+use crate::config::AppConfig;
 use crate::protocol::{
     ClientMessage, ServerMessage, WindowId, decode_client_message, encode_server_message,
     read_server_message, write_client_message,
 };
 use crate::pty::PtyChild;
 use crate::server::{ServerCore, ServerIoAction};
-use crate::config::AppConfig;
 use anyhow::{Context, Result};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use std::collections::{BTreeMap, BTreeSet};
@@ -488,13 +488,18 @@ mod tests {
         let encoded = encode_server_frame(&message).expect("frame should encode");
         let mut partial = encoded[..encoded.len() - 1].to_vec();
 
-        assert!(take_frame(&mut partial).expect("partial frame parse should succeed").is_none());
+        assert!(
+            take_frame(&mut partial)
+                .expect("partial frame parse should succeed")
+                .is_none()
+        );
 
         partial.push(*encoded.last().expect("frame should have a last byte"));
         let payload = take_frame(&mut partial)
             .expect("complete frame parse should succeed")
             .expect("complete frame should decode");
-        let decoded = crate::protocol::decode_server_message(&payload).expect("server message should decode");
+        let decoded =
+            crate::protocol::decode_server_message(&payload).expect("server message should decode");
         assert_eq!(decoded, message);
         assert!(partial.is_empty());
     }
@@ -542,9 +547,8 @@ mod tests {
         let stop_thread = stop.clone();
 
         let handle = thread::spawn(move || {
-            let mut daemon =
-                ServerDaemon::bind(&socket_path, crate::grid::DEFAULT_SCROLLBACK_MAX)
-                    .expect("daemon should bind");
+            let mut daemon = ServerDaemon::bind(&socket_path, crate::grid::DEFAULT_SCROLLBACK_MAX)
+                .expect("daemon should bind");
             while !stop_thread.load(Ordering::Relaxed) {
                 daemon.poll_once().expect("daemon poll should succeed");
             }
@@ -563,7 +567,11 @@ mod tests {
         let mut client = client.expect("client should connect to daemon");
 
         client
-            .send(&ClientMessage::NewWindow { cols: 20, rows: 5, dpi: 96 })
+            .send(&ClientMessage::NewWindow {
+                cols: 20,
+                rows: 5,
+                dpi: 96,
+            })
             .expect("new window should send");
         let created = client.recv().expect("window created should arrive");
         let window_id = match created {
@@ -612,11 +620,9 @@ mod tests {
         let socket_path_for_thread = socket_path.clone();
 
         let handle = thread::spawn(move || {
-            let mut daemon = ServerDaemon::bind(
-                &socket_path_for_thread,
-                crate::grid::DEFAULT_SCROLLBACK_MAX,
-            )
-            .expect("daemon should bind");
+            let mut daemon =
+                ServerDaemon::bind(&socket_path_for_thread, crate::grid::DEFAULT_SCROLLBACK_MAX)
+                    .expect("daemon should bind");
             while !stop_thread.load(Ordering::Relaxed) {
                 daemon.poll_once().expect("daemon poll should succeed");
             }

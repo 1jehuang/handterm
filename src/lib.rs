@@ -3,11 +3,11 @@
 pub mod app;
 pub mod backend;
 pub mod build_info;
+#[cfg(feature = "cli")]
+pub mod cli;
 #[cfg(feature = "daemon-client")]
 #[allow(dead_code)]
 pub mod client;
-#[cfg(feature = "cli")]
-pub mod cli;
 pub mod color;
 pub mod config;
 #[cfg(feature = "daemon-server")]
@@ -15,15 +15,15 @@ pub mod daemon;
 #[allow(dead_code)]
 pub mod font;
 pub mod frontend;
-#[cfg(feature = "gpu")]
-pub mod gpu_frame;
 #[cfg(all(feature = "gpu", feature = "standalone"))]
 pub mod gpu_app;
 #[cfg(feature = "gpu")]
+pub mod gpu_frame;
+#[cfg(feature = "gpu")]
 pub mod gpu_runtime;
+pub mod input;
 #[cfg(feature = "standalone")]
 pub mod ipc;
-pub mod input;
 #[cfg(feature = "standalone")]
 pub mod metrics;
 #[cfg(any(feature = "standalone", feature = "daemon-server"))]
@@ -50,10 +50,10 @@ pub use handterm_common::terminal;
 
 #[cfg(feature = "cli")]
 use anyhow::Result;
-#[cfg(feature = "cli")]
-use backend::{Backend, resolve_backend};
 #[cfg(all(feature = "cpu", feature = "cli"))]
 use backend::background_opacity_warning;
+#[cfg(feature = "cli")]
+use backend::{Backend, resolve_backend};
 #[cfg(feature = "cli")]
 use clap::Parser;
 #[cfg(feature = "cli")]
@@ -72,11 +72,15 @@ fn open_window_in_existing_host(
 ) -> Result<()> {
     let socket_path = match to {
         Some(path) => path,
-        None => ipc::find_socket_for_backend(backend)
-            .ok_or_else(|| anyhow::anyhow!("no running handterm {} host found", match backend {
-                Backend::Cpu => "CPU",
-                Backend::Gpu => "GPU",
-            }))?,
+        None => ipc::find_socket_for_backend(backend).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no running handterm {} host found",
+                match backend {
+                    Backend::Cpu => "CPU",
+                    Backend::Gpu => "GPU",
+                }
+            )
+        })?,
     };
 
     let mut args = serde_json::Map::new();
@@ -93,7 +97,10 @@ fn open_window_in_existing_host(
     };
     let resp = ipc::send_command(&socket_path, &req)?;
     if !resp.ok {
-        anyhow::bail!(resp.error.unwrap_or_else(|| "open-window request failed".to_string()));
+        anyhow::bail!(
+            resp.error
+                .unwrap_or_else(|| "open-window request failed".to_string())
+        );
     }
     Ok(())
 }
@@ -111,7 +118,8 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
 
     #[cfg(feature = "cpu")]
     let warn_if_cpu_opacity = || {
-        if let Some(warning) = background_opacity_warning(backend, config.style.background_opacity) {
+        if let Some(warning) = background_opacity_warning(backend, config.style.background_opacity)
+        {
             eprintln!("{warning}");
         }
     };
@@ -182,54 +190,52 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        None => {
-            match backend {
-                Backend::Cpu => {
-                    #[cfg(feature = "cpu")]
+        None => match backend {
+            Backend::Cpu => {
+                #[cfg(feature = "cpu")]
+                {
+                    warn_if_cpu_opacity();
+                    if let Some(socket_path) = ipc::find_socket_for_backend(Backend::Cpu)
+                        && ipc::send_command(
+                            &socket_path,
+                            &ipc::Request {
+                                cmd: "open-window".to_string(),
+                                args: serde_json::Value::Object(serde_json::Map::new()),
+                            },
+                        )
+                        .is_ok()
                     {
-                        warn_if_cpu_opacity();
-                        if let Some(socket_path) = ipc::find_socket_for_backend(Backend::Cpu)
-                            && ipc::send_command(
-                                &socket_path,
-                                &ipc::Request {
-                                    cmd: "open-window".to_string(),
-                                    args: serde_json::Value::Object(serde_json::Map::new()),
-                                },
-                            )
-                            .is_ok()
-                        {
-                            return Ok(());
-                        }
-                        app::run(config)
+                        return Ok(());
                     }
-                    #[cfg(not(feature = "cpu"))]
-                    {
-                        unreachable!("backend resolution allowed unavailable CPU backend");
-                    }
+                    app::run(config)
                 }
-                Backend::Gpu => {
-                    #[cfg(feature = "gpu")]
-                    {
-                        if let Some(socket_path) = ipc::find_socket_for_backend(Backend::Gpu)
-                            && ipc::send_command(
-                                &socket_path,
-                                &ipc::Request {
-                                    cmd: "open-window".to_string(),
-                                    args: serde_json::Value::Object(serde_json::Map::new()),
-                                },
-                            )
-                            .is_ok()
-                        {
-                            return Ok(());
-                        }
-                        gpu_app::run(config)
-                    }
-                    #[cfg(not(feature = "gpu"))]
-                    {
-                        unreachable!("backend resolution allowed unavailable GPU backend");
-                    }
+                #[cfg(not(feature = "cpu"))]
+                {
+                    unreachable!("backend resolution allowed unavailable CPU backend");
                 }
             }
-        }
+            Backend::Gpu => {
+                #[cfg(feature = "gpu")]
+                {
+                    if let Some(socket_path) = ipc::find_socket_for_backend(Backend::Gpu)
+                        && ipc::send_command(
+                            &socket_path,
+                            &ipc::Request {
+                                cmd: "open-window".to_string(),
+                                args: serde_json::Value::Object(serde_json::Map::new()),
+                            },
+                        )
+                        .is_ok()
+                    {
+                        return Ok(());
+                    }
+                    gpu_app::run(config)
+                }
+                #[cfg(not(feature = "gpu"))]
+                {
+                    unreachable!("backend resolution allowed unavailable GPU backend");
+                }
+            }
+        },
     }
 }

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use handterm::backend::{resolve_backend, Backend};
+use handterm::backend::{Backend, resolve_backend};
 use handterm::config::AppConfig;
 use std::path::PathBuf;
 

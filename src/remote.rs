@@ -84,8 +84,12 @@ impl RemoteTerminalState {
 
         match message {
             ServerMessage::Pong { .. } => {}
-            ServerMessage::WindowCreated { cols, rows, modes, .. }
-            | ServerMessage::WindowResized { cols, rows, modes, .. } => {
+            ServerMessage::WindowCreated {
+                cols, rows, modes, ..
+            }
+            | ServerMessage::WindowResized {
+                cols, rows, modes, ..
+            } => {
                 self.resize(*cols, *rows);
                 self.apply_window_modes(*modes);
                 self.grid.mark_all_dirty();
@@ -180,7 +184,8 @@ impl RemoteTerminalState {
     fn apply_cursor_state(&mut self, cursor: Option<&CursorState>) {
         match cursor {
             Some(cursor) => {
-                self.grid.set_cursor(cursor.row as usize, cursor.col as usize);
+                self.grid
+                    .set_cursor(cursor.row as usize, cursor.col as usize);
                 self.cursor_visible = cursor.visible;
                 self.cursor_style = match cursor.style {
                     1 => CursorStyle::Underline,
@@ -220,7 +225,13 @@ impl RemoteTerminalState {
         }
         let main = std::mem::replace(
             &mut self.grid,
-            Grid::new_with_scrollback(self.cols, self.rows, [0xcd, 0xd6, 0xf4], [0x00, 0x00, 0x00], 0),
+            Grid::new_with_scrollback(
+                self.cols,
+                self.rows,
+                [0xcd, 0xd6, 0xf4],
+                [0x00, 0x00, 0x00],
+                0,
+            ),
         );
         self.alt_grid = Some(main);
     }
@@ -301,7 +312,7 @@ pub fn should_apply_message(window_id: Option<WindowId>, message: &ServerMessage
     }
 }
 
-    pub fn message_window_id(message: &ServerMessage) -> Option<WindowId> {
+pub fn message_window_id(message: &ServerMessage) -> Option<WindowId> {
     match message {
         ServerMessage::Pong { .. } => None,
         ServerMessage::WindowCreated { window_id, .. }
@@ -427,6 +438,9 @@ mod tests {
         assert_eq!(terminal.kitty_generation(), 2);
         assert_eq!(terminal.kitty_placements().len(), 1);
         assert_eq!(terminal.kitty_placements()[0].image_id, 5);
-        assert_eq!(terminal.kitty_image(5).expect("image should exist").data, vec![255, 0, 0, 255]);
+        assert_eq!(
+            terminal.kitty_image(5).expect("image should exist").data,
+            vec![255, 0, 0, 255]
+        );
     }
 }

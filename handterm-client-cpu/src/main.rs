@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use handterm::backend::{background_opacity_warning, Backend};
+use handterm::backend::{Backend, background_opacity_warning};
 use handterm::config::AppConfig;
 use std::path::PathBuf;
 
@@ -23,7 +23,8 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let config = AppConfig::load(args.config.as_deref())?;
     let socket_path = args.socket.unwrap_or_else(default_server_socket_path);
-    if let Some(warning) = background_opacity_warning(Backend::Cpu, config.style.background_opacity) {
+    if let Some(warning) = background_opacity_warning(Backend::Cpu, config.style.background_opacity)
+    {
         eprintln!("{warning}");
     }
     handterm::remote_app::run(config, socket_path)

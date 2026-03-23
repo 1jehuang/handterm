@@ -316,10 +316,8 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
                     (ElementState::Released, _) => KeyEventKind::Release,
                 };
 
-                let ime_dedupe_text = event
-                    .text
-                    .as_deref()
-                    .or_else(|| crate::frontend::named_key_ime_dedupe_text(&event.logical_key));
+                let ime_dedupe_text =
+                    crate::frontend::key_ime_dedupe_text(&event.logical_key, event.text.as_deref());
 
                 if let Some(bytes) = key_to_bytes(
                     &event.logical_key,
@@ -333,7 +331,7 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
                     if should_skip_duplicate_ime_input(
                         &mut state.pending_ime_commit,
                         event_kind,
-                        ime_dedupe_text,
+                        ime_dedupe_text.as_deref(),
                         Some(&bytes),
                     ) {
                         return;
@@ -341,7 +339,7 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
                     remember_text_key_event(
                         &mut state.recent_text_key_event,
                         event_kind,
-                        ime_dedupe_text,
+                        ime_dedupe_text.as_deref(),
                         Some(&bytes),
                         Instant::now(),
                     );
@@ -360,14 +358,14 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
                     remember_text_key_event(
                         &mut state.recent_text_key_event,
                         event_kind,
-                        ime_dedupe_text,
+                        ime_dedupe_text.as_deref(),
                         None,
                         Instant::now(),
                     );
                     let _ = should_skip_duplicate_ime_input(
                         &mut state.pending_ime_commit,
                         event_kind,
-                        ime_dedupe_text,
+                        ime_dedupe_text.as_deref(),
                         None,
                     );
                 }

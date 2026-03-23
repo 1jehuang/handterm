@@ -216,6 +216,9 @@ end=$(date +%s%N)
 echo "$(( (end - start) / 1000000 )) ms"
 kill $pid
 
+# Synthetic frontend input dedupe (GPU by default; uses socket + isolated runtime dir)
+./scripts/test_input_dedupe.sh
+
 # Memory
 <terminal> &
 pid=$!

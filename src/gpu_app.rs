@@ -11,7 +11,7 @@ use crate::gpu_runtime::{
     create_surface_state_with_shared_profiled_with_defaults, render_surface_state,
     render_surface_state_profiled, resize_surface_state,
 };
-use crate::ipc::{IpcAction, IpcServer, Request, Response};
+use crate::ipc::{IpcAction, IpcServer, Request, Response, SyntheticKeyEvent};
 use crate::pty::PtyChild;
 use crate::standalone_support::handle_ipc_request;
 use crate::terminal::Terminal;
@@ -340,6 +340,132 @@ impl GpuApp {
             .and_then(|v| v.as_u64())
     }
 
+    fn synthetic_key_event_from_request(req: &Request) -> Result<SyntheticKeyEvent, &'static str> {
+        let Some(args) = req.args.as_object() else {
+            return Err("missing JSON object arguments");
+        };
+        let kind = match args.get("kind").and_then(|v| v.as_str()).unwrap_or("press") {
+            "press" => KeyEventKind::Press,
+            "repeat" => KeyEventKind::Repeat,
+            "release" => KeyEventKind::Release,
+            _ => return Err("invalid 'kind' argument"),
+        };
+        let Some(key) = args.get("key").and_then(|v| v.as_str()) else {
+            return Err("missing 'key' argument");
+        };
+        let text = args
+            .get("text")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string);
+        Ok(SyntheticKeyEvent {
+            kind,
+            key: key.to_string(),
+            text,
+            ctrl: args.get("ctrl").and_then(|v| v.as_bool()).unwrap_or(false),
+            alt: args.get("alt").and_then(|v| v.as_bool()).unwrap_or(false),
+            shift: args.get("shift").and_then(|v| v.as_bool()).unwrap_or(false),
+            super_key: args
+                .get("super")
+                .or_else(|| args.get("super_key"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        })
+    }
+
+    fn apply_synthetic_ime_commit(state: &mut GpuWindowState, text: &str) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        let ime_commit_text =
+            crate::frontend::normalize_ime_dedupe_text(text).unwrap_or_else(|| text.to_string());
+        crate::frontend::trace_input(format!(
+            "gpu synthetic ime-commit raw={:?} normalized={:?}",
+            text, ime_commit_text
+        ));
+        if should_skip_ime_commit_after_key_event(
+            &mut state.recent_text_key_event,
+            &ime_commit_text,
+            Instant::now(),
+        ) {
+            crate::frontend::trace_input("gpu synthetic ime-commit skipped after key-event dedupe");
+            return false;
+        }
+        Self::enter_hot_mode(state, Instant::now());
+        state.pending_ime_commit = Some(ime_commit_text);
+        let _ = state.pty.write_all(text.as_bytes());
+        if state.terminal.grid.scroll_offset > 0 {
+            state.terminal.grid.scroll_offset = 0;
+            state.terminal.grid.all_dirty = true;
+        }
+        state.terminal.grid.selection = None;
+        drain_pty(state) > 0
+    }
+
+    fn apply_synthetic_key_event(state: &mut GpuWindowState, event: &SyntheticKeyEvent) -> bool {
+        let logical_key = crate::frontend::parse_synthetic_key(&event.key);
+        let modifiers = crate::frontend::synthetic_modifiers_state(
+            event.ctrl,
+            event.alt,
+            event.shift,
+            event.super_key,
+        );
+        let ime_dedupe_text =
+            crate::frontend::key_ime_dedupe_text(&logical_key, event.text.as_deref());
+        if let Some(bytes) = key_to_bytes(
+            &logical_key,
+            event.text.as_deref(),
+            None,
+            state.terminal.application_cursor_keys,
+            modifiers,
+            state.terminal.kitty_keyboard_flags(),
+            event.kind,
+        ) {
+            crate::frontend::trace_input(format!(
+                "gpu synthetic key-event kind={:?} key={:?} text={:?} dedupe_text={:?} bytes={:?}",
+                event.kind, logical_key, event.text, ime_dedupe_text, bytes
+            ));
+            if should_skip_duplicate_ime_input(
+                &mut state.pending_ime_commit,
+                event.kind,
+                ime_dedupe_text.as_deref(),
+                Some(&bytes),
+            ) {
+                crate::frontend::trace_input("gpu synthetic key-event skipped by ime dedupe");
+                return false;
+            }
+            remember_text_key_event(
+                &mut state.recent_text_key_event,
+                event.kind,
+                ime_dedupe_text.as_deref(),
+                Some(&bytes),
+                Instant::now(),
+            );
+            Self::enter_hot_mode(state, Instant::now());
+            let _ = state.pty.write_all(&bytes);
+            if state.terminal.grid.scroll_offset > 0 {
+                state.terminal.grid.scroll_offset = 0;
+                state.terminal.grid.all_dirty = true;
+            }
+            state.terminal.grid.selection = None;
+            drain_pty(state) > 0
+        } else {
+            remember_text_key_event(
+                &mut state.recent_text_key_event,
+                event.kind,
+                ime_dedupe_text.as_deref(),
+                None,
+                Instant::now(),
+            );
+            let _ = should_skip_duplicate_ime_input(
+                &mut state.pending_ime_commit,
+                event.kind,
+                ime_dedupe_text.as_deref(),
+                None,
+            );
+            false
+        }
+    }
+
     fn handle_host_ipc_request(&mut self, req: &Request) -> (Response, IpcAction) {
         if req.cmd == "open-window" {
             let cols = req
@@ -377,6 +503,39 @@ impl GpuApp {
                 })),
                 IpcAction::None,
             );
+        }
+
+        if req.cmd == "send-key-event" {
+            return match Self::synthetic_key_event_from_request(req) {
+                Ok(event) => (
+                    Response::ok_empty(),
+                    IpcAction::SyntheticKeyEvent {
+                        window: Self::target_window_from_args(req),
+                        event,
+                    },
+                ),
+                Err(error) => (Response::err(error), IpcAction::None),
+            };
+        }
+
+        if req.cmd == "send-ime-commit" {
+            let text = req
+                .args
+                .as_object()
+                .and_then(|o| o.get("text"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            return if text.is_empty() {
+                (Response::err("missing 'text' argument"), IpcAction::None)
+            } else {
+                (
+                    Response::ok_empty(),
+                    IpcAction::SyntheticImeCommit {
+                        window: Self::target_window_from_args(req),
+                        text: text.to_string(),
+                    },
+                )
+            };
         }
 
         let Some(target_id) = self.resolve_target_window_id(Self::target_window_from_args(req))
@@ -437,6 +596,46 @@ impl GpuApp {
                         && let Some(winit_id) = self.window_ids.get(&id).copied()
                     {
                         self.close_window(winit_id, event_loop);
+                    }
+                }
+                IpcAction::SyntheticKeyEvent { window, event } => {
+                    if let Some(id) = self.resolve_target_window_id(window)
+                        && let Some(winit_id) = self.window_ids.get(&id)
+                        && let Some(state) = self.windows.get_mut(winit_id)
+                    {
+                        let changed = Self::apply_synthetic_key_event(state, &event);
+                        let work = crate::frontend::classify_redraw_work(&state.terminal, changed);
+                        let should_redraw_now = if self.focused_window == Some(state.id) {
+                            state.scheduler.mark_redraw_needed();
+                            true
+                        } else {
+                            state
+                                .scheduler
+                                .mark_io_processed(Instant::now(), FRAME_INTERVAL, work)
+                        };
+                        if should_redraw_now {
+                            state.renderer.window.request_redraw();
+                        }
+                    }
+                }
+                IpcAction::SyntheticImeCommit { window, text } => {
+                    if let Some(id) = self.resolve_target_window_id(window)
+                        && let Some(winit_id) = self.window_ids.get(&id)
+                        && let Some(state) = self.windows.get_mut(winit_id)
+                    {
+                        let changed = Self::apply_synthetic_ime_commit(state, &text);
+                        let work = crate::frontend::classify_redraw_work(&state.terminal, changed);
+                        let should_redraw_now = if self.focused_window == Some(state.id) {
+                            state.scheduler.mark_redraw_needed();
+                            true
+                        } else {
+                            state
+                                .scheduler
+                                .mark_io_processed(Instant::now(), FRAME_INTERVAL, work)
+                        };
+                        if should_redraw_now {
+                            state.renderer.window.request_redraw();
+                        }
                     }
                 }
             }
@@ -533,11 +732,18 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                         if !text.is_empty() {
                             let ime_commit_text = crate::frontend::normalize_ime_dedupe_text(&text)
                                 .unwrap_or_else(|| text.clone());
+                            crate::frontend::trace_input(format!(
+                                "gpu ime-commit raw={:?} normalized={:?}",
+                                text, ime_commit_text
+                            ));
                             if should_skip_ime_commit_after_key_event(
                                 &mut state.recent_text_key_event,
                                 &ime_commit_text,
                                 Instant::now(),
                             ) {
+                                crate::frontend::trace_input(
+                                    "gpu ime-commit skipped after key-event dedupe",
+                                );
                                 return;
                             }
                             Self::enter_hot_mode(state, Instant::now());
@@ -622,9 +828,10 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                             (ElementState::Released, _) => KeyEventKind::Release,
                         };
 
-                        let ime_dedupe_text = event.text.as_deref().or_else(|| {
-                            crate::frontend::named_key_ime_dedupe_text(&event.logical_key)
-                        });
+                        let ime_dedupe_text = crate::frontend::key_ime_dedupe_text(
+                            &event.logical_key,
+                            event.text.as_deref(),
+                        );
 
                         if let Some(bytes) = key_to_bytes(
                             &event.logical_key,
@@ -635,18 +842,23 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                             state.terminal.kitty_keyboard_flags(),
                             event_kind,
                         ) {
+                            crate::frontend::trace_input(format!(
+                                "gpu key-event kind={:?} key={:?} text={:?} dedupe_text={:?} bytes={:?}",
+                                event_kind, event.logical_key, event.text, ime_dedupe_text, bytes
+                            ));
                             if should_skip_duplicate_ime_input(
                                 &mut state.pending_ime_commit,
                                 event_kind,
-                                ime_dedupe_text,
+                                ime_dedupe_text.as_deref(),
                                 Some(&bytes),
                             ) {
+                                crate::frontend::trace_input("gpu key-event skipped by ime dedupe");
                                 return;
                             }
                             remember_text_key_event(
                                 &mut state.recent_text_key_event,
                                 event_kind,
-                                ime_dedupe_text,
+                                ime_dedupe_text.as_deref(),
                                 Some(&bytes),
                                 Instant::now(),
                             );
@@ -677,14 +889,14 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                             remember_text_key_event(
                                 &mut state.recent_text_key_event,
                                 event_kind,
-                                ime_dedupe_text,
+                                ime_dedupe_text.as_deref(),
                                 None,
                                 Instant::now(),
                             );
                             let _ = should_skip_duplicate_ime_input(
                                 &mut state.pending_ime_commit,
                                 event_kind,
-                                ime_dedupe_text,
+                                ime_dedupe_text.as_deref(),
                                 None,
                             );
                         }

@@ -428,14 +428,11 @@ fn encode_kitty_named_key(
 
     match key {
         Key::Named(named) => Some(match named {
-            NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace
-                if !report_all && matches!(event_kind, KeyEventKind::Press) =>
-            {
+            NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace if !report_all => {
                 return None;
             }
             NamedKey::Space
                 if !report_all
-                    && matches!(event_kind, KeyEventKind::Press)
                     && !modifiers.shift_key()
                     && !modifiers.alt_key()
                     && !modifiers.control_key()
@@ -590,6 +587,49 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bytes, b"\x1b[1;4A");
+    }
+
+    #[test]
+    fn kitty_report_events_does_not_emit_backspace_release_without_report_all() {
+        let bytes = key_to_bytes(
+            &Key::Named(NamedKey::Backspace),
+            None,
+            None,
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_REPORT_EVENTS,
+            KeyEventKind::Release,
+        );
+        assert_eq!(bytes, None);
+    }
+
+    #[test]
+    fn kitty_report_events_does_not_emit_plain_space_release_without_report_all() {
+        let bytes = key_to_bytes(
+            &Key::Named(NamedKey::Space),
+            Some(" "),
+            Some(&PhysicalKey::Code(KeyCode::Space)),
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_REPORT_EVENTS,
+            KeyEventKind::Release,
+        );
+        assert_eq!(bytes, None);
+    }
+
+    #[test]
+    fn kitty_report_all_can_still_emit_space_release() {
+        let bytes = key_to_bytes(
+            &Key::Named(NamedKey::Space),
+            Some(" "),
+            Some(&PhysicalKey::Code(KeyCode::Space)),
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_REPORT_ALL | KITTY_KBD_REPORT_EVENTS,
+            KeyEventKind::Release,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"\x1b[32;1:3u");
     }
 
     #[test]

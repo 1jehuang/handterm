@@ -66,6 +66,25 @@ pub enum IpcAction {
         rows: Option<u16>,
     },
     FocusWindow(u64),
+    SyntheticKeyEvent {
+        window: Option<u64>,
+        event: SyntheticKeyEvent,
+    },
+    SyntheticImeCommit {
+        window: Option<u64>,
+        text: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyntheticKeyEvent {
+    pub kind: crate::frontend::KeyEventKind,
+    pub key: String,
+    pub text: Option<String>,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub super_key: bool,
 }
 
 pub struct IpcServer {

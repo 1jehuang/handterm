@@ -3,12 +3,62 @@ pub use crate::input::{KeyEventKind, key_to_bytes};
 use crate::terminal::{CursorStyle, TerminalView};
 use std::io::Write;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use winit::event_loop::EventLoopProxy;
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 const IME_KEY_DEDUPE_WINDOW: Duration = Duration::from_millis(50);
+
+fn input_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("HANDTERM_TRACE_INPUT").is_some())
+}
+
+pub fn trace_input(message: impl AsRef<str>) {
+    if input_trace_enabled() {
+        eprintln!("handterm input-trace: {}", message.as_ref());
+    }
+}
+
+pub fn parse_synthetic_key(spec: &str) -> Key {
+    match spec.to_ascii_lowercase().as_str() {
+        "enter" | "return" => Key::Named(NamedKey::Enter),
+        "tab" => Key::Named(NamedKey::Tab),
+        "escape" | "esc" => Key::Named(NamedKey::Escape),
+        "backspace" => Key::Named(NamedKey::Backspace),
+        "space" => Key::Named(NamedKey::Space),
+        "up" => Key::Named(NamedKey::ArrowUp),
+        "down" => Key::Named(NamedKey::ArrowDown),
+        "left" => Key::Named(NamedKey::ArrowLeft),
+        "right" => Key::Named(NamedKey::ArrowRight),
+        "home" => Key::Named(NamedKey::Home),
+        "end" => Key::Named(NamedKey::End),
+        "delete" => Key::Named(NamedKey::Delete),
+        "page_up" | "pageup" => Key::Named(NamedKey::PageUp),
+        "page_down" | "pagedown" => Key::Named(NamedKey::PageDown),
+        "alt" => Key::Named(NamedKey::Alt),
+        "shift" => Key::Named(NamedKey::Shift),
+        "control" | "ctrl" => Key::Named(NamedKey::Control),
+        "super" | "meta" => Key::Named(NamedKey::Super),
+        _ => Key::Character(spec.into()),
+    }
+}
+
+pub fn synthetic_modifiers_state(
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    super_key: bool,
+) -> ModifiersState {
+    let mut modifiers = ModifiersState::empty();
+    modifiers.set(ModifiersState::CONTROL, ctrl);
+    modifiers.set(ModifiersState::ALT, alt);
+    modifiers.set(ModifiersState::SHIFT, shift);
+    modifiers.set(ModifiersState::SUPER, super_key);
+    modifiers
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VisualState {
@@ -412,6 +462,18 @@ pub fn named_key_ime_dedupe_text(key: &Key) -> Option<&'static str> {
         Key::Named(NamedKey::Tab) => Some("\t"),
         Key::Named(NamedKey::Enter) => Some("\r"),
         Key::Named(NamedKey::Backspace) => Some("\u{8}"),
+        _ => None,
+    }
+}
+
+pub fn key_ime_dedupe_text(key: &Key, event_text: Option<&str>) -> Option<String> {
+    if let Some(text) = event_text.and_then(normalize_ime_dedupe_text) {
+        return Some(text);
+    }
+
+    match key {
+        Key::Character(text) => normalize_ime_dedupe_text(text),
+        Key::Named(_) => named_key_ime_dedupe_text(key).map(ToString::to_string),
         _ => None,
     }
 }
@@ -822,6 +884,15 @@ mod tests {
             Some(b"x"),
         ));
         assert_eq!(pending, None);
+
+        let mut pending = Some(" ".to_string());
+        assert!(should_skip_duplicate_ime_input(
+            &mut pending,
+            KeyEventKind::Press,
+            key_ime_dedupe_text(&Key::Character(" ".into()), None).as_deref(),
+            Some(b"\x1b[32u"),
+        ));
+        assert_eq!(pending, None);
     }
 
     #[test]
@@ -875,6 +946,10 @@ mod tests {
         assert_eq!(
             normalize_ime_dedupe_text("\u{7f}"),
             Some("\u{8}".to_string())
+        );
+        assert_eq!(
+            key_ime_dedupe_text(&Key::Character(" ".into()), None),
+            Some(" ".to_string())
         );
     }
 
@@ -931,5 +1006,22 @@ mod tests {
             now + Duration::from_millis(5),
         ));
         assert_eq!(recent, None);
+    }
+
+    #[test]
+    fn parse_synthetic_key_supports_named_and_character_keys() {
+        assert_eq!(parse_synthetic_key("space"), Key::Named(NamedKey::Space));
+        assert_eq!(parse_synthetic_key("Backspace"), Key::Named(NamedKey::Backspace));
+        assert_eq!(parse_synthetic_key("x"), Key::Character("x".into()));
+        assert_eq!(parse_synthetic_key("👨‍💻"), Key::Character("👨‍💻".into()));
+    }
+
+    #[test]
+    fn synthetic_modifiers_state_sets_requested_bits() {
+        let modifiers = synthetic_modifiers_state(true, false, true, true);
+        assert!(modifiers.control_key());
+        assert!(!modifiers.alt_key());
+        assert!(modifiers.shift_key());
+        assert!(modifiers.super_key());
     }
 }

@@ -133,6 +133,7 @@ pub fn handle_ipc_request(terminal: &mut Terminal, req: &Request) -> (Response, 
             Response::ok(serde_json::json!({
                 "commands": [
                     "get-text", "send-text", "send-key",
+                    "send-key-event", "send-ime-commit",
                     "get-cursor", "get-size", "set-title",
                     "close", "ls"
                 ]

@@ -529,14 +529,16 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                     }
                     WindowEvent::Ime(Ime::Commit(text)) => {
                         if !text.is_empty() {
+                            let ime_commit_text = crate::frontend::normalize_ime_dedupe_text(&text)
+                                .unwrap_or_else(|| text.clone());
                             if should_skip_ime_commit_after_key_event(
                                 &mut state.recent_text_key_event,
-                                &text,
+                                &ime_commit_text,
                                 Instant::now(),
                             ) {
                                 return;
                             }
-                            state.pending_ime_commit = Some(text.clone());
+                            state.pending_ime_commit = Some(ime_commit_text);
                             let _ = state.pty.write_all(text.as_bytes());
                             if state.terminal.grid.scroll_offset > 0 {
                                 state.terminal.grid.scroll_offset = 0;

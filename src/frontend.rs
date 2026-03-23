@@ -394,6 +394,18 @@ pub fn scroll_to_bytes(up: bool, app_cursor: bool) -> Vec<u8> {
     }
 }
 
+pub fn normalize_ime_dedupe_text(text: &str) -> Option<String> {
+    if text.is_empty() {
+        return None;
+    }
+
+    Some(match text {
+        "\u{7f}" => "\u{8}".to_string(),
+        "\n" | "\r\n" => "\r".to_string(),
+        _ => text.to_string(),
+    })
+}
+
 pub fn named_key_ime_dedupe_text(key: &Key) -> Option<&'static str> {
     match key {
         Key::Named(NamedKey::Space) => Some(" "),
@@ -416,7 +428,7 @@ pub fn should_skip_duplicate_ime_key_event(
     let should_skip = pending_ime_commit
         .as_deref()
         .filter(|text| !text.is_empty())
-        == event_text;
+        == event_text.and_then(normalize_ime_dedupe_text).as_deref();
     *pending_ime_commit = None;
     should_skip
 }
@@ -431,11 +443,13 @@ pub fn should_skip_duplicate_ime_input(
         return false;
     }
 
+    let normalized_event_text = event_text.and_then(normalize_ime_dedupe_text);
     let should_skip = pending_ime_commit
         .as_deref()
         .filter(|text| !text.is_empty())
         .is_some_and(|text| {
-            event_text == Some(text) || encoded_bytes.is_some_and(|bytes| text.as_bytes() == bytes)
+            normalized_event_text.as_deref() == Some(text)
+                || encoded_bytes.is_some_and(|bytes| text.as_bytes() == bytes)
         });
     *pending_ime_commit = None;
     should_skip
@@ -445,22 +459,20 @@ fn text_for_ime_key_dedupe(
     event_text: Option<&str>,
     encoded_bytes: Option<&[u8]>,
 ) -> Option<String> {
-    if let Some(text) = event_text.filter(|text| !text.is_empty()) {
-        return Some(text.to_string());
+    if let Some(text) = event_text.and_then(normalize_ime_dedupe_text) {
+        return Some(text);
     }
 
     let bytes = encoded_bytes?;
     let text = std::str::from_utf8(bytes).ok()?.trim_matches('\0');
-    if text.is_empty() {
-        return None;
-    }
+    let text = normalize_ime_dedupe_text(text)?;
     if text
         .chars()
-        .any(|ch| ch.is_control() && !matches!(ch, ' ' | '\t' | '\n' | '\r'))
+        .any(|ch| ch.is_control() && !matches!(ch, ' ' | '\t' | '\n' | '\r' | '\u{8}'))
     {
         return None;
     }
-    Some(text.to_string())
+    Some(text)
 }
 
 pub fn remember_text_key_event(
@@ -487,7 +499,7 @@ pub fn should_skip_ime_commit_after_key_event(
         return false;
     };
 
-    recent.text == text
+    normalize_ime_dedupe_text(text).as_deref() == Some(recent.text.as_str())
         && now
             .checked_duration_since(recent.at)
             .is_some_and(|elapsed| elapsed <= IME_KEY_DEDUPE_WINDOW)
@@ -860,6 +872,10 @@ mod tests {
             named_key_ime_dedupe_text(&Key::Named(NamedKey::Backspace)),
             Some("\u{8}")
         );
+        assert_eq!(
+            normalize_ime_dedupe_text("\u{7f}"),
+            Some("\u{8}".to_string())
+        );
     }
 
     #[test]
@@ -869,6 +885,15 @@ mod tests {
             &mut pending,
             KeyEventKind::Press,
             named_key_ime_dedupe_text(&Key::Named(NamedKey::Backspace)),
+            Some(&[0x7f]),
+        ));
+        assert_eq!(pending, None);
+
+        let mut pending = Some("\u{8}".to_string());
+        assert!(should_skip_duplicate_ime_input(
+            &mut pending,
+            KeyEventKind::Press,
+            Some("\u{7f}"),
             Some(&[0x7f]),
         ));
         assert_eq!(pending, None);
@@ -889,6 +914,20 @@ mod tests {
         assert!(should_skip_ime_commit_after_key_event(
             &mut recent,
             "\u{8}",
+            now + Duration::from_millis(5),
+        ));
+        assert_eq!(recent, None);
+
+        remember_text_key_event(
+            &mut recent,
+            KeyEventKind::Press,
+            named_key_ime_dedupe_text(&Key::Named(NamedKey::Backspace)),
+            Some(&[0x7f]),
+            now,
+        );
+        assert!(should_skip_ime_commit_after_key_event(
+            &mut recent,
+            "\u{7f}",
             now + Duration::from_millis(5),
         ));
         assert_eq!(recent, None);

@@ -228,6 +228,22 @@ fn encode_kitty_key(
     let disambiguate = kitty_flags & KITTY_KBD_DISAMBIGUATE != 0;
     let produces_text = text.filter(|s| !s.is_empty()).is_some();
 
+    if let Some(code) = kitty_keypad_code(physical_key, produces_text)
+        && (report_all || (disambiguate && !produces_text))
+    {
+        let modifier_field = kitty_modifier_field(modifiers, report_events, event_kind);
+        let text_field = if report_text {
+            kitty_text_field(text)
+        } else {
+            None
+        };
+        return Some(format_kitty_csi_u(
+            &code.to_string(),
+            modifier_field,
+            text_field,
+        ));
+    }
+
     if let Some(bytes) = encode_kitty_named_key(
         key,
         physical_key,
@@ -462,17 +478,70 @@ fn encode_kitty_named_key(
             NamedKey::F10 => tilde_form(21),
             NamedKey::F11 => tilde_form(23),
             NamedKey::F12 => tilde_form(24),
-            NamedKey::Escape => format_kitty_csi_u("27", mods, None),
-            NamedKey::Enter => format_kitty_csi_u("13", mods, None),
-            NamedKey::Tab => format_kitty_csi_u("9", mods, None),
-            NamedKey::Backspace => format_kitty_csi_u("127", mods, None),
-            NamedKey::Space => format_kitty_csi_u("32", mods, None),
-            NamedKey::Shift | NamedKey::Control | NamedKey::Alt | NamedKey::Super => {
-                let code = modifier_named_key_code(physical_key, named)?;
+            _ => {
+                let code = kitty_named_key_code(physical_key, *named)?;
                 format_kitty_csi_u(&code.to_string(), mods, None)
             }
-            _ => return None,
         }),
+        _ => None,
+    }
+}
+
+fn kitty_named_key_code(physical_key: Option<&PhysicalKey>, named: NamedKey) -> Option<u32> {
+    match named {
+        NamedKey::Escape => Some(27),
+        NamedKey::Enter => Some(13),
+        NamedKey::Tab => Some(9),
+        NamedKey::Backspace => Some(127),
+        NamedKey::Space => Some(32),
+        NamedKey::CapsLock => Some(57358),
+        NamedKey::ScrollLock => Some(57359),
+        NamedKey::NumLock => Some(57360),
+        NamedKey::PrintScreen => Some(57361),
+        NamedKey::Pause => Some(57362),
+        NamedKey::ContextMenu => Some(57363),
+        NamedKey::F13 => Some(57376),
+        NamedKey::F14 => Some(57377),
+        NamedKey::F15 => Some(57378),
+        NamedKey::F16 => Some(57379),
+        NamedKey::F17 => Some(57380),
+        NamedKey::F18 => Some(57381),
+        NamedKey::F19 => Some(57382),
+        NamedKey::F20 => Some(57383),
+        NamedKey::F21 => Some(57384),
+        NamedKey::F22 => Some(57385),
+        NamedKey::F23 => Some(57386),
+        NamedKey::F24 => Some(57387),
+        NamedKey::F25 => Some(57388),
+        NamedKey::F26 => Some(57389),
+        NamedKey::F27 => Some(57390),
+        NamedKey::F28 => Some(57391),
+        NamedKey::F29 => Some(57392),
+        NamedKey::F30 => Some(57393),
+        NamedKey::F31 => Some(57394),
+        NamedKey::F32 => Some(57395),
+        NamedKey::F33 => Some(57396),
+        NamedKey::F34 => Some(57397),
+        NamedKey::F35 => Some(57398),
+        NamedKey::MediaPlay => Some(57428),
+        NamedKey::MediaPause => Some(57429),
+        NamedKey::MediaPlayPause => Some(57430),
+        NamedKey::MediaRecord => Some(57437),
+        NamedKey::MediaStop => Some(57432),
+        NamedKey::MediaFastForward => Some(57433),
+        NamedKey::MediaRewind => Some(57434),
+        NamedKey::MediaTrackNext => Some(57435),
+        NamedKey::MediaTrackPrevious => Some(57436),
+        NamedKey::AudioVolumeDown => Some(57438),
+        NamedKey::AudioVolumeUp => Some(57439),
+        NamedKey::AudioVolumeMute => Some(57440),
+        NamedKey::AltGraph => Some(57453),
+        NamedKey::Shift
+        | NamedKey::Control
+        | NamedKey::Alt
+        | NamedKey::Super
+        | NamedKey::Meta
+        | NamedKey::Hyper => modifier_named_key_code(physical_key, &named),
         _ => None,
     }
 }
@@ -483,6 +552,8 @@ fn modifier_named_key_code(physical_key: Option<&PhysicalKey>, named: &NamedKey)
         Some(PhysicalKey::Code(KeyCode::ControlLeft)) => Some(57442),
         Some(PhysicalKey::Code(KeyCode::AltLeft)) => Some(57443),
         Some(PhysicalKey::Code(KeyCode::SuperLeft)) => Some(57444),
+        Some(PhysicalKey::Code(KeyCode::Hyper)) => Some(57445),
+        Some(PhysicalKey::Code(KeyCode::Meta)) => Some(57446),
         Some(PhysicalKey::Code(KeyCode::ShiftRight)) => Some(57447),
         Some(PhysicalKey::Code(KeyCode::ControlRight)) => Some(57448),
         Some(PhysicalKey::Code(KeyCode::AltRight)) => Some(57449),
@@ -492,8 +563,37 @@ fn modifier_named_key_code(physical_key: Option<&PhysicalKey>, named: &NamedKey)
             NamedKey::Control => Some(57442),
             NamedKey::Alt => Some(57443),
             NamedKey::Super => Some(57444),
+            NamedKey::Hyper => Some(57445),
+            NamedKey::Meta => Some(57446),
             _ => None,
         },
+    }
+}
+
+fn kitty_keypad_code(physical_key: Option<&PhysicalKey>, produces_text: bool) -> Option<u32> {
+    match physical_key {
+        Some(PhysicalKey::Code(code)) => match code {
+            KeyCode::Numpad0 => Some(if produces_text { 57399 } else { 57425 }),
+            KeyCode::Numpad1 => Some(if produces_text { 57400 } else { 57424 }),
+            KeyCode::Numpad2 => Some(if produces_text { 57401 } else { 57420 }),
+            KeyCode::Numpad3 => Some(if produces_text { 57402 } else { 57422 }),
+            KeyCode::Numpad4 => Some(if produces_text { 57403 } else { 57417 }),
+            KeyCode::Numpad5 => Some(if produces_text { 57404 } else { 57427 }),
+            KeyCode::Numpad6 => Some(if produces_text { 57405 } else { 57418 }),
+            KeyCode::Numpad7 => Some(if produces_text { 57406 } else { 57423 }),
+            KeyCode::Numpad8 => Some(if produces_text { 57407 } else { 57419 }),
+            KeyCode::Numpad9 => Some(if produces_text { 57408 } else { 57421 }),
+            KeyCode::NumpadDecimal => Some(if produces_text { 57409 } else { 57426 }),
+            KeyCode::NumpadDivide => Some(57410),
+            KeyCode::NumpadMultiply => Some(57411),
+            KeyCode::NumpadSubtract => Some(57412),
+            KeyCode::NumpadAdd => Some(57413),
+            KeyCode::NumpadEnter => Some(57414),
+            KeyCode::NumpadEqual => Some(57415),
+            KeyCode::NumpadComma => Some(57416),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -707,6 +807,153 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bytes, b"\x1b[57442u");
+    }
+
+    #[test]
+    fn kitty_supports_extended_named_functional_keys() {
+        let caps = key_to_bytes(
+            &Key::Named(NamedKey::CapsLock),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::CapsLock)),
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(caps, b"\x1b[57358u");
+
+        let menu = key_to_bytes(
+            &Key::Named(NamedKey::ContextMenu),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::ContextMenu)),
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(menu, b"\x1b[57363u");
+
+        let f13 = key_to_bytes(
+            &Key::Named(NamedKey::F13),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::F13)),
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(f13, b"\x1b[57376u");
+    }
+
+    #[test]
+    fn kitty_supports_media_and_legacy_meta_keys() {
+        let media = key_to_bytes(
+            &Key::Named(NamedKey::MediaPlayPause),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::MediaPlayPause)),
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(media, b"\x1b[57430u");
+
+        let meta = key_to_bytes(
+            &Key::Named(NamedKey::Meta),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::Meta)),
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(meta, b"\x1b[57446u");
+
+        let hyper = key_to_bytes(
+            &Key::Named(NamedKey::Hyper),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::Hyper)),
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(hyper, b"\x1b[57445u");
+
+        let alt_graph = key_to_bytes(
+            &Key::Named(NamedKey::AltGraph),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::AltRight)),
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(alt_graph, b"\x1b[57453u");
+
+        let record = key_to_bytes(
+            &Key::Named(NamedKey::MediaRecord),
+            None,
+            None,
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(record, b"\x1b[57437u");
+    }
+
+    #[test]
+    fn kitty_report_all_uses_distinct_keypad_codes_for_text_keys() {
+        let bytes = key_to_bytes(
+            &Key::Character("1".into()),
+            Some("1"),
+            Some(&PhysicalKey::Code(KeyCode::Numpad1)),
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_REPORT_ALL | KITTY_KBD_REPORT_TEXT,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"\x1b[57400;;49u");
+    }
+
+    #[test]
+    fn kitty_disambiguate_reports_non_text_keypad_navigation_distinctly() {
+        let bytes = key_to_bytes(
+            &Key::Named(NamedKey::ArrowLeft),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::Numpad4)),
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_DISAMBIGUATE,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"\x1b[57417u");
+    }
+
+    #[test]
+    fn kitty_report_all_reports_keypad_enter_distinct_from_enter() {
+        let bytes = key_to_bytes(
+            &Key::Named(NamedKey::Enter),
+            Some("\r"),
+            Some(&PhysicalKey::Code(KeyCode::NumpadEnter)),
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"\x1b[57414u");
     }
 
     #[test]

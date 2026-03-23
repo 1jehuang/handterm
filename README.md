@@ -263,7 +263,7 @@ handterm bench
 - Fontconfig font discovery with caching
 
 **Shell integration**
-- Kitty keyboard protocol query response
+- Kitty keyboard protocol set/query/push/pop + expanded CSI-u key encoding
 - XTVERSION response
 - OSC 10/11 color queries
 - OSC 52 clipboard

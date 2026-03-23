@@ -1011,7 +1011,10 @@ mod tests {
     #[test]
     fn parse_synthetic_key_supports_named_and_character_keys() {
         assert_eq!(parse_synthetic_key("space"), Key::Named(NamedKey::Space));
-        assert_eq!(parse_synthetic_key("Backspace"), Key::Named(NamedKey::Backspace));
+        assert_eq!(
+            parse_synthetic_key("Backspace"),
+            Key::Named(NamedKey::Backspace)
+        );
         assert_eq!(parse_synthetic_key("x"), Key::Character("x".into()));
         assert_eq!(parse_synthetic_key("👨‍💻"), Key::Character("👨‍💻".into()));
     }

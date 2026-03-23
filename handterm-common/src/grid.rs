@@ -144,7 +144,8 @@ fn bytes_need_grapheme_clusters(bytes: &[u8]) -> bool {
             }
             0xEF if i + 2 < bytes.len() => {
                 if bytes[i + 1] == 0xB8
-                    && (matches!(bytes[i + 2], 0x8E | 0x8F) || (0xA0..=0xAF).contains(&bytes[i + 2]))
+                    && (matches!(bytes[i + 2], 0x8E | 0x8F)
+                        || (0xA0..=0xAF).contains(&bytes[i + 2]))
                 {
                     return true;
                 }
@@ -202,6 +203,7 @@ pub struct Grid {
     pending_wrap: bool,
     dirty: Vec<u64>,
     pub all_dirty: bool,
+    generation: u64,
     scrollback: Vec<Cell>,
     scrollback_graphemes: Vec<Option<Box<str>>>,
     scrollback_len: usize,
@@ -258,6 +260,7 @@ impl Grid {
             pending_wrap: false,
             dirty: vec![!0u64; dirty_words],
             all_dirty: true,
+            generation: 1,
             scrollback: Vec::new(),
             scrollback_graphemes: Vec::new(),
             scrollback_len: 0,
@@ -318,19 +321,27 @@ impl Grid {
     fn mark_dirty(&mut self, idx: usize) {
         let word = idx / 64;
         let bit = idx % 64;
-        unsafe { *self.dirty.get_unchecked_mut(word) |= 1u64 << bit; }
+        unsafe {
+            *self.dirty.get_unchecked_mut(word) |= 1u64 << bit;
+        }
+        self.generation = self.generation.wrapping_add(1);
     }
 
     #[inline(always)]
     fn mark_dirty_range(&mut self, start: usize, len: usize) {
-        if len == 0 { return; }
+        if len == 0 {
+            return;
+        }
+        self.generation = self.generation.wrapping_add(1);
         let end = start + len;
         let first_word = start / 64;
         let last_word = (end - 1) / 64;
 
         if first_word == last_word {
             let mask = ((!0u64) << (start % 64)) & ((!0u64) >> (63 - ((end - 1) % 64)));
-            unsafe { *self.dirty.get_unchecked_mut(first_word) |= mask; }
+            unsafe {
+                *self.dirty.get_unchecked_mut(first_word) |= mask;
+            }
         } else {
             unsafe {
                 *self.dirty.get_unchecked_mut(first_word) |= !0u64 << (start % 64);
@@ -346,6 +357,7 @@ impl Grid {
     pub fn mark_all_dirty(&mut self) {
         self.dirty.fill(!0u64);
         self.all_dirty = true;
+        self.generation = self.generation.wrapping_add(1);
     }
 
     pub fn mark_cell_dirty(&mut self, row: usize, col: usize) {
@@ -360,6 +372,10 @@ impl Grid {
     pub fn clear_dirty(&mut self) {
         self.dirty.fill(0);
         self.all_dirty = false;
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     #[inline]
@@ -384,7 +400,10 @@ impl Grid {
         if self.all_dirty {
             return self.rows * self.cols;
         }
-        self.dirty.iter().map(|word| word.count_ones() as usize).sum()
+        self.dirty
+            .iter()
+            .map(|word| word.count_ones() as usize)
+            .sum()
     }
 
     #[inline(always)]
@@ -795,7 +814,9 @@ impl Grid {
 
     pub fn put_char(&mut self, ch: u32) {
         let width = if let Some(c) = char::from_u32(ch) {
-            unicode_width::UnicodeWidthChar::width(c).unwrap_or(1).clamp(1, 2)
+            unicode_width::UnicodeWidthChar::width(c)
+                .unwrap_or(1)
+                .clamp(1, 2)
         } else {
             1
         };
@@ -803,9 +824,17 @@ impl Grid {
     }
 
     pub fn put_grapheme(&mut self, grapheme: &str) {
-        let ch = grapheme.chars().next().map(|c| c as u32).unwrap_or(b' ' as u32);
+        let ch = grapheme
+            .chars()
+            .next()
+            .map(|c| c as u32)
+            .unwrap_or(b' ' as u32);
         let width = unicode_width::UnicodeWidthStr::width(grapheme).clamp(1, 2);
-        self.put_cluster_parts(ch, width, needs_grapheme_storage(grapheme).then(|| grapheme.into()));
+        self.put_cluster_parts(
+            ch,
+            width,
+            needs_grapheme_storage(grapheme).then(|| grapheme.into()),
+        );
     }
 
     fn put_cluster_parts(&mut self, ch: u32, width: usize, grapheme: Option<Box<str>>) {
@@ -1124,7 +1153,8 @@ impl Grid {
                 self.scrollback[dest..dest + cols]
                     .copy_from_slice(&self.cells[blank_start..blank_start + cols]);
                 for col in 0..cols {
-                    self.scrollback_graphemes[dest + col] = self.graphemes[blank_start + col].clone();
+                    self.scrollback_graphemes[dest + col] =
+                        self.graphemes[blank_start + col].clone();
                 }
                 self.scrollback_len += 1;
             } else {
@@ -1132,7 +1162,8 @@ impl Grid {
                 self.scrollback[dest..dest + cols]
                     .copy_from_slice(&self.cells[blank_start..blank_start + cols]);
                 for col in 0..cols {
-                    self.scrollback_graphemes[dest + col] = self.graphemes[blank_start + col].clone();
+                    self.scrollback_graphemes[dest + col] =
+                        self.graphemes[blank_start + col].clone();
                 }
                 self.scrollback_head = (self.scrollback_head + 1) % self.scrollback_max;
             }
@@ -1267,7 +1298,9 @@ impl Grid {
     }
 
     pub fn set_underline_color_rgb(&mut self, r: u8, g: u8, b: u8) {
-        self.set_underline_color(COLOR_FLAG_RGB | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32));
+        self.set_underline_color(
+            COLOR_FLAG_RGB | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32),
+        );
     }
 
     pub fn reset_underline_color(&mut self) {

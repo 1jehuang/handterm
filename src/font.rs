@@ -1,17 +1,17 @@
-use anyhow::Result;
+use crate::color::{blend_rgba_over_rgb, blend_rgba_over_rgba};
+use crate::protocol::{CellMetrics, GlyphBitmap};
 #[cfg(feature = "local-fonts")]
 use anyhow::Context;
-use crate::protocol::{CellMetrics, GlyphBitmap};
+use anyhow::Result;
+#[cfg(feature = "local-fonts")]
+use freetype::Face;
 #[cfg(feature = "local-fonts")]
 use freetype::bitmap::PixelMode;
 #[cfg(feature = "local-fonts")]
 use freetype::face::LoadFlag;
-#[cfg(feature = "local-fonts")]
-use freetype::Face;
 use std::collections::{HashMap, HashSet};
 
-const CELL_WIDTH_SAMPLE_TEXT: &str =
-    " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~░▒▓";
+const CELL_WIDTH_SAMPLE_TEXT: &str = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~░▒▓";
 
 pub struct GlyphAtlas {
     glyphs: HashMap<u32, RasterizedGlyph>,
@@ -130,9 +130,7 @@ impl GlyphAtlas {
     pub fn from_font_path_dpi(path: &str, font_size_pt: f64, dpi: u32) -> Result<Self> {
         let lib = freetype::Library::init().context("failed to init freetype")?;
 
-        let face = lib
-            .new_face(path, 0)
-            .context("failed to load font face")?;
+        let face = lib.new_face(path, 0).context("failed to load font face")?;
 
         face.set_char_size((font_size_pt * 64.0) as isize, 0, dpi, 0)
             .context("failed to set char size")?;
@@ -245,7 +243,10 @@ impl GlyphAtlas {
         if should_try_emoji_fallback(ch) {
             self.ensure_fallback_faces_loaded();
             for (index, face) in self.fallback_faces.iter().enumerate() {
-                if let Some(glyph) = face.as_ref().and_then(|face| rasterize_fallback_glyph(face, ch)) {
+                if let Some(glyph) = face
+                    .as_ref()
+                    .and_then(|face| rasterize_fallback_glyph(face, ch))
+                {
                     self.glyphs.insert(ch, glyph);
                     #[cfg(feature = "local-fonts")]
                     self.glyph_sources.insert(ch, GlyphSource::Fallback(index));
@@ -349,14 +350,18 @@ impl GlyphAtlas {
         } else {
             0
         };
-        let gy_end = glyph.height.min(((buf_h as i32) - glyph_top).max(0) as usize);
+        let gy_end = glyph
+            .height
+            .min(((buf_h as i32) - glyph_top).max(0) as usize);
 
         let gx_start = if glyph_left < 0 {
             (-glyph_left) as usize
         } else {
             0
         };
-        let gx_end = glyph.width.min(((buf_w as i32) - glyph_left).max(0) as usize);
+        let gx_end = glyph
+            .width
+            .min(((buf_w as i32) - glyph_left).max(0) as usize);
 
         for gy in gy_start..gy_end {
             let sy = (glyph_top + gy as i32) as usize;
@@ -367,7 +372,9 @@ impl GlyphAtlas {
                 let sx = (glyph_left + gx as i32) as usize;
                 let pixel = &mut buffer[screen_row + sx];
                 match glyph.format {
-                    GlyphFormat::Alpha => blend_alpha_pixel(pixel, fg, glyph.pixels[bmp_row + gx] as u32),
+                    GlyphFormat::Alpha => {
+                        blend_alpha_pixel(pixel, fg, glyph.pixels[bmp_row + gx] as u32)
+                    }
                     GlyphFormat::Rgba => {
                         let offset = (bmp_row + gx) * 4;
                         blend_rgba_pixel(pixel, &glyph.pixels[offset..offset + 4]);
@@ -469,7 +476,8 @@ impl GlyphAtlas {
         };
 
         if let Some(grapheme) = &glyph.grapheme {
-            self.grapheme_glyphs.insert(grapheme.clone().into_boxed_str(), rasterized);
+            self.grapheme_glyphs
+                .insert(grapheme.clone().into_boxed_str(), rasterized);
         } else {
             self.glyphs.insert(glyph.glyph_id, rasterized);
             self.missing_glyphs.remove(&glyph.glyph_id);
@@ -495,11 +503,18 @@ impl GlyphAtlas {
     #[cfg(feature = "ligatures")]
     pub fn shape_run(&mut self, text: &str) -> Vec<ShapedGlyph> {
         let Some(ref face) = self.rb_face else {
-            return text.chars().map(|ch| ShapedGlyph {
-                codepoint: ch as u32,
-                cluster: 0,
-                cells: if unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) > 1 { 2 } else { 1 },
-            }).collect();
+            return text
+                .chars()
+                .map(|ch| ShapedGlyph {
+                    codepoint: ch as u32,
+                    cluster: 0,
+                    cells: if unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1) > 1 {
+                        2
+                    } else {
+                        1
+                    },
+                })
+                .collect();
         };
 
         let mut buffer = rustybuzz::UnicodeBuffer::new();
@@ -518,9 +533,10 @@ impl GlyphAtlas {
             };
 
             let cluster_str = &text[cluster_start..cluster_end.min(text.len())];
-            let cells: usize = cluster_str.chars().map(|c| {
-                unicode_width::UnicodeWidthChar::width(c).unwrap_or(1)
-            }).sum();
+            let cells: usize = cluster_str
+                .chars()
+                .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(1))
+                .sum();
             let cells = cells.max(1);
 
             self.ensure_glyph_id(gi.glyph_id);
@@ -534,7 +550,7 @@ impl GlyphAtlas {
         result
     }
 
-#[cfg(feature = "ligatures")]
+    #[cfg(feature = "ligatures")]
     fn ensure_glyph_id(&mut self, glyph_id: u32) -> bool {
         if self.glyphs.contains_key(&(glyph_id | 0x8000_0000)) {
             return true;
@@ -552,14 +568,16 @@ impl GlyphAtlas {
 
     #[cfg(feature = "ligatures")]
     pub fn get_shaped_glyph(&self, glyph_id: u32) -> Option<GlyphData<'_>> {
-        self.glyphs.get(&(glyph_id | 0x8000_0000)).map(|g| GlyphData {
-            pixels: &g.pixels,
-            width: g.width,
-            height: g.height,
-            format: g.format,
-            bearing_x: g.bearing_x,
-            bearing_y: g.bearing_y,
-        })
+        self.glyphs
+            .get(&(glyph_id | 0x8000_0000))
+            .map(|g| GlyphData {
+                pixels: &g.pixels,
+                width: g.width,
+                height: g.height,
+                format: g.format,
+                bearing_x: g.bearing_x,
+                bearing_y: g.bearing_y,
+            })
     }
 
     #[cfg(feature = "ligatures")]
@@ -591,10 +609,22 @@ impl GlyphAtlas {
         let glyph_top = origin_y - glyph.bearing_y;
         let glyph_left = px_x as i32 + glyph.bearing_x;
 
-        let gy_start = if glyph_top < 0 { (-glyph_top) as usize } else { 0 };
-        let gy_end = glyph.height.min(((buf_h as i32) - glyph_top).max(0) as usize);
-        let gx_start = if glyph_left < 0 { (-glyph_left) as usize } else { 0 };
-        let gx_end = glyph.width.min(((buf_w as i32) - glyph_left).max(0) as usize);
+        let gy_start = if glyph_top < 0 {
+            (-glyph_top) as usize
+        } else {
+            0
+        };
+        let gy_end = glyph
+            .height
+            .min(((buf_h as i32) - glyph_top).max(0) as usize);
+        let gx_start = if glyph_left < 0 {
+            (-glyph_left) as usize
+        } else {
+            0
+        };
+        let gx_end = glyph
+            .width
+            .min(((buf_w as i32) - glyph_left).max(0) as usize);
         let _ = span_width;
 
         for gy in gy_start..gy_end {
@@ -606,7 +636,9 @@ impl GlyphAtlas {
                 let sx = (glyph_left + gx as i32) as usize;
                 let pixel = &mut buffer[screen_row + sx];
                 match glyph.format {
-                    GlyphFormat::Alpha => blend_alpha_pixel(pixel, fg, glyph.pixels[bmp_row + gx] as u32),
+                    GlyphFormat::Alpha => {
+                        blend_alpha_pixel(pixel, fg, glyph.pixels[bmp_row + gx] as u32)
+                    }
                     GlyphFormat::Rgba => {
                         let offset = (bmp_row + gx) * 4;
                         blend_rgba_pixel(pixel, &glyph.pixels[offset..offset + 4]);
@@ -659,8 +691,7 @@ impl GlyphAtlas {
     #[cfg(feature = "ligatures")]
     fn rasterize_grapheme_cluster(&mut self, grapheme: &str) -> Option<RasterizedGlyph> {
         self.ensure_fallback_rb_faces_loaded();
-        self
-            .rb_face
+        self.rb_face
             .as_ref()
             .zip(self.primary_face.as_ref())
             .and_then(|(rb_face, primary_face)| {
@@ -678,16 +709,18 @@ impl GlyphAtlas {
                     .iter()
                     .zip(self.fallback_rb_faces.iter())
                     .find_map(|(face, rb_face)| {
-                        face.as_ref().zip(rb_face.as_ref()).and_then(|(face, rb_face)| {
-                            rasterize_grapheme_sequence(
-                                face,
-                                rb_face,
-                                grapheme,
-                                LoadFlag::RENDER | LoadFlag::COLOR,
-                                self.cell_height,
-                                self.baseline,
-                            )
-                        })
+                        face.as_ref()
+                            .zip(rb_face.as_ref())
+                            .and_then(|(face, rb_face)| {
+                                rasterize_grapheme_sequence(
+                                    face,
+                                    rb_face,
+                                    grapheme,
+                                    LoadFlag::RENDER | LoadFlag::COLOR,
+                                    self.cell_height,
+                                    self.baseline,
+                                )
+                            })
                     })
             })
     }
@@ -849,8 +882,13 @@ fn rasterize_grapheme_sequence(
         }
 
         let pitch = bmp.pitch().unsigned_abs() as usize;
-        let (src_pixels, src_format) =
-            copy_bitmap(bmp.buffer(), bmp_width, bmp_height, pitch, bmp.pixel_mode().ok()?)?;
+        let (src_pixels, src_format) = copy_bitmap(
+            bmp.buffer(),
+            bmp_width,
+            bmp_height,
+            pitch,
+            bmp.pixel_mode().ok()?,
+        )?;
         let x = pen_x + (pos.x_offset >> 6) + glyph.bitmap_left() - min_x;
         let y = origin_y - (pos.y_offset >> 6) - glyph.bitmap_top() - min_y;
 
@@ -945,12 +983,8 @@ fn procedural_glyph(
                 0x2593 => 12,
                 _ => unreachable!(),
             };
-            const BAYER_4X4: [[u8; 4]; 4] = [
-                [0, 8, 2, 10],
-                [12, 4, 14, 6],
-                [3, 11, 1, 9],
-                [15, 7, 13, 5],
-            ];
+            const BAYER_4X4: [[u8; 4]; 4] =
+                [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
             for y in 0..height {
                 for x in 0..width {
                     if BAYER_4X4[y % 4][x % 4] < threshold {
@@ -1070,32 +1104,11 @@ fn blend_alpha_pixel(pixel: &mut u32, fg: u32, alpha: u32) {
 }
 
 fn blend_rgba_pixel(pixel: &mut u32, rgba: &[u8]) {
-    let alpha = rgba[3] as u32;
-    if alpha == 0 {
-        return;
-    }
-    let bg = *pixel;
-    let bg_r = (bg >> 16) & 0xff;
-    let bg_g = (bg >> 8) & 0xff;
-    let bg_b = bg & 0xff;
-    let inv = 255 - alpha;
-
-    let r = rgba[0] as u32 + (bg_r * inv) / 255;
-    let g = rgba[1] as u32 + (bg_g * inv) / 255;
-    let b = rgba[2] as u32 + (bg_b * inv) / 255;
-    *pixel = (r.min(255) << 16) | (g.min(255) << 8) | b.min(255);
+    blend_rgba_over_rgb(pixel, rgba);
 }
 
 fn blend_rgba_bytes(dst: &mut [u8], rgba: &[u8]) {
-    let alpha = rgba[3] as u32;
-    if alpha == 0 {
-        return;
-    }
-    let inv = 255 - alpha;
-    dst[0] = (rgba[0] as u32 + (dst[0] as u32 * inv) / 255).min(255) as u8;
-    dst[1] = (rgba[1] as u32 + (dst[1] as u32 * inv) / 255).min(255) as u8;
-    dst[2] = (rgba[2] as u32 + (dst[2] as u32 * inv) / 255).min(255) as u8;
-    dst[3] = (alpha + (dst[3] as u32 * inv) / 255).min(255) as u8;
+    blend_rgba_over_rgba(dst, rgba);
 }
 
 #[cfg(feature = "ligatures")]
@@ -1142,7 +1155,12 @@ fn find_emoji_font_paths() -> Result<Vec<String>> {
     let mut paths = Vec::new();
     let mut seen = HashSet::new();
 
-    for family in ["Noto Color Emoji", "Noto Emoji", "Apple Color Emoji", "Segoe UI Emoji"] {
+    for family in [
+        "Noto Color Emoji",
+        "Noto Emoji",
+        "Apple Color Emoji",
+        "Segoe UI Emoji",
+    ] {
         if let Some(font) = fc.find(family, None)
             && let Some(path) = font.path.to_str()
             && seen.insert(path.to_string())
@@ -1197,7 +1215,9 @@ fn load_cached_font_path(family: &str) -> Option<String> {
 }
 
 fn save_cached_font_path(family: &str, path: &str) {
-    let Some(cache) = font_cache_path() else { return };
+    let Some(cache) = font_cache_path() else {
+        return;
+    };
     if let Some(parent) = cache.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -1265,7 +1285,8 @@ mod tests {
 
     #[test]
     fn procedural_block_glyphs_fill_expected_regions() {
-        let glyph = procedural_glyph(0x258C, 8, 4, 1).expect("left half block should be procedural");
+        let glyph =
+            procedural_glyph(0x258C, 8, 4, 1).expect("left half block should be procedural");
         for y in 0..4 {
             for x in 0..8 {
                 let filled = glyph.pixels[y * 8 + x] == 255;
@@ -1302,5 +1323,48 @@ mod tests {
             buf.iter().any(|&pixel| pixel != 0),
             "grapheme fallback should draw visible pixels"
         );
+    }
+
+    #[test]
+    fn protocol_only_atlas_can_store_and_render_color_emoji_grapheme() {
+        let metrics = CellMetrics {
+            cell_width: 8,
+            cell_height: 8,
+            baseline: 6,
+        };
+        let mut atlas = GlyphAtlas::protocol_only(metrics);
+        atlas.insert_protocol_glyph(&GlyphBitmap {
+            glyph_id: '❤' as u32,
+            grapheme: Some("❤️".to_string()),
+            width: 2,
+            height: 2,
+            bearing_x: 0,
+            bearing_y: 2,
+            cells: 1,
+            is_color: true,
+            pixels: vec![
+                255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+            ],
+        });
+
+        let mut buf = vec![0u32; atlas.cell_width * atlas.cell_height];
+        atlas.draw_grapheme(
+            &mut buf,
+            atlas.cell_width,
+            atlas.cell_height,
+            0,
+            0,
+            "❤️",
+            0xffffff,
+        );
+
+        assert!(buf.contains(&0xff0000));
+    }
+
+    #[test]
+    fn rgba_glyph_pixels_alpha_blend_against_existing_rgb() {
+        let mut pixel = 0x204060;
+        blend_rgba_pixel(&mut pixel, &[0xff, 0x00, 0x00, 0x80]);
+        assert_eq!(pixel, 0x8f1f2f);
     }
 }

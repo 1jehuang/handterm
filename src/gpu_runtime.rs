@@ -678,19 +678,28 @@ pub fn create_surface_state_with_shared_profiled(
     let size = window.inner_size();
 
     let step_start = Instant::now();
-    let mut surface_config = surface
-        .get_default_config(&shared.adapter, size.width.max(1), size.height.max(1))
-        .context("surface should be compatible")?;
-    let default_config = step_start.elapsed();
-
-    let step_start = Instant::now();
     let surface_caps = surface.get_capabilities(&shared.adapter);
     let capabilities = step_start.elapsed();
-    surface_config.format = select_surface_format(&surface_caps, surface_config.format);
-    surface_config.alpha_mode = select_alpha_mode(
-        &surface_caps,
-        transparency_requested(config.style.background_opacity),
+    anyhow::ensure!(
+        !surface_caps.formats.is_empty(),
+        "surface should be compatible"
     );
+
+    let step_start = Instant::now();
+    let surface_config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format: select_surface_format(&surface_caps, surface_caps.formats[0]),
+        width: size.width.max(1),
+        height: size.height.max(1),
+        present_mode: select_present_mode(&surface_caps),
+        desired_maximum_frame_latency: 1,
+        alpha_mode: select_alpha_mode(
+            &surface_caps,
+            transparency_requested(config.style.background_opacity),
+        ),
+        view_formats: vec![],
+    };
+    let default_config = step_start.elapsed();
 
     let step_start = Instant::now();
     surface.configure(&shared.device, &surface_config);
@@ -821,6 +830,10 @@ pub fn resize_surface_state(
         return;
     }
 
+    if state.surface_config.width == width && state.surface_config.height == height {
+        return;
+    }
+
     state.surface_config.width = width;
     state.surface_config.height = height;
     state
@@ -947,7 +960,11 @@ pub fn render_surface_state_profiled(
     let mut frame_cells = std::mem::take(&mut state.frame_cells);
     fill_cell_infos(terminal, &mut frame_cells);
     let mut text_batches = std::mem::take(&mut state.text_batches);
-    let mut atlas_state = state.shared.atlas.lock().expect("shared atlas lock poisoned");
+    let mut atlas_state = state
+        .shared
+        .atlas
+        .lock()
+        .expect("shared atlas lock poisoned");
     fill_text_batches(
         &frame_cells,
         FrameBatchStyle {
@@ -971,15 +988,21 @@ pub fn render_surface_state_profiled(
                         is_color: entry.is_color,
                     })
             } else {
-                ensure_glyph_in_atlas(&mut atlas_state, &state.shared.queue, atlas, ci.ch, ci.cells)
-                    .map(|entry| GlyphAtlasEntry {
-                        x: entry.x,
-                        y: entry.y,
-                        width: entry.width,
-                        height: entry.height,
-                        left_pad: entry.left_pad,
-                        is_color: entry.is_color,
-                    })
+                ensure_glyph_in_atlas(
+                    &mut atlas_state,
+                    &state.shared.queue,
+                    atlas,
+                    ci.ch,
+                    ci.cells,
+                )
+                .map(|entry| GlyphAtlasEntry {
+                    x: entry.x,
+                    y: entry.y,
+                    width: entry.width,
+                    height: entry.height,
+                    left_pad: entry.left_pad,
+                    is_color: entry.is_color,
+                })
             }
         },
     );
@@ -1423,6 +1446,24 @@ fn select_surface_format(
         .copied()
         .find(|format| !format.is_srgb())
         .unwrap_or(fallback)
+}
+
+fn select_present_mode(capabilities: &wgpu::SurfaceCapabilities) -> wgpu::PresentMode {
+    for mode in [
+        wgpu::PresentMode::Mailbox,
+        wgpu::PresentMode::Fifo,
+        wgpu::PresentMode::AutoVsync,
+    ] {
+        if capabilities.present_modes.contains(&mode) {
+            return mode;
+        }
+    }
+
+    capabilities
+        .present_modes
+        .first()
+        .copied()
+        .unwrap_or(wgpu::PresentMode::Fifo)
 }
 
 fn transparency_requested(background_opacity: f64) -> bool {

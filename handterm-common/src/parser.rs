@@ -23,6 +23,12 @@ pub struct Parser {
     osc_buf: Vec<u8>,
 }
 
+impl Default for Parser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Print(u8),
@@ -416,5 +422,4 @@ mod tests {
             }
         );
     }
-
 }

@@ -46,6 +46,7 @@ pub struct Terminal {
     active_charset: u8,
     kitty_images: Vec<KittyImage>,
     pub kitty_placements: Vec<KittyPlacement>,
+    saved_main_kitty_placements: Option<Vec<KittyPlacement>>,
     kitty_payload_buf: Vec<u8>,
     kitty_pending_id: u32,
     kitty_pending_fmt: u32,
@@ -123,6 +124,9 @@ pub trait TerminalView {
     fn kitty_generation(&self) -> u64;
     fn kitty_placements(&self) -> &[KittyPlacement];
     fn kitty_image(&self, id: u32) -> Option<&KittyImage>;
+    fn content_generation(&self) -> u64 {
+        self.grid().generation()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -133,6 +137,13 @@ struct KittyImageFinalize {
     action: u8,
     cols: u32,
     rows_param: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct KittyGraphicsCommand {
+    image_id: u32,
+    delete: Option<u8>,
+    quiet: u8,
 }
 
 pub const KITTY_KBD_DISAMBIGUATE: u8 = 0b00001;
@@ -216,6 +227,7 @@ impl Terminal {
             active_charset: 0,
             kitty_images: Vec::new(),
             kitty_placements: Vec::new(),
+            saved_main_kitty_placements: None,
             kitty_payload_buf: Vec::new(),
             kitty_pending_id: 0,
             kitty_pending_fmt: 0,
@@ -399,7 +411,8 @@ impl Terminal {
     fn apply_cursor_state(&mut self, cursor: Option<&CursorState>) {
         match cursor {
             Some(cursor) => {
-                self.grid.set_cursor(cursor.row as usize, cursor.col as usize);
+                self.grid
+                    .set_cursor(cursor.row as usize, cursor.col as usize);
                 self.cursor_visible = cursor.visible;
                 self.cursor_style = match cursor.style {
                     1 => CursorStyle::Underline,
@@ -460,7 +473,13 @@ impl Terminal {
         self.alt_grid.is_some()
     }
 
-    pub fn encode_mouse(&self, button: u8, col: usize, row: usize, pressed: bool) -> Option<Vec<u8>> {
+    pub fn encode_mouse(
+        &self,
+        button: u8,
+        col: usize,
+        row: usize,
+        pressed: bool,
+    ) -> Option<Vec<u8>> {
         if self.mouse_mode == MouseMode::Off {
             return None;
         }
@@ -472,21 +491,22 @@ impl Terminal {
                 let ch = if pressed { 'M' } else { 'm' };
                 Some(format!("\x1b[<{};{};{}{}", button, cx, cy, ch).into_bytes())
             }
-            MouseEncoding::X10 | MouseEncoding::Utf8 => {
+            MouseEncoding::X10 => {
                 if !pressed && self.mouse_mode != MouseMode::X10 {
                     let cb = 3 + 32;
-                    if cx <= 223 && cy <= 223 {
-                        Some(vec![0x1b, b'[', b'M', cb, (cx as u8) + 32, (cy as u8) + 32])
-                    } else {
-                        None
-                    }
+                    Self::encode_legacy_mouse_triplet(cb, cx, cy)
                 } else if pressed {
                     let cb = button + 32;
-                    if cx <= 223 && cy <= 223 {
-                        Some(vec![0x1b, b'[', b'M', cb, (cx as u8) + 32, (cy as u8) + 32])
-                    } else {
-                        None
-                    }
+                    Self::encode_legacy_mouse_triplet(cb, cx, cy)
+                } else {
+                    None
+                }
+            }
+            MouseEncoding::Utf8 => {
+                if !pressed && self.mouse_mode != MouseMode::X10 {
+                    Self::encode_utf8_mouse_triplet(3 + 32, cx, cy)
+                } else if pressed {
+                    Self::encode_utf8_mouse_triplet(button + 32, cx, cy)
                 } else {
                     None
                 }
@@ -503,18 +523,36 @@ impl Terminal {
         let cy = row + 1;
 
         match self.mouse_encoding {
-            MouseEncoding::Sgr => {
-                Some(format!("\x1b[<{};{};{}M", button, cx, cy).into_bytes())
-            }
-            MouseEncoding::X10 | MouseEncoding::Utf8 => {
-                let cb = button + 32;
-                if cx <= 223 && cy <= 223 {
-                    Some(vec![0x1b, b'[', b'M', cb, (cx as u8) + 32, (cy as u8) + 32])
-                } else {
-                    None
-                }
-            }
+            MouseEncoding::Sgr => Some(format!("\x1b[<{};{};{}M", button, cx, cy).into_bytes()),
+            MouseEncoding::X10 => Self::encode_legacy_mouse_triplet(button + 32, cx, cy),
+            MouseEncoding::Utf8 => Self::encode_utf8_mouse_triplet(button + 32, cx, cy),
         }
+    }
+
+    fn encode_legacy_mouse_triplet(cb: u8, cx: usize, cy: usize) -> Option<Vec<u8>> {
+        if cx > 223 || cy > 223 {
+            return None;
+        }
+        Some(vec![0x1b, b'[', b'M', cb, (cx as u8) + 32, (cy as u8) + 32])
+    }
+
+    fn encode_utf8_mouse_triplet(cb: u8, cx: usize, cy: usize) -> Option<Vec<u8>> {
+        let mut out = vec![0x1b, b'[', b'M'];
+        Self::append_mouse_utf8_codepoint(&mut out, u32::from(cb))?;
+        Self::append_mouse_utf8_codepoint(&mut out, (cx as u32).checked_add(32)?);
+        Self::append_mouse_utf8_codepoint(&mut out, (cy as u32).checked_add(32)?);
+        Some(out)
+    }
+
+    fn append_mouse_utf8_codepoint(out: &mut Vec<u8>, codepoint: u32) -> Option<()> {
+        if !(32..=2047).contains(&codepoint) {
+            return None;
+        }
+        let ch = char::from_u32(codepoint)?;
+        let mut buf = [0u8; 4];
+        let encoded = ch.encode_utf8(&mut buf);
+        out.extend_from_slice(encoded.as_bytes());
+        Some(())
     }
 
     pub fn process(&mut self, data: &[u8]) {
@@ -549,7 +587,9 @@ impl Terminal {
                     while i < len {
                         let next_action = self.parser.advance(data[i]);
                         match next_action {
-                            Action::Print(_) => { i += 1; }
+                            Action::Print(_) => {
+                                i += 1;
+                            }
                             _ => {
                                 if use_line_drawing {
                                     self.write_bytes_translated(&data[run_start..i]);
@@ -653,7 +693,10 @@ impl Terminal {
             (0, b'J') => match p.param(0, 0) {
                 0 => self.grid.erase_below(),
                 1 => self.grid.erase_above(),
-                2 | 3 => self.grid.erase_all(),
+                2 | 3 => {
+                    self.grid.erase_all();
+                    self.clear_visible_kitty_placements();
+                }
                 _ => {}
             },
             (0, b'K') => match p.param(0, 0) {
@@ -748,7 +791,8 @@ impl Terminal {
             }
             // XTVERSION query
             (b'>', b'q') => {
-                self.response_buf.extend_from_slice(b"\x1bP>|handterm(0.1)\x1b\\");
+                self.response_buf
+                    .extend_from_slice(b"\x1bP>|handterm(0.1)\x1b\\");
             }
             // Private mode set
             (b'?', b'h') => {
@@ -757,8 +801,8 @@ impl Terminal {
                     match param {
                         1 => self.application_cursor_keys = true,
                         7 => self.grid.autowrap = true,
-                        12 => {}   // Cursor blink
-                        25 => self.cursor_visible = true,   // DECTCEM show cursor
+                        12 => {}                          // Cursor blink
+                        25 => self.cursor_visible = true, // DECTCEM show cursor
                         47 | 1047 => self.enter_alt_screen(),
                         1049 => {
                             self.save_cursor();
@@ -785,7 +829,7 @@ impl Terminal {
                         1 => self.application_cursor_keys = false,
                         7 => self.grid.autowrap = false,
                         12 => {}
-                        25 => self.cursor_visible = false,  // DECTCEM hide cursor
+                        25 => self.cursor_visible = false, // DECTCEM hide cursor
                         47 | 1047 => self.leave_alt_screen(),
                         1049 => {
                             self.leave_alt_screen();
@@ -803,14 +847,12 @@ impl Terminal {
             // Cursor save/restore (ANSI.SYS style)
             (0, b's') => self.save_cursor(),
             (0, b'u') => self.restore_cursor(),
-            (b' ', b'q') => {
-                match self.parser.param(0, 0) {
-                    0..=2 => self.cursor_style = CursorStyle::Block,
-                    3 | 4 => self.cursor_style = CursorStyle::Underline,
-                    5 | 6 => self.cursor_style = CursorStyle::Bar,
-                    _ => {}
-                }
-            }
+            (b' ', b'q') => match self.parser.param(0, 0) {
+                0..=2 => self.cursor_style = CursorStyle::Block,
+                3 | 4 => self.cursor_style = CursorStyle::Underline,
+                5 | 6 => self.cursor_style = CursorStyle::Bar,
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -832,17 +874,32 @@ impl Terminal {
                 4 => {
                     if i + 1 < params.len() && params[i] == 4 {
                         match params[i + 1] {
-                            0 => self.grid.set_underline_style(crate::grid::UnderlineStyle::None),
-                            1 => self.grid.set_underline_style(crate::grid::UnderlineStyle::Single),
-                            2 => self.grid.set_underline_style(crate::grid::UnderlineStyle::Double),
-                            3 => self.grid.set_underline_style(crate::grid::UnderlineStyle::Curly),
-                            4 => self.grid.set_underline_style(crate::grid::UnderlineStyle::Dotted),
-                            5 => self.grid.set_underline_style(crate::grid::UnderlineStyle::Dashed),
-                            _ => self.grid.set_underline_style(crate::grid::UnderlineStyle::Single),
+                            0 => self
+                                .grid
+                                .set_underline_style(crate::grid::UnderlineStyle::None),
+                            1 => self
+                                .grid
+                                .set_underline_style(crate::grid::UnderlineStyle::Single),
+                            2 => self
+                                .grid
+                                .set_underline_style(crate::grid::UnderlineStyle::Double),
+                            3 => self
+                                .grid
+                                .set_underline_style(crate::grid::UnderlineStyle::Curly),
+                            4 => self
+                                .grid
+                                .set_underline_style(crate::grid::UnderlineStyle::Dotted),
+                            5 => self
+                                .grid
+                                .set_underline_style(crate::grid::UnderlineStyle::Dashed),
+                            _ => self
+                                .grid
+                                .set_underline_style(crate::grid::UnderlineStyle::Single),
                         }
                         i += 1;
                     } else {
-                        self.grid.set_underline_style(crate::grid::UnderlineStyle::Single);
+                        self.grid
+                            .set_underline_style(crate::grid::UnderlineStyle::Single);
                     }
                 }
                 7 => self.grid.set_inverse(true),
@@ -852,7 +909,9 @@ impl Terminal {
                     self.grid.set_dim(false);
                 }
                 23 => self.grid.set_italic(false),
-                24 => self.grid.set_underline_style(crate::grid::UnderlineStyle::None),
+                24 => self
+                    .grid
+                    .set_underline_style(crate::grid::UnderlineStyle::None),
                 27 => self.grid.set_inverse(false),
                 29 => self.grid.set_strikethrough(false),
                 30..=37 => self.grid.set_fg((params[i] - 30) as u32),
@@ -944,16 +1003,14 @@ impl Terminal {
                 b"1" => {}
                 b"10" => {
                     if payload == b"?" {
-                        self.response_buf.extend_from_slice(
-                            b"\x1b]10;rgb:cd/d6/f4\x1b\\",
-                        );
+                        self.response_buf
+                            .extend_from_slice(b"\x1b]10;rgb:cd/d6/f4\x1b\\");
                     }
                 }
                 b"11" => {
                     if payload == b"?" {
-                        self.response_buf.extend_from_slice(
-                            b"\x1b]11;rgb:00/00/00\x1b\\",
-                        );
+                        self.response_buf
+                            .extend_from_slice(b"\x1b]11;rgb:00/00/00\x1b\\");
                     }
                 }
                 b"52" => {
@@ -1017,6 +1074,8 @@ impl Terminal {
         let mut more = false;
         let mut cols = 0u32;
         let mut rows_param = 0u32;
+        let mut delete = None;
+        let mut quiet = 0u8;
 
         for kv in control.split(|&b| b == b',') {
             if kv.len() < 3 || kv[1] != b'=' {
@@ -1042,18 +1101,37 @@ impl Terminal {
                 b'm' => more = val_num() == 1,
                 b'c' => cols = val_num(),
                 b'r' => rows_param = val_num(),
+                b'd' => delete = val.first().copied(),
+                b'q' => quiet = val_num().min(u8::MAX as u32) as u8,
                 _ => {}
             }
         }
 
+        let command = KittyGraphicsCommand {
+            image_id: img_id,
+            delete,
+            quiet,
+        };
+
         match action {
             b't' | b'T' | 0 => {
+                if action == 0 && !self.kitty_more_chunks && !more {
+                    return;
+                }
                 if self.kitty_more_chunks || more {
                     self.kitty_payload_buf.extend_from_slice(payload);
-                    if img_id > 0 { self.kitty_pending_id = img_id; }
-                    if fmt > 0 { self.kitty_pending_fmt = fmt; }
-                    if width > 0 { self.kitty_pending_width = width; }
-                    if height > 0 { self.kitty_pending_height = height; }
+                    if img_id > 0 {
+                        self.kitty_pending_id = img_id;
+                    }
+                    if fmt > 0 {
+                        self.kitty_pending_fmt = fmt;
+                    }
+                    if width > 0 {
+                        self.kitty_pending_width = width;
+                    }
+                    if height > 0 {
+                        self.kitty_pending_height = height;
+                    }
                     self.kitty_more_chunks = more;
                     if !more {
                         let full_payload = std::mem::take(&mut self.kitty_payload_buf);
@@ -1074,7 +1152,7 @@ impl Terminal {
                             rows_param,
                         };
                         let _ = final_fmt;
-                        self.finalize_kitty_image(request, &full_payload);
+                        self.finalize_kitty_image(request, &full_payload, command.quiet);
                     }
                     return;
                 }
@@ -1087,7 +1165,7 @@ impl Terminal {
                     rows_param,
                 };
                 let _ = fmt;
-                self.finalize_kitty_image(request, payload);
+                self.finalize_kitty_image(request, payload, command.quiet);
             }
             b'p' => {
                 if let Some(_img) = self.kitty_images.iter().find(|i| i.id == img_id) {
@@ -1097,31 +1175,58 @@ impl Terminal {
                         col,
                         row,
                         cols: if cols > 0 { cols as usize } else { 1 },
-                        rows: if rows_param > 0 { rows_param as usize } else { 1 },
+                        rows: if rows_param > 0 {
+                            rows_param as usize
+                        } else {
+                            1
+                        },
                     });
+                    self.kitty_generation = self.kitty_generation.wrapping_add(1);
+                    self.grid.mark_all_dirty();
+                    self.push_kitty_graphics_response(command, true);
+                } else {
+                    self.push_kitty_graphics_response(command, false);
+                }
+            }
+            b'd' => {
+                self.abort_partial_kitty_upload();
+                let changed = match command.delete {
+                    Some(b'a' | b'A') => self.delete_all_kitty_placements(),
+                    Some(b'i' | b'I') => self.delete_kitty_image(img_id),
+                    Some(_) => {
+                        if img_id > 0 {
+                            self.delete_kitty_image(img_id)
+                        } else {
+                            self.delete_all_kitty_placements()
+                        }
+                    }
+                    None => {
+                        if img_id > 0 {
+                            self.delete_kitty_image(img_id)
+                        } else {
+                            self.delete_all_kitty_placements()
+                        }
+                    }
+                };
+                if changed {
                     self.kitty_generation = self.kitty_generation.wrapping_add(1);
                     self.grid.mark_all_dirty();
                 }
             }
-            b'd' => {
-                self.kitty_images.retain(|i| i.id != img_id);
-                self.kitty_placements.retain(|p| p.image_id != img_id);
-                self.kitty_generation = self.kitty_generation.wrapping_add(1);
-                self.grid.mark_all_dirty();
-            }
             _ => {}
-        }
-
-        if img_id > 0 {
-            let resp = format!("\x1b_Gi={};OK\x1b\\", img_id);
-            self.response_buf.extend_from_slice(resp.as_bytes());
         }
     }
 
-    fn finalize_kitty_image(&mut self, request: KittyImageFinalize, payload: &[u8]) {
-        let decoded = if let Ok(d) = self.base64_decode_kitty(payload) { d } else { return };
+    fn finalize_kitty_image(&mut self, request: KittyImageFinalize, payload: &[u8], quiet: u8) {
+        let decoded = if let Ok(d) = self.base64_decode_kitty(payload) {
+            d
+        } else {
+            return;
+        };
 
-        let actual_id = if request.id > 0 { request.id } else {
+        let actual_id = if request.id > 0 {
+            request.id
+        } else {
             (self.kitty_images.len() as u32) + 1
         };
 
@@ -1132,6 +1237,7 @@ impl Terminal {
             data: decoded,
         };
 
+        self.kitty_placements.retain(|p| p.image_id != actual_id);
         self.kitty_images.retain(|i| i.id != actual_id);
         self.kitty_images.push(image);
 
@@ -1156,10 +1262,50 @@ impl Terminal {
         self.kitty_generation = self.kitty_generation.wrapping_add(1);
         self.grid.mark_all_dirty();
 
-        if actual_id > 0 {
+        if actual_id > 0 && quiet < 1 {
             let resp = format!("\x1b_Gi={};OK\x1b\\", actual_id);
             self.response_buf.extend_from_slice(resp.as_bytes());
         }
+    }
+
+    fn push_kitty_graphics_response(&mut self, command: KittyGraphicsCommand, success: bool) {
+        if command.image_id == 0
+            || (success && command.quiet >= 1)
+            || (!success && command.quiet >= 2)
+        {
+            return;
+        }
+
+        let payload = if success {
+            "OK".to_string()
+        } else {
+            "ENOENT:image not found".to_string()
+        };
+        let resp = format!("\x1b_Gi={};{}\x1b\\", command.image_id, payload);
+        self.response_buf.extend_from_slice(resp.as_bytes());
+    }
+
+    fn abort_partial_kitty_upload(&mut self) {
+        self.kitty_payload_buf.clear();
+        self.kitty_pending_id = 0;
+        self.kitty_pending_fmt = 0;
+        self.kitty_pending_width = 0;
+        self.kitty_pending_height = 0;
+        self.kitty_more_chunks = false;
+    }
+
+    fn delete_all_kitty_placements(&mut self) -> bool {
+        let changed = !self.kitty_placements.is_empty();
+        self.kitty_placements.clear();
+        changed
+    }
+
+    fn delete_kitty_image(&mut self, img_id: u32) -> bool {
+        let placements_before = self.kitty_placements.len();
+        let images_before = self.kitty_images.len();
+        self.kitty_images.retain(|i| i.id != img_id);
+        self.kitty_placements.retain(|p| p.image_id != img_id);
+        self.kitty_placements.len() != placements_before || self.kitty_images.len() != images_before
     }
 
     fn base64_decode_kitty(&self, input: &[u8]) -> Result<Vec<u8>, ()> {
@@ -1184,9 +1330,13 @@ impl Terminal {
         let mut buf = 0u32;
         let mut bits = 0u32;
         for &b in input {
-            if b == b'=' || b == b'\n' || b == b'\r' { continue; }
+            if b == b'=' || b == b'\n' || b == b'\r' {
+                continue;
+            }
             let val = TABLE[b as usize];
-            if val == 0xff { return Err(()); }
+            if val == 0xff {
+                return Err(());
+            }
             buf = (buf << 6) | val as u32;
             bits += 6;
             if bits >= 8 {
@@ -1219,6 +1369,7 @@ impl Terminal {
         if self.alt_grid.is_some() {
             return;
         }
+        self.saved_main_kitty_placements = Some(std::mem::take(&mut self.kitty_placements));
         let main = std::mem::replace(
             &mut self.grid,
             Grid::new_with_scrollback(
@@ -1235,7 +1386,17 @@ impl Terminal {
     fn leave_alt_screen(&mut self) {
         if let Some(main) = self.alt_grid.take() {
             self.grid = main;
+            self.kitty_placements = self.saved_main_kitty_placements.take().unwrap_or_default();
         }
+    }
+
+    fn clear_visible_kitty_placements(&mut self) {
+        if self.kitty_placements.is_empty() {
+            return;
+        }
+        self.kitty_placements.clear();
+        self.kitty_generation = self.kitty_generation.wrapping_add(1);
+        self.grid.mark_all_dirty();
     }
 
     fn current_kitty_keyboard_flags_mut(&mut self) -> &mut u8 {
@@ -1495,14 +1656,13 @@ mod tests {
         // Exact starship output from hex dump (fish startup)
         let prompt: &[u8] = &[
             0x1b, 0x5b, 0x4a, // ESC[J
-            0x0a,             // newline
-            0x1b, 0x5b, 0x33, 0x38, 0x3b, 0x32, 0x3b, 0x32, 0x34, 0x33, 0x3b,
-            0x31, 0x33, 0x39, 0x3b, 0x31, 0x36, 0x38, 0x6d, // ESC[38;2;243;139;168m
+            0x0a, // newline
+            0x1b, 0x5b, 0x33, 0x38, 0x3b, 0x32, 0x3b, 0x32, 0x34, 0x33, 0x3b, 0x31, 0x33, 0x39,
+            0x3b, 0x31, 0x36, 0x38, 0x6d, // ESC[38;2;243;139;168m
             0xee, 0x82, 0xb6, // U+E0B6 (powerline)
-            0x1b, 0x5b, 0x34, 0x38, 0x3b, 0x32, 0x3b, 0x32, 0x34, 0x33, 0x3b,
-            0x31, 0x33, 0x39, 0x3b, 0x31, 0x36, 0x38, 0x3b, 0x33, 0x38, 0x3b,
-            0x32, 0x3b, 0x31, 0x37, 0x3b, 0x31, 0x37, 0x3b, 0x32, 0x37,
-            0x6d, // ESC[48;2;243;139;168;38;2;17;17;27m
+            0x1b, 0x5b, 0x34, 0x38, 0x3b, 0x32, 0x3b, 0x32, 0x34, 0x33, 0x3b, 0x31, 0x33, 0x39,
+            0x3b, 0x31, 0x36, 0x38, 0x3b, 0x33, 0x38, 0x3b, 0x32, 0x3b, 0x31, 0x37, 0x3b, 0x31,
+            0x37, 0x3b, 0x32, 0x37, 0x6d, // ESC[48;2;243;139;168;38;2;17;17;27m
             0xf3, 0xb0, 0xa3, 0x87, // U+F0E07 (nerd font icon)
             0x20, // space
             0x6a, 0x65, 0x72, 0x65, 0x6d, 0x79, // "jeremy"
@@ -1519,7 +1679,11 @@ mod tests {
             }
         }
 
-        assert!(text.contains("jeremy"), "row 1 should contain 'jeremy', got: {:?}", text);
+        assert!(
+            text.contains("jeremy"),
+            "row 1 should contain 'jeremy', got: {:?}",
+            text
+        );
         assert!(!text.contains("38;"), "raw SGR params leaked: {:?}", text);
         assert!(!text.contains("48;"), "raw SGR params leaked: {:?}", text);
         assert!(!text.contains("["), "raw CSI bracket leaked: {:?}", text);
@@ -1541,7 +1705,12 @@ mod tests {
         t.process(b"\x1b[<u");
         for col in 0..80 {
             let ch = t.grid.cell_char(0, col);
-            assert!(ch == ' ' || ch == '\0', "CSI < u leaked char '{}' at col {}", ch, col);
+            assert!(
+                ch == ' ' || ch == '\0',
+                "CSI < u leaked char '{}' at col {}",
+                ch,
+                col
+            );
         }
     }
 
@@ -1606,7 +1775,11 @@ mod tests {
         let mut t = Terminal::new(80, 24);
         t.process(b"\x1b[>0q");
         let resp = t.drain_responses().unwrap();
-        assert!(resp.starts_with(b"\x1bP>|handterm"), "XTVERSION: {:?}", String::from_utf8_lossy(&resp));
+        assert!(
+            resp.starts_with(b"\x1bP>|handterm"),
+            "XTVERSION: {:?}",
+            String::from_utf8_lossy(&resp)
+        );
     }
 
     #[test]
@@ -1614,7 +1787,11 @@ mod tests {
         let mut t = Terminal::new(80, 24);
         t.process(b"\x1b]10;?\x07");
         let resp = t.drain_responses().unwrap();
-        assert!(resp.starts_with(b"\x1b]10;rgb:"), "OSC 10: {:?}", String::from_utf8_lossy(&resp));
+        assert!(
+            resp.starts_with(b"\x1b]10;rgb:"),
+            "OSC 10: {:?}",
+            String::from_utf8_lossy(&resp)
+        );
     }
 
     #[test]
@@ -1622,7 +1799,11 @@ mod tests {
         let mut t = Terminal::new(80, 24);
         t.process(b"\x1b]11;?\x07");
         let resp = t.drain_responses().unwrap();
-        assert!(resp.starts_with(b"\x1b]11;rgb:"), "OSC 11: {:?}", String::from_utf8_lossy(&resp));
+        assert!(
+            resp.starts_with(b"\x1b]11;rgb:"),
+            "OSC 11: {:?}",
+            String::from_utf8_lossy(&resp)
+        );
     }
 
     #[test]
@@ -1631,7 +1812,12 @@ mod tests {
         t.process(b"\x1bP+q696e646e\x1b\\");
         for col in 0..80 {
             let ch = t.grid.cell_char(0, col);
-            assert!(ch == ' ' || ch == '\0', "DCS leaked char '{}' at col {}", ch, col);
+            assert!(
+                ch == ' ' || ch == '\0',
+                "DCS leaked char '{}' at col {}",
+                ch,
+                col
+            );
         }
     }
 
@@ -1675,7 +1861,11 @@ mod tests {
         // After scroll within region 2-4: row 1 had AAA, row 2 had BBB, row 3 had CCC
         // Scroll moves: BBB->row1 pos, CCC->row2 pos, blank->row3 pos (within region)
         let c = t.grid.cell_char(1, 0);
-        assert!(c == 'B', "after scroll region LF: row 1 = '{}' (expected B)", c);
+        assert!(
+            c == 'B',
+            "after scroll region LF: row 1 = '{}' (expected B)",
+            c
+        );
     }
 
     #[test]
@@ -1763,7 +1953,11 @@ mod tests {
         t.process(b"\x1b(0");
         t.process(b"q");
         let ch = t.grid.cell_char(0, 0);
-        assert_eq!(ch, '\u{2500}', "expected box-drawing horizontal, got '{}'", ch);
+        assert_eq!(
+            ch, '\u{2500}',
+            "expected box-drawing horizontal, got '{}'",
+            ch
+        );
         t.process(b"\x1b(B");
         t.process(b"q");
         assert_eq!(t.grid.cell_char(0, 1), 'q');
@@ -1835,6 +2029,22 @@ mod tests {
         assert_eq!(resp, b"\x1b[<0;6;11M");
         let resp = t.encode_mouse(0, 5, 10, false).unwrap();
         assert_eq!(resp, b"\x1b[<0;6;11m");
+    }
+
+    #[test]
+    fn mouse_utf8_encoding_supports_extended_coordinates() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[?1000h\x1b[?1005h");
+        assert_eq!(t.mouse_encoding, MouseEncoding::Utf8);
+
+        let press = t.encode_mouse(0, 300, 400, true).unwrap();
+        assert_eq!(press, b"\x1b[M \xc5\x8d\xc6\xb1");
+
+        let release = t.encode_mouse(0, 300, 400, false).unwrap();
+        assert_eq!(release, b"\x1b[M#\xc5\x8d\xc6\xb1");
+
+        let scroll = t.encode_mouse_scroll(true, 300, 400).unwrap();
+        assert_eq!(scroll, b"\x1b[M`\xc5\x8d\xc6\xb1");
     }
 
     #[test]
@@ -1951,6 +2161,124 @@ mod tests {
         t.process(b"\x1b_Ga=d,i=7\x1b\\");
         assert!(t.kitty_image(7).is_none());
         assert!(t.kitty_placements.is_empty());
+    }
+
+    #[test]
+    fn kitty_graphics_chunked_upload_only_acks_once_on_completion() {
+        let mut t = Terminal::new(8, 4);
+        t.process(b"\x1b_Ga=T,i=9,f=32,s=1,v=1,c=1,r=1,m=1;/wAA\x1b\\");
+        assert!(t.kitty_image(9).is_none());
+        assert!(t.drain_responses().is_none());
+
+        t.process(b"\x1b_Gm=0;/w==\x1b\\");
+        let image = t.kitty_image(9).expect("chunked kitty image should exist");
+        assert_eq!(image.data, vec![0xff, 0x00, 0x00, 0xff]);
+        assert_eq!(
+            t.drain_responses().as_deref(),
+            Some(&b"\x1b_Gi=9;OK\x1b\\"[..])
+        );
+    }
+
+    #[test]
+    fn kitty_graphics_put_acknowledges_missing_and_present_images() {
+        let mut t = Terminal::new(8, 4);
+        t.process(b"\x1b_Ga=p,i=99\x1b\\");
+        assert_eq!(
+            t.drain_responses().as_deref(),
+            Some(&b"\x1b_Gi=99;ENOENT:image not found\x1b\\"[..])
+        );
+
+        t.process(b"\x1b_Ga=t,i=12,f=32,s=1,v=1;/wAA/w==\x1b\\");
+        assert_eq!(
+            t.drain_responses().as_deref(),
+            Some(&b"\x1b_Gi=12;OK\x1b\\"[..])
+        );
+        t.process(b"\x1b_Ga=p,i=12,c=2,r=3\x1b\\");
+        assert_eq!(t.kitty_placements.len(), 1);
+        assert_eq!(t.kitty_placements[0].cols, 2);
+        assert_eq!(t.kitty_placements[0].rows, 3);
+        assert_eq!(
+            t.drain_responses().as_deref(),
+            Some(&b"\x1b_Gi=12;OK\x1b\\"[..])
+        );
+    }
+
+    #[test]
+    fn retransmitting_existing_kitty_image_replaces_old_placements() {
+        let mut t = Terminal::new(8, 4);
+        t.process(b"\x1b_Ga=T,i=7,f=32,s=1,v=1,c=1,r=1;/wAA/w==\x1b\\");
+        assert_eq!(t.kitty_placements.len(), 1);
+        t.drain_responses();
+
+        t.process(b"\x1b_Ga=t,i=7,f=32,s=1,v=1;AAD//w==\x1b\\");
+        assert!(
+            t.kitty_placements.is_empty(),
+            "retransmit should drop existing placements"
+        );
+        assert_eq!(
+            t.kitty_image(7).expect("image should still exist").data,
+            vec![0x00, 0x00, 0xff, 0xff]
+        );
+    }
+
+    #[test]
+    fn kitty_delete_all_visible_placements_keeps_image_data() {
+        let mut t = Terminal::new(8, 4);
+        t.process(b"\x1b_Ga=T,i=7,f=32,s=1,v=1,c=1,r=1;/wAA/w==\x1b\\");
+        assert_eq!(t.kitty_placements.len(), 1);
+        t.process(b"\x1b_Ga=d\x1b\\");
+        assert!(t.kitty_placements.is_empty());
+        assert!(
+            t.kitty_image(7).is_some(),
+            "delete-all should preserve image data by default"
+        );
+    }
+
+    #[test]
+    fn kitty_delete_aborts_partial_upload() {
+        let mut t = Terminal::new(8, 4);
+        t.process(b"\x1b_Ga=T,i=11,f=32,s=1,v=1,m=1;/wAA\x1b\\");
+        t.process(b"\x1b_Ga=d,d=i,i=11\x1b\\");
+        t.process(b"\x1b_Gm=0;/w==\x1b\\");
+        assert!(
+            t.kitty_image(11).is_none(),
+            "delete should abort chunked upload"
+        );
+    }
+
+    #[test]
+    fn kitty_clear_screen_clears_visible_placements() {
+        let mut t = Terminal::new(8, 4);
+        t.process(b"\x1b_Ga=T,i=7,f=32,s=1,v=1,c=1,r=1;/wAA/w==\x1b\\");
+        assert_eq!(t.kitty_placements.len(), 1);
+
+        t.process(b"\x1b[2J");
+        assert!(t.kitty_placements.is_empty());
+        assert!(
+            t.kitty_image(7).is_some(),
+            "clear screen should not drop stored image data"
+        );
+    }
+
+    #[test]
+    fn kitty_alt_screen_hides_main_placements_and_restores_them() {
+        let mut t = Terminal::new(8, 4);
+        t.process(b"\x1b_Ga=T,i=7,f=32,s=1,v=1,c=1,r=1;/wAA/w==\x1b\\");
+        assert_eq!(t.kitty_placements.len(), 1);
+
+        t.process(b"\x1b[?1049h");
+        assert!(
+            t.kitty_placements.is_empty(),
+            "alternate screen should start with no placements"
+        );
+
+        t.process(b"\x1b[?1049l");
+        assert_eq!(
+            t.kitty_placements.len(),
+            1,
+            "main-screen placements should be restored"
+        );
+        assert_eq!(t.kitty_placements[0].image_id, 7);
     }
 
     #[test]

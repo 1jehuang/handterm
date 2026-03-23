@@ -1,19 +1,19 @@
+#[cfg(feature = "cpu")]
+use crate::config::AppConfig;
+#[cfg(feature = "cpu")]
+use crate::font::GlyphAtlas;
 #[cfg(feature = "gpu")]
 use crate::gpu_frame::{
     AtlasImageRect, FrameBatchStyle, FrameTextBatches, GlyphAtlasEntry, build_frame_plan,
     fill_cell_infos, fill_image_instances, fill_text_batches,
 };
-#[cfg(feature = "cpu")]
-use crate::config::AppConfig;
-#[cfg(feature = "cpu")]
-use crate::font::GlyphAtlas;
 use crate::grid::Grid;
 use crate::parser::Parser;
-use crate::pty::PtyChild;
 use crate::protocol::{
     ClientMessage, CursorState, DirtyCell, KeyEvent, KeyEventKind, ServerMessage, WindowModes,
     decode_client_message, decode_server_message, encode_client_message, encode_server_message,
 };
+use crate::pty::PtyChild;
 #[cfg(feature = "cpu")]
 use crate::render::OffscreenRenderer;
 use crate::terminal::Terminal;
@@ -83,9 +83,13 @@ pub fn run_quick_bench(columns: u16, rows: u16) -> Result<BenchResult> {
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
         let n = pty.try_read(&mut read_buf)?;
-        if n == 0 { continue; }
+        if n == 0 {
+            continue;
+        }
         got.push_str(&String::from_utf8_lossy(&read_buf[..n]));
-        if got.contains(&marker) { break; }
+        if got.contains(&marker) {
+            break;
+        }
     }
     if !got.contains(&marker) {
         bail!("shell ready marker not observed within timeout");
@@ -109,7 +113,9 @@ pub fn run_quick_bench(columns: u16, rows: u16) -> Result<BenchResult> {
     let scan_start = Instant::now();
     let mut scan_count: usize = 0;
     for &b in src.iter() {
-        if (0x20..=0x7e).contains(&b) { scan_count += 1; }
+        if (0x20..=0x7e).contains(&b) {
+            scan_count += 1;
+        }
     }
     std::hint::black_box(scan_count);
     let byte_scan_mb_s = mb_per_sec(BENCH_SIZE, scan_start.elapsed());
@@ -306,10 +312,16 @@ fn bench_protocol_roundtrips() -> f64 {
     let iterations = 20_000usize;
     let start = Instant::now();
     for _ in 0..iterations {
-        let client_bytes = encode_client_message(&client).expect("client protocol message should encode");
-        let server_bytes = encode_server_message(&server).expect("server protocol message should encode");
-        std::hint::black_box(decode_client_message(&client_bytes).expect("client protocol message should decode"));
-        std::hint::black_box(decode_server_message(&server_bytes).expect("server protocol message should decode"));
+        let client_bytes =
+            encode_client_message(&client).expect("client protocol message should encode");
+        let server_bytes =
+            encode_server_message(&server).expect("server protocol message should encode");
+        std::hint::black_box(
+            decode_client_message(&client_bytes).expect("client protocol message should decode"),
+        );
+        std::hint::black_box(
+            decode_server_message(&server_bytes).expect("server protocol message should decode"),
+        );
     }
     (iterations as f64 * 2.0) / start.elapsed().as_secs_f64().max(1e-9)
 }
@@ -366,7 +378,8 @@ fn bench_gpu_frame_pipeline(cols: u16, rows: u16) -> (f64, f64, f64, f64, f64, f
         );
         batched_cells += frame_plan.cell_infos.len();
     }
-    let gpu_batch_cells_per_s = batched_cells as f64 / batch_start.elapsed().as_secs_f64().max(1e-9);
+    let gpu_batch_cells_per_s =
+        batched_cells as f64 / batch_start.elapsed().as_secs_f64().max(1e-9);
 
     let placements = if term.kitty_placements.is_empty() {
         vec![crate::terminal::KittyPlacement {
@@ -561,7 +574,11 @@ fn bench_gpu_transcript_replay() -> (f64, f64, f64) {
     }
     let gpu_emoji_replay_fps = emoji_frames as f64 / emoji_start.elapsed().as_secs_f64().max(1e-9);
 
-    (gpu_prompt_replay_fps, gpu_tui_replay_fps, gpu_emoji_replay_fps)
+    (
+        gpu_prompt_replay_fps,
+        gpu_tui_replay_fps,
+        gpu_emoji_replay_fps,
+    )
 }
 
 #[cfg(feature = "cpu")]
@@ -611,7 +628,11 @@ fn bench_cpu_transcript_replay(config: &AppConfig, atlas: &mut GlyphAtlas) -> (f
     }
     let cpu_emoji_replay_fps = emoji_frames as f64 / emoji_start.elapsed().as_secs_f64().max(1e-9);
 
-    (cpu_prompt_replay_fps, cpu_tui_replay_fps, cpu_emoji_replay_fps)
+    (
+        cpu_prompt_replay_fps,
+        cpu_tui_replay_fps,
+        cpu_emoji_replay_fps,
+    )
 }
 
 fn build_sgr_payload(target_size: usize) -> Vec<u8> {
@@ -751,13 +772,16 @@ pub fn format_bench_results(r: &BenchResult) -> String {
   full-screen write 120x72: {:.1} us ({} bytes)",
         r.memcpy_mb_s,
         r.byte_scan_mb_s,
-        r.parser_ascii_mb_s, parser_pct_of_memcpy,
+        r.parser_ascii_mb_s,
+        parser_pct_of_memcpy,
         r.parser_sgr_mb_s,
         r.parser_mixed_mb_s,
-        r.grid_ascii_mb_s, grid_pct_of_memcpy,
+        r.grid_ascii_mb_s,
+        grid_pct_of_memcpy,
         r.grid_utf8_mb_s,
         r.grid_sgr_color_mb_s,
-        r.terminal_ascii_mb_s, terminal_pct_of_memcpy,
+        r.terminal_ascii_mb_s,
+        terminal_pct_of_memcpy,
         r.terminal_sgr_mb_s,
         r.terminal_mixed_mb_s,
         r.gpu_plan_cells_per_s / 1_000_000.0,

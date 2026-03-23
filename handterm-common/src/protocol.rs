@@ -474,7 +474,7 @@ mod tests {
             rows: 24,
             dpi: 96,
         })
-            .expect("new window should encode");
+        .expect("new window should encode");
 
         for len in 0..encoded.len() {
             let truncated = &encoded[..len];

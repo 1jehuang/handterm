@@ -173,7 +173,11 @@ pub(crate) fn build_cell_instances(
     ci: &CellInfo,
     style: FrameBatchStyle,
     glyph_entry: Option<GlyphAtlasEntry>,
-) -> (Option<CellInstance>, Option<CellInstance>, Option<CellInstance>) {
+) -> (
+    Option<CellInstance>,
+    Option<CellInstance>,
+    Option<CellInstance>,
+) {
     let colors = resolve_cell_colors(
         &ci.cell,
         style.base_fg,
@@ -297,12 +301,7 @@ where
     F: FnMut(&CellInfo) -> Option<GlyphAtlasEntry>,
 {
     let mut batches = FrameTextBatches::default();
-    fill_text_batches(
-        cell_infos,
-        style,
-        &mut batches,
-        glyph_entry_for,
-    );
+    fill_text_batches(cell_infos, style, &mut batches, glyph_entry_for);
     batches
 }
 
@@ -317,12 +316,16 @@ pub(crate) fn fill_text_batches<F>(
     batches.bg_instances.clear();
     batches.fg_instances.clear();
     batches.overlay_instances.clear();
-    batches
-        .bg_instances
-        .reserve(cell_infos.len().saturating_sub(batches.bg_instances.capacity()));
-    batches
-        .fg_instances
-        .reserve(cell_infos.len().saturating_sub(batches.fg_instances.capacity()));
+    batches.bg_instances.reserve(
+        cell_infos
+            .len()
+            .saturating_sub(batches.bg_instances.capacity()),
+    );
+    batches.fg_instances.reserve(
+        cell_infos
+            .len()
+            .saturating_sub(batches.fg_instances.capacity()),
+    );
     batches
         .overlay_instances
         .reserve(1usize.saturating_sub(batches.overlay_instances.capacity()));
@@ -333,11 +336,8 @@ pub(crate) fn fill_text_batches<F>(
         } else {
             None
         };
-        let (bg_instance, fg_instance, overlay_instance) = build_cell_instances(
-            ci,
-            style,
-            glyph_entry,
-        );
+        let (bg_instance, fg_instance, overlay_instance) =
+            build_cell_instances(ci, style, glyph_entry);
 
         if let Some(bg_instance) = bg_instance {
             batches.bg_instances.push(bg_instance);
@@ -385,7 +385,9 @@ pub(crate) fn fill_image_instances<F>(
     image_instances.reserve(placements.len().saturating_sub(image_instances.capacity()));
     for placement in placements {
         if let Some(entry) = image_rect_for(placement) {
-            image_instances.push(image_instance_for_placement(placement, entry, cell_w, cell_h));
+            image_instances.push(image_instance_for_placement(
+                placement, entry, cell_w, cell_h,
+            ));
         }
     }
 }
@@ -469,7 +471,11 @@ mod tests {
             let size = [style.cell_w * ci.cells as f32, style.cell_h];
 
             if colors.bg != style.base_bg {
-                expected_bg.push((pos, size, rgb_to_f32_alpha(colors.bg, style.background_alpha)));
+                expected_bg.push((
+                    pos,
+                    size,
+                    rgb_to_f32_alpha(colors.bg, style.background_alpha),
+                ));
             }
 
             let mut expected_flags = 0u32;
@@ -571,12 +577,24 @@ mod tests {
 
         assert_eq!(image_instances.len(), terminal.kitty_placements.len());
         for (instance, placement) in image_instances.iter().zip(terminal.kitty_placements.iter()) {
-            assert_eq!(instance.pos, [placement.col as f32 * 8.0, placement.row as f32 * 16.0]);
+            assert_eq!(
+                instance.pos,
+                [placement.col as f32 * 8.0, placement.row as f32 * 16.0]
+            );
             assert_eq!(
                 instance.size,
-                [placement.cols.max(1) as f32 * 8.0, placement.rows.max(1) as f32 * 16.0]
+                [
+                    placement.cols.max(1) as f32 * 8.0,
+                    placement.rows.max(1) as f32 * 16.0
+                ]
             );
-            assert_eq!(instance.uv_size, [placement.cols.max(1) as f32 * 8.0, placement.rows.max(1) as f32 * 16.0]);
+            assert_eq!(
+                instance.uv_size,
+                [
+                    placement.cols.max(1) as f32 * 8.0,
+                    placement.rows.max(1) as f32 * 16.0
+                ]
+            );
         }
     }
 
@@ -647,7 +665,7 @@ mod tests {
         let mut terminal = Terminal::new(6, 3);
         terminal.process(b"\x1b[?1049hstart\r\nready\r\n");
         terminal.process(b"\x1b_Ga=T,i=5,f=32,s=1,v=1,c=2,r=1;+////wAAAP8=\x1b\\");
-        terminal.process(b"\x1b[2J\x1b[H/help\r\nhelp text\r\n");
+        terminal.process(b"\x1b[H/help\r\nhelp text\r\n");
 
         let plan = build_frame_plan(&terminal);
 

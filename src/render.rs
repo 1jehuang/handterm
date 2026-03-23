@@ -1,3 +1,4 @@
+use crate::color::blend_rgba_over_rgb;
 use crate::config::AppConfig;
 use crate::font::GlyphAtlas;
 use crate::frontend::{VisualState, sync_visual_damage};
@@ -127,8 +128,9 @@ pub fn render_terminal_to_buffer(
         let mut run_attrs: u8 = 0;
 
         for row in 0..grid.rows {
-            let any_dirty =
-                full_redraw || (0..grid.cols).any(|c| grid.is_cell_dirty(row, c)) || (show_cursor && row == cursor_row);
+            let any_dirty = full_redraw
+                || (0..grid.cols).any(|c| grid.is_cell_dirty(row, c))
+                || (show_cursor && row == cursor_row);
             if !any_dirty {
                 continue;
             }
@@ -167,7 +169,16 @@ pub fn render_terminal_to_buffer(
                     if is_ligature {
                         let mut col = start_col;
                         for sg in &shaped {
-                            atlas.draw_shaped_glyph(buffer, buf_w, buf_h, col, row, sg.codepoint, sg.cells, fg);
+                            atlas.draw_shaped_glyph(
+                                buffer,
+                                buf_w,
+                                buf_h,
+                                col,
+                                row,
+                                sg.codepoint,
+                                sg.cells,
+                                fg,
+                            );
                             col += sg.cells;
                         }
                         return;
@@ -179,7 +190,9 @@ pub fn render_terminal_to_buffer(
                     if ch as u32 > 0x20 {
                         atlas.draw_glyph(buffer, buf_w, buf_h, col, row, ch as u32, fg);
                     }
-                    let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+                    let w = unicode_width::UnicodeWidthChar::width(ch)
+                        .unwrap_or(1)
+                        .max(1);
                     col += w;
                 }
             };
@@ -197,15 +210,16 @@ pub fn render_terminal_to_buffer(
                 let grapheme = grid.cell_grapheme_at_scroll(row, col);
                 let has_content = cell.ch > 0x20 || grapheme.is_some();
 
-                let same_run =
-                    has_content
-                        && grapheme.is_none()
-                        && !run_text.is_empty()
-                        && colors.fg == run_fg
-                        && cell.attrs == run_attrs;
+                let same_run = has_content
+                    && grapheme.is_none()
+                    && !run_text.is_empty()
+                    && colors.fg == run_fg
+                    && cell.attrs == run_attrs;
 
                 if !same_run && !run_text.is_empty() {
-                    flush_run(atlas, buffer, buf_w, buf_h, &run_text, run_start, row, run_fg);
+                    flush_run(
+                        atlas, buffer, buf_w, buf_h, &run_text, run_start, row, run_fg,
+                    );
                     run_text.clear();
                 }
 
@@ -234,7 +248,9 @@ pub fn render_terminal_to_buffer(
             }
 
             if !run_text.is_empty() {
-                flush_run(atlas, buffer, buf_w, buf_h, &run_text, run_start, row, run_fg);
+                flush_run(
+                    atlas, buffer, buf_w, buf_h, &run_text, run_start, row, run_fg,
+                );
             }
 
             for col in 0..grid.cols {
@@ -515,20 +531,7 @@ fn draw_kitty_images(
 }
 
 fn blend_rgba(pixel: &mut u32, rgba: &[u8]) {
-    let alpha = rgba[3] as u32;
-    if alpha == 0 {
-        return;
-    }
-    let bg = *pixel;
-    let bg_r = (bg >> 16) & 0xff;
-    let bg_g = (bg >> 8) & 0xff;
-    let bg_b = bg & 0xff;
-    let inv = 255 - alpha;
-
-    let r = rgba[0] as u32 + (bg_r * inv) / 255;
-    let g = rgba[1] as u32 + (bg_g * inv) / 255;
-    let b = rgba[2] as u32 + (bg_b * inv) / 255;
-    *pixel = (r.min(255) << 16) | (g.min(255) << 8) | b.min(255);
+    blend_rgba_over_rgb(pixel, rgba);
 }
 
 #[cfg(test)]
@@ -587,7 +590,10 @@ mod tests {
             incremental.render(&mut terminal, &mut atlas, &config);
             full.reset();
             full.render(&mut terminal, &mut atlas, &config);
-            assert_eq!(incremental.pixels, full.pixels, "incremental render diverged after typing byte {byte:?}");
+            assert_eq!(
+                incremental.pixels, full.pixels,
+                "incremental render diverged after typing byte {byte:?}"
+            );
         }
     }
 
@@ -666,6 +672,28 @@ mod tests {
     }
 
     #[test]
+    fn kitty_image_alpha_blends_with_background() {
+        let config = AppConfig::default();
+        let cols = 2;
+        let rows = 1;
+        let mut atlas = new_atlas(&config);
+        let mut terminal = Terminal::new(cols, rows);
+        let mut renderer = OffscreenRenderer::new(cols, rows, &atlas);
+
+        let mut cell = crate::grid::Cell::BLANK;
+        cell.ch = ' ' as u32;
+        cell.fg = crate::grid::COLOR_DEFAULT;
+        cell.bg = crate::grid::COLOR_FLAG_RGB | 0x20_40_60;
+        terminal.grid.set_cell(0, 0, cell);
+        terminal.cursor_visible = false;
+        terminal.process(b"\x1b[H\x1b_Ga=T,i=5,f=32,s=1,v=1,c=1,r=1;/wAAgA==\x1b\\");
+        renderer.render(&mut terminal, &mut atlas, &config);
+
+        let expected = 0x8f1f2f;
+        assert_eq!(renderer.pixels[0], expected);
+    }
+
+    #[test]
     fn fish_startup_transcript_replay_matches_full_redraw() {
         replay_chunks_match_full_redraw(80, 24, FISH_STARTUP_TRANSCRIPT, |terminal, _| {
             for row in 0..24 {
@@ -694,7 +722,11 @@ mod tests {
                         text.push(ch);
                     }
                 }
-                assert!(text.contains("jeremy"), "row 1 should contain 'jeremy', got: {:?}", text);
+                assert!(
+                    text.contains("jeremy"),
+                    "row 1 should contain 'jeremy', got: {:?}",
+                    text
+                );
             }
         });
     }
@@ -710,7 +742,11 @@ mod tests {
                         row0.push(ch);
                     }
                 }
-                assert!(row0.contains("/help"), "expected help overlay in top row, got: {:?}", row0);
+                assert!(
+                    row0.contains("/help"),
+                    "expected help overlay in top row, got: {:?}",
+                    row0
+                );
             }
         });
     }

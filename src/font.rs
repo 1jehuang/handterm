@@ -40,6 +40,14 @@ pub struct GlyphAtlas {
     fallback_rb_loaded: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct FontBootstrapMetrics {
+    pub font_path: String,
+    pub cell_width: usize,
+    pub cell_height: usize,
+    pub baseline: usize,
+}
+
 pub struct GlyphData<'a> {
     pub pixels: &'a [u8],
     pub width: usize,
@@ -759,6 +767,41 @@ impl GlyphAtlas {
     }
 }
 
+pub fn bootstrap_font_metrics_with_family_dpi(
+    family: &str,
+    font_size_pt: f64,
+    dpi: u32,
+) -> Result<FontBootstrapMetrics> {
+    #[cfg(feature = "local-fonts")]
+    {
+        if let Some(cached) = load_cached_font_metrics(family, font_size_pt, dpi)
+            && std::path::Path::new(&cached.font_path).exists()
+        {
+            return Ok(cached);
+        }
+
+        let font_path = if let Some(cached) = load_cached_font_path(family)
+            && std::path::Path::new(&cached).exists()
+        {
+            cached
+        } else {
+            let resolved = find_monospace_font(Some(family))?;
+            save_cached_font_path(family, &resolved);
+            resolved
+        };
+
+        let metrics = measure_font_metrics_from_path(&font_path, font_size_pt, dpi)?;
+        save_cached_font_metrics(family, font_size_pt, dpi, &metrics);
+        Ok(metrics)
+    }
+
+    #[cfg(not(feature = "local-fonts"))]
+    {
+        let _ = (family, font_size_pt, dpi);
+        anyhow::bail!("local font loading is disabled in this build")
+    }
+}
+
 #[cfg(feature = "ligatures")]
 pub struct ShapedGlyph {
     pub codepoint: u32,
@@ -1150,6 +1193,30 @@ fn find_monospace_font(preferred_family: Option<&str>) -> Result<String> {
 }
 
 #[cfg(feature = "local-fonts")]
+fn measure_font_metrics_from_path(
+    path: &str,
+    font_size_pt: f64,
+    dpi: u32,
+) -> Result<FontBootstrapMetrics> {
+    let lib = freetype::Library::init().context("failed to init freetype")?;
+    let face = lib.new_face(path, 0).context("failed to load font face")?;
+    face.set_char_size((font_size_pt * 64.0) as isize, 0, dpi, 0)
+        .context("failed to set char size")?;
+
+    let metrics = face.size_metrics().context("no size metrics")?;
+    let cell_height = (metrics.height >> 6) as usize;
+    let baseline = (-metrics.descender >> 6) as usize;
+    let cell_width = measure_cell_width(&face).context("failed to measure cell width")?;
+
+    Ok(FontBootstrapMetrics {
+        font_path: path.to_string(),
+        cell_width: cell_width.max(1),
+        cell_height: cell_height.max(1),
+        baseline,
+    })
+}
+
+#[cfg(feature = "local-fonts")]
 fn find_emoji_font_paths() -> Result<Vec<String>> {
     let fc = fontconfig::Fontconfig::new().context("failed to init fontconfig")?;
     let mut paths = Vec::new();
@@ -1201,6 +1268,10 @@ fn font_cache_path() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".cache").join("handterm").join("font_path"))
 }
 
+fn font_metrics_cache_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".cache").join("handterm").join("font_metrics_v1"))
+}
+
 fn load_cached_font_path(family: &str) -> Option<String> {
     let cache = font_cache_path()?;
     let content = std::fs::read_to_string(&cache).ok()?;
@@ -1210,6 +1281,56 @@ fn load_cached_font_path(family: &str) -> Option<String> {
         {
             return Some(v.to_string());
         }
+    }
+    None
+}
+
+fn load_cached_font_metrics(
+    family: &str,
+    font_size_pt: f64,
+    dpi: u32,
+) -> Option<FontBootstrapMetrics> {
+    let cache = font_metrics_cache_path()?;
+    let content = std::fs::read_to_string(&cache).ok()?;
+    let size_key = format!("{font_size_pt:.2}");
+    for line in content.lines() {
+        let mut parts = line.split('\t');
+        let (
+            Some(cached_family),
+            Some(cached_size),
+            Some(cached_dpi),
+            Some(cell_width),
+            Some(cell_height),
+            Some(baseline),
+            Some(font_path),
+        ) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        )
+        else {
+            continue;
+        };
+        if cached_family != family || cached_size != size_key || cached_dpi != dpi.to_string() {
+            continue;
+        }
+        let (Ok(cell_width), Ok(cell_height), Ok(baseline)) = (
+            cell_width.parse::<usize>(),
+            cell_height.parse::<usize>(),
+            baseline.parse::<usize>(),
+        ) else {
+            continue;
+        };
+        return Some(FontBootstrapMetrics {
+            font_path: font_path.to_string(),
+            cell_width: cell_width.max(1),
+            cell_height: cell_height.max(1),
+            baseline,
+        });
     }
     None
 }
@@ -1227,6 +1348,44 @@ fn save_cached_font_path(family: &str, path: &str) {
         content.push_str(&entry);
         let _ = std::fs::write(&cache, content);
     }
+}
+
+fn save_cached_font_metrics(
+    family: &str,
+    font_size_pt: f64,
+    dpi: u32,
+    metrics: &FontBootstrapMetrics,
+) {
+    let Some(cache) = font_metrics_cache_path() else {
+        return;
+    };
+    if let Some(parent) = cache.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let entry = format!(
+        "{family}\t{font_size_pt:.2}\t{dpi}\t{}\t{}\t{}\t{}\n",
+        metrics.cell_width, metrics.cell_height, metrics.baseline, metrics.font_path
+    );
+    let mut lines = std::fs::read_to_string(&cache)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| {
+            let mut parts = line.split('\t');
+            !matches!(
+                (parts.next(), parts.next(), parts.next()),
+                (Some(cached_family), Some(cached_size), Some(cached_dpi))
+                    if cached_family == family
+                        && cached_size == format!("{font_size_pt:.2}")
+                        && cached_dpi == dpi.to_string()
+            )
+        })
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    lines.push(entry.trim_end().to_string());
+    let mut content = lines.join("\n");
+    content.push('\n');
+    let _ = std::fs::write(&cache, content);
 }
 
 #[cfg(test)]

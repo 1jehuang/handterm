@@ -1,0 +1,7 @@
+handterm vs kitty comparison (2026-03-23T23:21:57-07:00)
+
+handterm gpu host        startup_ms=255    rss=60524 kB     threads=5 pid=2958488
+handterm cpu host        startup_ms=43     rss=27276 kB     threads=3 pid=2958720
+kitty                    startup_ms=353    rss=100140 kB    threads=7 pid=2958831
+
+results saved to /home/jeremy/handterm/profile_out/kitty_compare.txt

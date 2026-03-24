@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use crate::font::GlyphAtlas;
+use crate::font::{GlyphAtlas, bootstrap_font_metrics_with_family_dpi};
 use crate::frontend::{
     FrameDecision, FrameScheduler, KeyEventKind, RecentTextKeyEvent, RedrawWork, StartupTiming,
     VisualState, base64_decode, classify_redraw_work, copy_to_clipboard, key_to_bytes, open_url,
@@ -164,15 +164,23 @@ impl HandtermApp {
     }
 
     fn ensure_atlas(&mut self, dpi: u32) -> Result<()> {
+        self.ensure_atlas_with_hint(dpi, None)
+    }
+
+    fn ensure_atlas_with_hint(&mut self, dpi: u32, font_path_hint: Option<&str>) -> Result<()> {
         if self.atlas_cache.contains_key(&dpi) {
             return Ok(());
         }
-        let atlas = GlyphAtlas::with_family_dpi(
-            &self.config.style.font_family,
-            self.config.style.font_size,
-            dpi,
-        )
-        .or_else(|_| GlyphAtlas::new_with_dpi(self.config.style.font_size, dpi))
+        let atlas = if let Some(path) = font_path_hint {
+            GlyphAtlas::from_font_path_dpi(path, self.config.style.font_size, dpi)
+        } else {
+            GlyphAtlas::with_family_dpi(
+                &self.config.style.font_family,
+                self.config.style.font_size,
+                dpi,
+            )
+            .or_else(|_| GlyphAtlas::new_with_dpi(self.config.style.font_size, dpi))
+        }
         .context("failed to load font atlas")?;
         self.atlas_cache.insert(dpi, atlas);
         Ok(())
@@ -212,17 +220,41 @@ impl HandtermApp {
         let start = Instant::now();
         let cols = cols.unwrap_or(self.config.window.columns).max(1);
         let rows = rows.unwrap_or(self.config.window.rows).max(1);
+        let before_dpi = Instant::now();
         let dpi = self.resolve_dpi(event_loop);
-        self.ensure_atlas(dpi)?;
-        let (cell_width, cell_height) = self.atlas_metrics(dpi);
+        let dpi_ms = before_dpi.elapsed();
+        let before_bootstrap = Instant::now();
+        let bootstrap = bootstrap_font_metrics_with_family_dpi(
+            &self.config.style.font_family,
+            self.config.style.font_size,
+            dpi,
+        )
+        .ok();
+        let bootstrap_ms = before_bootstrap.elapsed();
+        let (cell_width, cell_height, font_path_hint) = if let Some(metrics) = bootstrap.as_ref() {
+            (
+                metrics.cell_width.max(1),
+                metrics.cell_height.max(1),
+                Some(metrics.font_path.as_str()),
+            )
+        } else {
+            self.ensure_atlas(dpi)?;
+            let (cell_width, cell_height) = self.atlas_metrics(dpi);
+            (cell_width, cell_height, None)
+        };
         let before_window = Instant::now();
         let window = Arc::new(
             event_loop
                 .create_window(self.create_window_attributes(cell_width, cell_height, cols, rows))
                 .context("window creation should succeed")?,
         );
+        let window_ms = before_window.elapsed();
         window.set_ime_allowed(true);
         window.set_ime_purpose(ImePurpose::Terminal);
+
+        let before_atlas = Instant::now();
+        self.ensure_atlas_with_hint(dpi, font_path_hint)?;
+        let atlas_ms = before_atlas.elapsed();
 
         let context = SoftContext::new(window.clone())
             .map_err(|e| anyhow::anyhow!("softbuffer context should be created: {e}"))?;
@@ -286,10 +318,13 @@ impl HandtermApp {
             state.window.request_redraw();
         }
         eprintln!(
-            "handterm cpu host: open-window total={}ms window={}ms pty={}ms",
-            start.elapsed().as_millis(),
-            before_pty.duration_since(before_window).as_millis(),
-            Instant::now().duration_since(before_pty).as_millis(),
+            "handterm cpu host: open-window total={:.2}ms dpi={:.2}ms bootstrap={:.2}ms window={:.2}ms atlas={:.2}ms pty={:.2}ms",
+            start.elapsed().as_secs_f64() * 1000.0,
+            dpi_ms.as_secs_f64() * 1000.0,
+            bootstrap_ms.as_secs_f64() * 1000.0,
+            window_ms.as_secs_f64() * 1000.0,
+            atlas_ms.as_secs_f64() * 1000.0,
+            Instant::now().duration_since(before_pty).as_secs_f64() * 1000.0,
         );
         Ok(id)
     }

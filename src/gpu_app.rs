@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use crate::font::GlyphAtlas;
+use crate::font::{GlyphAtlas, bootstrap_font_metrics_with_family_dpi};
 use crate::frontend::{
     FrameDecision, FrameScheduler, KeyEventKind, RecentTextKeyEvent, RedrawWork, StartupTiming,
     base64_decode, copy_to_clipboard, key_to_bytes, open_url, paste_from_clipboard,
@@ -8,8 +8,9 @@ use crate::frontend::{
 };
 use crate::gpu_runtime::{
     GpuSurfaceState, SharedGpuContext, create_shared_gpu_context,
-    create_surface_state_with_shared_profiled_with_defaults, render_surface_state,
-    render_surface_state_profiled, resize_surface_state,
+    create_surface_state_for_window_with_shared_profiled_with_defaults,
+    create_window_attributes_for_metrics, render_surface_state, render_surface_state_profiled,
+    resize_surface_state,
 };
 use crate::ipc::{IpcAction, IpcServer, Request, Response, SyntheticKeyEvent};
 use crate::pty::PtyChild;
@@ -54,8 +55,7 @@ pub fn run(config: AppConfig) -> Result<()> {
         eprintln!("handterm: failed to bind {}", socket_path.display());
     }
 
-    let shared = create_shared_gpu_context()?;
-    let mut app = GpuApp::new(config, ipc, proxy, shared);
+    let mut app = GpuApp::new(config, ipc, proxy);
     event_loop
         .run_app(&mut app)
         .context("failed while running app")
@@ -63,7 +63,7 @@ pub fn run(config: AppConfig) -> Result<()> {
 
 struct GpuApp {
     config: AppConfig,
-    shared: Arc<SharedGpuContext>,
+    shared: Option<Arc<SharedGpuContext>>,
     windows: HashMap<WinitWindowId, GpuWindowState>,
     window_ids: HashMap<u64, WinitWindowId>,
     next_window_id: u64,
@@ -103,15 +103,10 @@ struct GpuWindowState {
 }
 
 impl GpuApp {
-    fn new(
-        config: AppConfig,
-        ipc: Option<IpcServer>,
-        proxy: EventLoopProxy<GpuAppEvent>,
-        shared: Arc<SharedGpuContext>,
-    ) -> Self {
+    fn new(config: AppConfig, ipc: Option<IpcServer>, proxy: EventLoopProxy<GpuAppEvent>) -> Self {
         Self {
             config,
-            shared,
+            shared: None,
             windows: HashMap::new(),
             window_ids: HashMap::new(),
             next_window_id: 1,
@@ -175,18 +170,35 @@ impl GpuApp {
     }
 
     fn ensure_atlas(&mut self, dpi: u32) -> Result<()> {
+        self.ensure_atlas_with_hint(dpi, None)
+    }
+
+    fn ensure_atlas_with_hint(&mut self, dpi: u32, font_path_hint: Option<&str>) -> Result<()> {
         if self.atlas_cache.contains_key(&dpi) {
             return Ok(());
         }
-        let atlas = GlyphAtlas::with_family_dpi(
-            &self.config.style.font_family,
-            self.config.style.font_size,
-            dpi,
-        )
-        .or_else(|_| GlyphAtlas::new_with_dpi(self.config.style.font_size, dpi))
+        let atlas = if let Some(path) = font_path_hint {
+            GlyphAtlas::from_font_path_dpi(path, self.config.style.font_size, dpi)
+        } else {
+            GlyphAtlas::with_family_dpi(
+                &self.config.style.font_family,
+                self.config.style.font_size,
+                dpi,
+            )
+            .or_else(|_| GlyphAtlas::new_with_dpi(self.config.style.font_size, dpi))
+        }
         .context("failed to load font atlas")?;
         self.atlas_cache.insert(dpi, atlas);
         Ok(())
+    }
+
+    fn ensure_shared(&mut self) -> Result<Arc<SharedGpuContext>> {
+        if let Some(shared) = &self.shared {
+            return Ok(shared.clone());
+        }
+        let shared = create_shared_gpu_context()?;
+        self.shared = Some(shared.clone());
+        Ok(shared)
     }
 
     fn open_window(
@@ -201,13 +213,43 @@ impl GpuApp {
         let before_dpi = Instant::now();
         let dpi = self.resolve_dpi(event_loop);
         let dpi_ms = before_dpi.elapsed();
-        let before_atlas = Instant::now();
-        self.ensure_atlas(dpi)?;
-        let atlas_ms = before_atlas.elapsed();
-        let atlas = self
-            .atlas_cache
-            .get(&dpi)
-            .expect("atlas should exist for dpi");
+        let before_bootstrap = Instant::now();
+        let bootstrap = bootstrap_font_metrics_with_family_dpi(
+            &self.config.style.font_family,
+            self.config.style.font_size,
+            dpi,
+        )
+        .ok();
+        let bootstrap_ms = before_bootstrap.elapsed();
+        let (cell_width, cell_height, font_path_hint) = if let Some(metrics) = bootstrap.as_ref() {
+            (
+                metrics.cell_width.max(1),
+                metrics.cell_height.max(1),
+                Some(metrics.font_path.as_str()),
+            )
+        } else {
+            let before_atlas = Instant::now();
+            self.ensure_atlas(dpi)?;
+            let atlas = self
+                .atlas_cache
+                .get(&dpi)
+                .expect("atlas should exist for dpi");
+            let _fallback_atlas_ms = before_atlas.elapsed();
+            (atlas.cell_width.max(1), atlas.cell_height.max(1), None)
+        };
+
+        let before_window = Instant::now();
+        let window = Arc::new(
+            event_loop
+                .create_window(create_window_attributes_for_metrics(
+                    &self.config,
+                    cell_width,
+                    cell_height,
+                    "handterm [gpu host]",
+                ))
+                .context("window creation should succeed")?,
+        );
+        let window_ms = before_window.elapsed();
         let before_terminal = Instant::now();
         let terminal = Terminal::new_with_scrollback(cols, rows, self.config.scrollback.lines);
         let terminal_ms = before_terminal.elapsed();
@@ -215,21 +257,34 @@ impl GpuApp {
         let pty = PtyChild::spawn_default_shell(cols, rows).expect("pty should spawn");
         let pty_ms = before_pty.elapsed();
         let pty_spawned_at = Instant::now();
+
+        let before_atlas = Instant::now();
+        self.ensure_atlas_with_hint(dpi, font_path_hint)?;
+        let atlas_ms = before_atlas.elapsed();
+        let before_shared = Instant::now();
+        let shared = self.ensure_shared()?;
+        let shared_ms = before_shared.elapsed();
+        let atlas = self
+            .atlas_cache
+            .get(&dpi)
+            .expect("atlas should exist for dpi");
+
         let before_surface = Instant::now();
         let preferred_surface_defaults = self
             .windows
             .values()
             .next()
             .map(|state| state.renderer.preferred_surface_defaults());
-        let (renderer, surface_profile) = create_surface_state_with_shared_profiled_with_defaults(
-            self.shared.clone(),
-            event_loop,
-            &self.config,
-            "handterm [gpu host]",
-            atlas,
-            preferred_surface_defaults,
-        )
-        .expect("gpu surface state should initialize");
+        let (renderer, surface_profile) =
+            create_surface_state_for_window_with_shared_profiled_with_defaults(
+                shared,
+                window,
+                &self.config,
+                atlas,
+                preferred_surface_defaults,
+                Some(window_ms),
+            )
+            .expect("gpu surface state should initialize");
         let surface_total_ms = before_surface.elapsed();
         eprintln!("handterm: {}", renderer.surface_debug_summary());
         let stop = Arc::new(AtomicBool::new(false));
@@ -289,7 +344,7 @@ impl GpuApp {
         let sp = &surface_profile;
         eprintln!(
             "handterm gpu host: open-window id={id}\n\
-             \x20 total={:.2}ms dpi={:.2}ms atlas={:.2}ms terminal={:.2}ms pty={:.2}ms watcher={:.2}ms\n\
+             \x20 total={:.2}ms dpi={:.2}ms bootstrap={:.2}ms window={:.2}ms atlas={:.2}ms shared={:.2}ms terminal={:.2}ms pty={:.2}ms watcher={:.2}ms\n\
              \x20 surface_total={:.2}ms\n\
              \x20   window_create={:.2}ms ime={:.2}ms wgpu_surface={:.2}ms\n\
              \x20   default_config={:.2}ms caps={:.2}ms configure={:.2}ms defaults_reused={}\n\
@@ -297,7 +352,10 @@ impl GpuApp {
              \x20   bind_group={:.2}ms pipeline={:.2}ms (cache_hit={})",
             start.elapsed().as_secs_f64() * 1000.0,
             dpi_ms.as_secs_f64() * 1000.0,
+            bootstrap_ms.as_secs_f64() * 1000.0,
+            window_ms.as_secs_f64() * 1000.0,
             atlas_ms.as_secs_f64() * 1000.0,
+            shared_ms.as_secs_f64() * 1000.0,
             terminal_ms.as_secs_f64() * 1000.0,
             pty_ms.as_secs_f64() * 1000.0,
             watcher_ms.as_secs_f64() * 1000.0,

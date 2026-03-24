@@ -558,8 +558,17 @@ pub fn create_window_attributes(
     atlas: &GlyphAtlas,
     title: &str,
 ) -> WindowAttributes {
-    let width = config.window.columns as f64 * atlas.cell_width as f64;
-    let height = config.window.rows as f64 * atlas.cell_height as f64;
+    create_window_attributes_for_metrics(config, atlas.cell_width, atlas.cell_height, title)
+}
+
+pub fn create_window_attributes_for_metrics(
+    config: &AppConfig,
+    cell_width: usize,
+    cell_height: usize,
+    title: &str,
+) -> WindowAttributes {
+    let width = config.window.columns as f64 * cell_width as f64;
+    let height = config.window.rows as f64 * cell_height as f64;
 
     Window::default_attributes()
         .with_title(title)
@@ -727,7 +736,6 @@ pub fn create_surface_state_with_shared_profiled_with_defaults(
     atlas: &GlyphAtlas,
     preferred_defaults: Option<GpuSurfaceDefaults>,
 ) -> Result<(GpuSurfaceState, GpuSurfaceCreateProfile)> {
-    let total_start = Instant::now();
     let step_start = Instant::now();
     let window = Arc::new(
         event_loop
@@ -735,6 +743,27 @@ pub fn create_surface_state_with_shared_profiled_with_defaults(
             .context("window creation should succeed")?,
     );
     let window_create = step_start.elapsed();
+
+    create_surface_state_for_window_with_shared_profiled_with_defaults(
+        shared,
+        window,
+        config,
+        atlas,
+        preferred_defaults,
+        Some(window_create),
+    )
+}
+
+pub fn create_surface_state_for_window_with_shared_profiled_with_defaults(
+    shared: Arc<SharedGpuContext>,
+    window: Arc<Window>,
+    config: &AppConfig,
+    atlas: &GlyphAtlas,
+    preferred_defaults: Option<GpuSurfaceDefaults>,
+    precomputed_window_create: Option<Duration>,
+) -> Result<(GpuSurfaceState, GpuSurfaceCreateProfile)> {
+    let total_start = Instant::now();
+    let window_create = precomputed_window_create.unwrap_or(Duration::ZERO);
 
     let step_start = Instant::now();
     window.set_ime_allowed(true);

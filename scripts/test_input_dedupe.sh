@@ -52,9 +52,13 @@ capture_line() {
 import json,sys
 with open(sys.argv[1]) as f:
     data=json.load(f)
-print(data["data"]["text"].splitlines()[0])
+lines = [line for line in data["data"]["text"].splitlines() if line.strip()]
+print(lines[-1] if lines else "")
 PY
 }
+
+send send-key '{"key":"ctrl+u"}'
+sleep 0.1
 
 send send-key-event '{"kind":"press","key":"a","text":"a"}'
 send send-key-event '{"kind":"press","key":"space","text":" "}'

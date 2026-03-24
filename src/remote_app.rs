@@ -80,6 +80,8 @@ struct RemoteState {
     modifiers: Modifiers,
     hyper_modifier: bool,
     meta_modifier: bool,
+    caps_lock_modifier: bool,
+    num_lock_modifier: bool,
     pending_ime_commit: Option<String>,
     recent_text_key_event: Option<RecentTextKeyEvent>,
     mouse_col: usize,
@@ -206,6 +208,8 @@ impl ApplicationHandler<AppEvent> for RemoteHandtermApp {
             modifiers: Modifiers::default(),
             hyper_modifier: false,
             meta_modifier: false,
+            caps_lock_modifier: false,
+            num_lock_modifier: false,
             pending_ime_commit: None,
             recent_text_key_event: None,
             mouse_col: 0,
@@ -363,6 +367,8 @@ impl ApplicationHandler<AppEvent> for RemoteHandtermApp {
                     state.modifiers.state(),
                     state.hyper_modifier,
                     state.meta_modifier,
+                    state.caps_lock_modifier,
+                    state.num_lock_modifier,
                     &event.logical_key,
                     event_kind,
                 );
@@ -421,6 +427,8 @@ impl ApplicationHandler<AppEvent> for RemoteHandtermApp {
                 crate::frontend::apply_modifier_key_transition(
                     &mut state.hyper_modifier,
                     &mut state.meta_modifier,
+                    &mut state.caps_lock_modifier,
+                    &mut state.num_lock_modifier,
                     &event.logical_key,
                     event_kind,
                 );

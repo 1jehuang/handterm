@@ -6,6 +6,8 @@ use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
 const HYPER_MODIFIER_BIT: u32 = 1 << 24;
 const META_MODIFIER_BIT: u32 = 1 << 25;
+const CAPS_LOCK_MODIFIER_BIT: u32 = 1 << 26;
+const NUM_LOCK_MODIFIER_BIT: u32 = 1 << 27;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyEventKind {
@@ -14,13 +16,25 @@ pub enum KeyEventKind {
     Release,
 }
 
-pub fn modifiers_with_extra(modifiers: ModifiersState, hyper: bool, meta: bool) -> ModifiersState {
+pub fn modifiers_with_extra(
+    modifiers: ModifiersState,
+    hyper: bool,
+    meta: bool,
+    caps_lock: bool,
+    num_lock: bool,
+) -> ModifiersState {
     let mut bits = modifiers.bits();
     if hyper {
         bits |= HYPER_MODIFIER_BIT;
     }
     if meta {
         bits |= META_MODIFIER_BIT;
+    }
+    if caps_lock {
+        bits |= CAPS_LOCK_MODIFIER_BIT;
+    }
+    if num_lock {
+        bits |= NUM_LOCK_MODIFIER_BIT;
     }
     ModifiersState::from_bits_retain(bits)
 }
@@ -29,10 +43,12 @@ pub fn effective_modifiers_for_key_event(
     modifiers: ModifiersState,
     hyper: bool,
     meta: bool,
+    caps_lock: bool,
+    num_lock: bool,
     key: &Key,
     event_kind: KeyEventKind,
 ) -> ModifiersState {
-    let mut effective = modifiers_with_extra(modifiers, hyper, meta);
+    let mut effective = modifiers_with_extra(modifiers, hyper, meta, caps_lock, num_lock);
     match (key, event_kind) {
         (Key::Named(NamedKey::Shift), KeyEventKind::Press | KeyEventKind::Repeat) => {
             effective.set(ModifiersState::SHIFT, true);
@@ -59,10 +75,22 @@ pub fn effective_modifiers_for_key_event(
             effective.set(ModifiersState::SUPER, false);
         }
         (Key::Named(NamedKey::Hyper), KeyEventKind::Press | KeyEventKind::Release) => {
-            effective = modifiers_with_extra(modifiers, false, meta);
+            effective = modifiers_with_extra(modifiers, false, meta, caps_lock, num_lock);
         }
         (Key::Named(NamedKey::Meta), KeyEventKind::Press | KeyEventKind::Release) => {
-            effective = modifiers_with_extra(modifiers, hyper, false);
+            effective = modifiers_with_extra(modifiers, hyper, false, caps_lock, num_lock);
+        }
+        (Key::Named(NamedKey::CapsLock), KeyEventKind::Press) => {
+            effective = modifiers_with_extra(modifiers, hyper, meta, !caps_lock, num_lock);
+        }
+        (Key::Named(NamedKey::CapsLock), KeyEventKind::Repeat | KeyEventKind::Release) => {
+            effective = modifiers_with_extra(modifiers, hyper, meta, caps_lock, num_lock);
+        }
+        (Key::Named(NamedKey::NumLock), KeyEventKind::Press) => {
+            effective = modifiers_with_extra(modifiers, hyper, meta, caps_lock, !num_lock);
+        }
+        (Key::Named(NamedKey::NumLock), KeyEventKind::Repeat | KeyEventKind::Release) => {
+            effective = modifiers_with_extra(modifiers, hyper, meta, caps_lock, num_lock);
         }
         _ => {}
     }
@@ -72,6 +100,8 @@ pub fn effective_modifiers_for_key_event(
 pub fn apply_modifier_key_transition(
     hyper: &mut bool,
     meta: &mut bool,
+    caps_lock: &mut bool,
+    num_lock: &mut bool,
     key: &Key,
     event_kind: KeyEventKind,
 ) {
@@ -79,6 +109,12 @@ pub fn apply_modifier_key_transition(
     match key {
         Key::Named(NamedKey::Hyper) => *hyper = pressed,
         Key::Named(NamedKey::Meta) => *meta = pressed,
+        Key::Named(NamedKey::CapsLock) if matches!(event_kind, KeyEventKind::Press) => {
+            *caps_lock = !*caps_lock;
+        }
+        Key::Named(NamedKey::NumLock) if matches!(event_kind, KeyEventKind::Press) => {
+            *num_lock = !*num_lock;
+        }
         _ => {}
     }
 }
@@ -440,6 +476,12 @@ fn kitty_modifier_field(
     if meta_modifier_active(modifiers) {
         value += 32;
     }
+    if caps_lock_modifier_active(modifiers) {
+        value += 64;
+    }
+    if num_lock_modifier_active(modifiers) {
+        value += 128;
+    }
 
     if report_events {
         let event = match event_kind {
@@ -465,6 +507,14 @@ fn hyper_modifier_active(modifiers: ModifiersState) -> bool {
 
 fn meta_modifier_active(modifiers: ModifiersState) -> bool {
     modifiers.bits() & META_MODIFIER_BIT != 0
+}
+
+fn caps_lock_modifier_active(modifiers: ModifiersState) -> bool {
+    modifiers.bits() & CAPS_LOCK_MODIFIER_BIT != 0
+}
+
+fn num_lock_modifier_active(modifiers: ModifiersState) -> bool {
+    modifiers.bits() & NUM_LOCK_MODIFIER_BIT != 0
 }
 
 fn kitty_text_field(text: Option<&str>) -> Option<String> {
@@ -904,6 +954,8 @@ mod tests {
                 ModifiersState::default(),
                 false,
                 false,
+                false,
+                false,
                 &Key::Named(NamedKey::Control),
                 KeyEventKind::Press,
             ),
@@ -920,6 +972,8 @@ mod tests {
             false,
             effective_modifiers_for_key_event(
                 ModifiersState::default(),
+                false,
+                false,
                 false,
                 false,
                 &Key::Named(NamedKey::Shift),
@@ -962,6 +1016,8 @@ mod tests {
             ModifiersState::CONTROL,
             true,
             false,
+            false,
+            false,
             &Key::Character("x".into()),
             KeyEventKind::Press,
         );
@@ -981,6 +1037,8 @@ mod tests {
             ModifiersState::CONTROL,
             false,
             true,
+            false,
+            false,
             &Key::Character("x".into()),
             KeyEventKind::Press,
         );
@@ -1008,6 +1066,8 @@ mod tests {
                 ModifiersState::default(),
                 true,
                 false,
+                false,
+                false,
                 &Key::Named(NamedKey::Hyper),
                 KeyEventKind::Press,
             ),
@@ -1026,6 +1086,8 @@ mod tests {
                 ModifiersState::default(),
                 false,
                 true,
+                false,
+                false,
                 &Key::Named(NamedKey::Meta),
                 KeyEventKind::Press,
             ),
@@ -1073,6 +1135,8 @@ mod tests {
                 ModifiersState::CONTROL,
                 false,
                 false,
+                false,
+                false,
                 &Key::Named(NamedKey::Control),
                 KeyEventKind::Release,
             ),
@@ -1090,12 +1154,40 @@ mod tests {
             None,
             Some(&PhysicalKey::Code(KeyCode::CapsLock)),
             false,
-            ModifiersState::default(),
+            effective_modifiers_for_key_event(
+                ModifiersState::default(),
+                false,
+                false,
+                false,
+                false,
+                &Key::Named(NamedKey::CapsLock),
+                KeyEventKind::Press,
+            ),
             KITTY_KBD_REPORT_ALL,
             KeyEventKind::Press,
         )
         .unwrap();
-        assert_eq!(caps, b"\x1b[57358u");
+        assert_eq!(caps, b"\x1b[57358;65u");
+
+        let num = key_to_bytes(
+            &Key::Named(NamedKey::NumLock),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::NumLock)),
+            false,
+            effective_modifiers_for_key_event(
+                ModifiersState::default(),
+                false,
+                false,
+                false,
+                false,
+                &Key::Named(NamedKey::NumLock),
+                KeyEventKind::Press,
+            ),
+            KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(num, b"\x1b[57360;129u");
 
         let menu = key_to_bytes(
             &Key::Named(NamedKey::ContextMenu),
@@ -1183,6 +1275,74 @@ mod tests {
         )
         .unwrap();
         assert_eq!(record, b"\x1b[57437u");
+    }
+
+    #[test]
+    fn kitty_modifier_field_includes_caps_and_num_lock_bits() {
+        let caps_modifiers = effective_modifiers_for_key_event(
+            ModifiersState::default(),
+            false,
+            false,
+            true,
+            false,
+            &Key::Named(NamedKey::ArrowUp),
+            KeyEventKind::Press,
+        );
+        let caps = key_to_bytes(
+            &Key::Named(NamedKey::ArrowUp),
+            None,
+            None,
+            false,
+            caps_modifiers,
+            KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(caps, b"\x1b[1;65A");
+
+        let num_modifiers = effective_modifiers_for_key_event(
+            ModifiersState::CONTROL,
+            false,
+            false,
+            false,
+            true,
+            &Key::Character("x".into()),
+            KeyEventKind::Press,
+        );
+        let num = key_to_bytes(
+            &Key::Character("x".into()),
+            Some("x"),
+            Some(&PhysicalKey::Code(KeyCode::KeyX)),
+            false,
+            num_modifiers,
+            KITTY_KBD_DISAMBIGUATE,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(num, b"\x1b[120;133u");
+    }
+
+    #[test]
+    fn kitty_lock_key_release_preserves_toggled_state() {
+        let release = key_to_bytes(
+            &Key::Named(NamedKey::CapsLock),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::CapsLock)),
+            false,
+            effective_modifiers_for_key_event(
+                ModifiersState::default(),
+                false,
+                false,
+                true,
+                false,
+                &Key::Named(NamedKey::CapsLock),
+                KeyEventKind::Release,
+            ),
+            KITTY_KBD_REPORT_ALL | KITTY_KBD_REPORT_EVENTS,
+            KeyEventKind::Release,
+        )
+        .unwrap();
+        assert_eq!(release, b"\x1b[57358;65:3u");
     }
 
     #[test]

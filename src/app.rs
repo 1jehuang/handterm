@@ -88,6 +88,8 @@ struct HostWindowState {
     modifiers: Modifiers,
     hyper_modifier: bool,
     meta_modifier: bool,
+    caps_lock_modifier: bool,
+    num_lock_modifier: bool,
     pending_ime_commit: Option<String>,
     recent_text_key_event: Option<RecentTextKeyEvent>,
     mouse_col: usize,
@@ -262,6 +264,8 @@ impl HandtermApp {
                 modifiers: Modifiers::default(),
                 hyper_modifier: false,
                 meta_modifier: false,
+                caps_lock_modifier: false,
+                num_lock_modifier: false,
                 pending_ime_commit: None,
                 recent_text_key_event: None,
                 mouse_col: 0,
@@ -383,17 +387,29 @@ impl HandtermApp {
 
     fn apply_synthetic_key_event(state: &mut HostWindowState, event: &SyntheticKeyEvent) -> bool {
         let logical_key = crate::frontend::parse_synthetic_key(&event.key);
-        let modifiers = crate::frontend::synthetic_modifiers_state(
-            event.ctrl,
-            event.alt,
-            event.shift,
-            event.super_key,
+        let base_modifiers =
+            crate::frontend::synthetic_modifiers_state(crate::frontend::SyntheticModifierState {
+                ctrl: event.ctrl,
+                alt: event.alt,
+                shift: event.shift,
+                super_key: event.super_key,
+                hyper: event.hyper,
+                meta: event.meta,
+                caps_lock: state.caps_lock_modifier,
+                num_lock: state.num_lock_modifier,
+            });
+        let modifiers = crate::frontend::effective_modifiers_for_key_event(
+            base_modifiers,
             event.hyper,
             event.meta,
+            state.caps_lock_modifier,
+            state.num_lock_modifier,
+            &logical_key,
+            event.kind,
         );
         let ime_dedupe_text =
             crate::frontend::key_ime_dedupe_text(&logical_key, event.text.as_deref());
-        if let Some(bytes) = key_to_bytes(
+        let changed = if let Some(bytes) = key_to_bytes(
             &logical_key,
             event.text.as_deref(),
             None,
@@ -444,7 +460,18 @@ impl HandtermApp {
                 None,
             );
             false
-        }
+        };
+
+        crate::frontend::apply_modifier_key_transition(
+            &mut state.hyper_modifier,
+            &mut state.meta_modifier,
+            &mut state.caps_lock_modifier,
+            &mut state.num_lock_modifier,
+            &logical_key,
+            event.kind,
+        );
+
+        changed
     }
 
     fn handle_host_ipc_request(&mut self, req: &Request) -> (Response, IpcAction) {
@@ -839,6 +866,8 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                             state.modifiers.state(),
                             state.hyper_modifier,
                             state.meta_modifier,
+                            state.caps_lock_modifier,
+                            state.num_lock_modifier,
                             &event.logical_key,
                             event_kind,
                         );
@@ -912,6 +941,8 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                         crate::frontend::apply_modifier_key_transition(
                             &mut state.hyper_modifier,
                             &mut state.meta_modifier,
+                            &mut state.caps_lock_modifier,
+                            &mut state.num_lock_modifier,
                             &event.logical_key,
                             event_kind,
                         );

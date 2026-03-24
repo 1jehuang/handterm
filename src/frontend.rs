@@ -45,24 +45,37 @@ pub fn parse_synthetic_key(spec: &str) -> Key {
         "shift" => Key::Named(NamedKey::Shift),
         "control" | "ctrl" => Key::Named(NamedKey::Control),
         "super" | "meta" => Key::Named(NamedKey::Super),
+        "caps_lock" | "capslock" => Key::Named(NamedKey::CapsLock),
+        "num_lock" | "numlock" => Key::Named(NamedKey::NumLock),
         _ => Key::Character(spec.into()),
     }
 }
 
-pub fn synthetic_modifiers_state(
-    ctrl: bool,
-    alt: bool,
-    shift: bool,
-    super_key: bool,
-    hyper: bool,
-    meta: bool,
-) -> ModifiersState {
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SyntheticModifierState {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub super_key: bool,
+    pub hyper: bool,
+    pub meta: bool,
+    pub caps_lock: bool,
+    pub num_lock: bool,
+}
+
+pub fn synthetic_modifiers_state(synthetic: SyntheticModifierState) -> ModifiersState {
     let mut modifiers = ModifiersState::empty();
-    modifiers.set(ModifiersState::CONTROL, ctrl);
-    modifiers.set(ModifiersState::ALT, alt);
-    modifiers.set(ModifiersState::SHIFT, shift);
-    modifiers.set(ModifiersState::SUPER, super_key);
-    modifiers_with_extra(modifiers, hyper, meta)
+    modifiers.set(ModifiersState::CONTROL, synthetic.ctrl);
+    modifiers.set(ModifiersState::ALT, synthetic.alt);
+    modifiers.set(ModifiersState::SHIFT, synthetic.shift);
+    modifiers.set(ModifiersState::SUPER, synthetic.super_key);
+    modifiers_with_extra(
+        modifiers,
+        synthetic.hyper,
+        synthetic.meta,
+        synthetic.caps_lock,
+        synthetic.num_lock,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1020,13 +1033,30 @@ mod tests {
             parse_synthetic_key("Backspace"),
             Key::Named(NamedKey::Backspace)
         );
+        assert_eq!(
+            parse_synthetic_key("capslock"),
+            Key::Named(NamedKey::CapsLock)
+        );
+        assert_eq!(
+            parse_synthetic_key("num_lock"),
+            Key::Named(NamedKey::NumLock)
+        );
         assert_eq!(parse_synthetic_key("x"), Key::Character("x".into()));
         assert_eq!(parse_synthetic_key("👨‍💻"), Key::Character("👨‍💻".into()));
     }
 
     #[test]
     fn synthetic_modifiers_state_sets_requested_bits() {
-        let modifiers = synthetic_modifiers_state(true, false, true, true, true, true);
+        let modifiers = synthetic_modifiers_state(SyntheticModifierState {
+            ctrl: true,
+            alt: false,
+            shift: true,
+            super_key: true,
+            hyper: true,
+            meta: true,
+            caps_lock: true,
+            num_lock: true,
+        });
         assert!(modifiers.control_key());
         assert!(!modifiers.alt_key());
         assert!(modifiers.shift_key());

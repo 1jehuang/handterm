@@ -6,9 +6,9 @@ Goal: reach the theoretical minimum resource usage for a Wayland terminal emulat
 
 | Metric | handterm CPU host | handterm GPU host | footclient |
 |--------|------------------|-------------------|------------|
-| First window RSS | ~37MB | ~61MB | 1.6MB |
+| First window RSS | ~27-37MB | ~60-61MB | 1.6MB |
 | Additional window RSS | ~20MB | ~1-2MB | 1.6MB |
-| New-window startup | ~16ms | ~34-110ms | ~25-30ms |
+| New-window startup | ~16-43ms | first window ~255ms, added window ~57ms | ~25-30ms |
 | Architecture | single-process host | single-process host | daemon thin client |
 
 ### What is currently limiting memory
@@ -16,7 +16,7 @@ Goal: reach the theoretical minimum resource usage for a Wayland terminal emulat
 | Path | Limiting factor | Notes |
 |------|-----------------|-------|
 | CPU host | Wayland/softbuffer SHM backbuffers | dominant per-window cost; terminal state is no longer the main issue |
-| GPU host | fixed GPU/runtime cost on first window | shared well across additional windows |
+| GPU host | fixed GPU/runtime cost on first window plus compositor surface configure | shared well across additional windows; current added-window hotspot is configure |
 | Daemon thin clients | client process/runtime duplication | still heavier than the host-based design |
 
 The biggest architectural lesson from the current implementation is that **shared-GPU single-process hosting** is the strongest path toward the theoretical per-window floor. CPU host mode improved a lot, but it runs into a hard Wayland/softbuffer SHM ceiling. GPU host mode pays a large fixed first-window cost, then scales at roughly **1-2 MB per extra window**.
@@ -57,6 +57,7 @@ The biggest architectural lesson from the current implementation is that **share
 - Standalone GPU mode is now also a **single-process multi-window host**, with backend-specific host sockets and a shared `wgpu` instance/adapter/device/queue foundation reused across windows.
 - The GPU runtime now splits shared context from per-window surface state, and repeated windows reuse the same device/queue plus a shared render-pipeline cache keyed by surface format.
 - The CPU host path no longer keeps an extra full-window offscreen framebuffer per window; it renders directly into the presentation buffer, which materially reduced per-window memory.
+- Font startup bootstrap now caches resolved font paths and measured cell metrics under the system cache dir, avoiding redundant font discovery work during startup sizing.
 
 ## Verification Standard
 
@@ -310,7 +311,7 @@ The intended end state is still that the client binary drops: freetype (~600KB R
 
 ### 3b: Shared GPU startup optimization
 
-The GPU host now shares device/queue state and caches pipelines across windows, but new-window startup is still higher than ideal. Remaining work includes:
+The GPU host now shares device/queue state and caches pipelines across windows, but new-window startup is still higher than ideal. The latest profiling shows the main remaining cost is compositor-facing surface configure rather than font lookup or pipeline creation. Remaining work includes:
 
 - reduce per-window setup in the GPU host further
 - continue avoiding repeated shader/pipeline work

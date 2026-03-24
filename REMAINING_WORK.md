@@ -54,7 +54,7 @@ This file summarizes the current state of the `handterm` repository and what rem
 
 Measured on the current machine/session:
 
-- 1 window: ~61.3 MB RSS
+- 1 window: ~60.5-61.3 MB RSS
 - 2 windows: ~63.1 MB RSS
 - 3 windows: ~64.0 MB RSS
 - 4 windows: ~65.0 MB RSS
@@ -70,14 +70,22 @@ Interpretation:
 
 Measured on the current machine/session:
 
-- first window: ~37.1 MB RSS
+- first window: ~27.3-37.1 MB RSS
 - additional windows: ~20 MB each
-- open-window latency: ~16 ms
+- open-window latency: ~16-43 ms depending on whether this is a warm host/additional-window path vs fresh startup path
 
 Interpretation:
 
 - CPU host improved significantly
 - remaining per-window memory is largely due to **Wayland/softbuffer SHM backbuffers**
+
+### Recent live comparison vs kitty
+
+Recent live startup/RSS comparison on the current machine/session:
+
+- handterm GPU host: startup ~255 ms, RSS ~60.5 MB
+- handterm CPU host: startup ~43 ms, RSS ~27.3 MB
+- kitty: startup ~353 ms, RSS ~100.1 MB
 
 ### Daemon server-only
 
@@ -103,6 +111,12 @@ The main remaining bottleneck is:
 ## **new-window spawn/startup cost**
 
 especially the cost of window/surface creation on some openings.
+
+The recent internal GPU profiling now shows this more precisely:
+
+- first GPU window is dominated by shared GPU bring-up plus compositor surface configure
+- added GPU windows are currently dominated by **surface configure** on the profiled compositor session
+- a recent measured added-window sample was ~56.9 ms internal, with ~43.6 ms in surface setup and ~42.4 ms specifically in configure
 
 ### CPU host limitation
 

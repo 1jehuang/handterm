@@ -139,8 +139,11 @@ impl HandtermApp {
 
     fn ensure_initial_window(&mut self, event_loop: &ActiveEventLoop) {
         if self.windows.is_empty() {
-            self.open_window(event_loop, None, None)
-                .expect("initial host window should open");
+            if let Err(err) = self.open_window(event_loop, None, None) {
+                eprintln!("handterm cpu host: failed to open initial window: {err:#}");
+                event_loop.exit();
+                return;
+            }
         }
         self.start_ipc_watcher();
     }
@@ -190,7 +193,7 @@ impl HandtermApp {
         let atlas = self
             .atlas_cache
             .get(&dpi)
-            .expect("atlas should exist for requested dpi");
+            .unwrap_or_else(|| panic!("atlas should exist for requested dpi {dpi}"));
         (atlas.cell_width.max(1), atlas.cell_height.max(1))
     }
 

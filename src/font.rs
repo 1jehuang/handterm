@@ -1264,17 +1264,28 @@ fn should_try_emoji_fallback(ch: u32) -> bool {
         || (0x1F000..=0x1FAFF).contains(&ch)
 }
 
+fn handterm_cache_dir() -> Option<std::path::PathBuf> {
+    dirs::cache_dir().map(|dir| dir.join("handterm"))
+}
+
+fn font_cache_path_in(cache_dir: &std::path::Path) -> std::path::PathBuf {
+    cache_dir.join("font_path")
+}
+
 fn font_cache_path() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".cache").join("handterm").join("font_path"))
+    handterm_cache_dir().map(|dir| font_cache_path_in(&dir))
+}
+
+fn font_metrics_cache_path_in(cache_dir: &std::path::Path) -> std::path::PathBuf {
+    cache_dir.join("font_metrics_v1")
 }
 
 fn font_metrics_cache_path() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".cache").join("handterm").join("font_metrics_v1"))
+    handterm_cache_dir().map(|dir| font_metrics_cache_path_in(&dir))
 }
 
-fn load_cached_font_path(family: &str) -> Option<String> {
-    let cache = font_cache_path()?;
-    let content = std::fs::read_to_string(&cache).ok()?;
+fn load_cached_font_path_from(cache: &std::path::Path, family: &str) -> Option<String> {
+    let content = std::fs::read_to_string(cache).ok()?;
     for line in content.lines() {
         if let Some((k, v)) = line.split_once('=')
             && k == family
@@ -1285,14 +1296,20 @@ fn load_cached_font_path(family: &str) -> Option<String> {
     None
 }
 
-fn load_cached_font_metrics(
+fn load_cached_font_path(family: &str) -> Option<String> {
+    let cache = font_cache_path()?;
+    load_cached_font_path_from(&cache, family)
+}
+
+fn load_cached_font_metrics_from(
+    cache: &std::path::Path,
     family: &str,
     font_size_pt: f64,
     dpi: u32,
 ) -> Option<FontBootstrapMetrics> {
-    let cache = font_metrics_cache_path()?;
-    let content = std::fs::read_to_string(&cache).ok()?;
+    let content = std::fs::read_to_string(cache).ok()?;
     let size_key = format!("{font_size_pt:.2}");
+    let dpi_key = dpi.to_string();
     for line in content.lines() {
         let mut parts = line.split('\t');
         let (
@@ -1315,7 +1332,7 @@ fn load_cached_font_metrics(
         else {
             continue;
         };
-        if cached_family != family || cached_size != size_key || cached_dpi != dpi.to_string() {
+        if cached_family != family || cached_size != size_key || cached_dpi != dpi_key {
             continue;
         }
         let (Ok(cell_width), Ok(cell_height), Ok(baseline)) = (
@@ -1335,19 +1352,74 @@ fn load_cached_font_metrics(
     None
 }
 
+fn load_cached_font_metrics(
+    family: &str,
+    font_size_pt: f64,
+    dpi: u32,
+) -> Option<FontBootstrapMetrics> {
+    let cache = font_metrics_cache_path()?;
+    load_cached_font_metrics_from(&cache, family, font_size_pt, dpi)
+}
+
+fn save_cached_font_path_to(cache: &std::path::Path, family: &str, path: &str) {
+    if let Some(parent) = cache.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut lines = std::fs::read_to_string(cache)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !matches!(line.split_once('='), Some((cached_family, _)) if cached_family == family))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    lines.push(format!("{family}={path}"));
+    let mut content = lines.join("\n");
+    content.push('\n');
+    let _ = std::fs::write(cache, content);
+}
+
 fn save_cached_font_path(family: &str, path: &str) {
     let Some(cache) = font_cache_path() else {
         return;
     };
+    save_cached_font_path_to(&cache, family, path);
+}
+
+fn save_cached_font_metrics_to(
+    cache: &std::path::Path,
+    family: &str,
+    font_size_pt: f64,
+    dpi: u32,
+    metrics: &FontBootstrapMetrics,
+) {
     if let Some(parent) = cache.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let mut content = std::fs::read_to_string(&cache).unwrap_or_default();
-    let entry = format!("{}={}\n", family, path);
-    if !content.contains(&entry) {
-        content.push_str(&entry);
-        let _ = std::fs::write(&cache, content);
-    }
+
+    let size_key = format!("{font_size_pt:.2}");
+    let dpi_key = dpi.to_string();
+    let entry = format!(
+        "{family}\t{size_key}\t{dpi_key}\t{}\t{}\t{}\t{}\n",
+        metrics.cell_width, metrics.cell_height, metrics.baseline, metrics.font_path
+    );
+    let mut lines = std::fs::read_to_string(cache)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| {
+            let mut parts = line.split('\t');
+            !matches!(
+                (parts.next(), parts.next(), parts.next()),
+                (Some(cached_family), Some(cached_size), Some(cached_dpi))
+                    if cached_family == family
+                        && cached_size == size_key
+                        && cached_dpi == dpi_key
+            )
+        })
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    lines.push(entry.trim_end().to_string());
+    let mut content = lines.join("\n");
+    content.push('\n');
+    let _ = std::fs::write(cache, content);
 }
 
 fn save_cached_font_metrics(
@@ -1359,38 +1431,119 @@ fn save_cached_font_metrics(
     let Some(cache) = font_metrics_cache_path() else {
         return;
     };
-    if let Some(parent) = cache.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    let entry = format!(
-        "{family}\t{font_size_pt:.2}\t{dpi}\t{}\t{}\t{}\t{}\n",
-        metrics.cell_width, metrics.cell_height, metrics.baseline, metrics.font_path
-    );
-    let mut lines = std::fs::read_to_string(&cache)
-        .unwrap_or_default()
-        .lines()
-        .filter(|line| {
-            let mut parts = line.split('\t');
-            !matches!(
-                (parts.next(), parts.next(), parts.next()),
-                (Some(cached_family), Some(cached_size), Some(cached_dpi))
-                    if cached_family == family
-                        && cached_size == format!("{font_size_pt:.2}")
-                        && cached_dpi == dpi.to_string()
-            )
-        })
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    lines.push(entry.trim_end().to_string());
-    let mut content = lines.join("\n");
-    content.push('\n');
-    let _ = std::fs::write(&cache, content);
+    save_cached_font_metrics_to(&cache, family, font_size_pt, dpi, metrics);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    fn sample_metrics(
+        font_path: &str,
+        cell_width: usize,
+        cell_height: usize,
+        baseline: usize,
+    ) -> FontBootstrapMetrics {
+        FontBootstrapMetrics {
+            font_path: font_path.to_string(),
+            cell_width,
+            cell_height,
+            baseline,
+        }
+    }
+
+    #[test]
+    fn cache_paths_live_under_given_cache_dir() {
+        let cache_dir = std::path::Path::new("/tmp/handterm-cache-root");
+        assert_eq!(font_cache_path_in(cache_dir), cache_dir.join("font_path"));
+        assert_eq!(
+            font_metrics_cache_path_in(cache_dir),
+            cache_dir.join("font_metrics_v1")
+        );
+    }
+
+    #[test]
+    fn font_path_cache_roundtrips_and_replaces_existing_entries() {
+        let temp = tempdir().expect("temp dir should be created");
+        let cache = font_cache_path_in(temp.path());
+
+        save_cached_font_path_to(&cache, "JetBrains Mono", "/fonts/old.ttf");
+        save_cached_font_path_to(&cache, "Fira Code", "/fonts/fira.ttf");
+        save_cached_font_path_to(&cache, "JetBrains Mono", "/fonts/new.ttf");
+
+        assert_eq!(
+            load_cached_font_path_from(&cache, "JetBrains Mono"),
+            Some("/fonts/new.ttf".to_string())
+        );
+        assert_eq!(
+            load_cached_font_path_from(&cache, "Fira Code"),
+            Some("/fonts/fira.ttf".to_string())
+        );
+        assert_eq!(load_cached_font_path_from(&cache, "Missing"), None);
+    }
+
+    #[test]
+    fn font_metrics_cache_roundtrips_and_replaces_existing_entries() {
+        let temp = tempdir().expect("temp dir should be created");
+        let cache = font_metrics_cache_path_in(temp.path());
+
+        save_cached_font_metrics_to(
+            &cache,
+            "JetBrains Mono",
+            11.0,
+            96,
+            &sample_metrics("/fonts/old.ttf", 8, 16, 12),
+        );
+        save_cached_font_metrics_to(
+            &cache,
+            "JetBrains Mono",
+            11.0,
+            96,
+            &sample_metrics("/fonts/new.ttf", 9, 17, 13),
+        );
+        save_cached_font_metrics_to(
+            &cache,
+            "JetBrains Mono",
+            11.0,
+            144,
+            &sample_metrics("/fonts/hidpi.ttf", 13, 26, 20),
+        );
+
+        assert_eq!(
+            load_cached_font_metrics_from(&cache, "JetBrains Mono", 11.0, 96)
+                .expect("96 DPI metrics should load")
+                .font_path,
+            "/fonts/new.ttf"
+        );
+        let hidpi = load_cached_font_metrics_from(&cache, "JetBrains Mono", 11.0, 144)
+            .expect("144 DPI metrics should load");
+        assert_eq!(hidpi.cell_width, 13);
+        assert_eq!(hidpi.cell_height, 26);
+        assert_eq!(hidpi.baseline, 20);
+    }
+
+    #[test]
+    fn malformed_font_metrics_cache_entries_are_ignored() {
+        let temp = tempdir().expect("temp dir should be created");
+        let cache = font_metrics_cache_path_in(temp.path());
+        std::fs::write(
+            &cache,
+            concat!(
+                "bad line\n",
+                "JetBrains Mono\t11.00\t96\tnot-a-number\t16\t12\t/fonts/bad.ttf\n",
+                "JetBrains Mono\t11.00\t96\t8\t16\t12\t/fonts/good.ttf\n"
+            ),
+        )
+        .expect("cache file should be writable");
+
+        let metrics = load_cached_font_metrics_from(&cache, "JetBrains Mono", 11.0, 96)
+            .expect("valid metrics should still load");
+        assert_eq!(metrics.font_path, "/fonts/good.ttf");
+        assert_eq!(metrics.cell_width, 8);
+        assert_eq!(metrics.cell_height, 16);
+        assert_eq!(metrics.baseline, 12);
+    }
 
     #[test]
     #[cfg(feature = "local-fonts")]

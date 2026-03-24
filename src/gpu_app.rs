@@ -140,8 +140,11 @@ impl GpuApp {
 
     fn ensure_initial_window(&mut self, event_loop: &ActiveEventLoop) {
         if self.windows.is_empty() {
-            self.open_window(event_loop, None, None)
-                .expect("initial gpu host window should open");
+            if let Err(err) = self.open_window(event_loop, None, None) {
+                eprintln!("handterm gpu host: failed to open initial window: {err:#}");
+                event_loop.exit();
+                return;
+            }
         }
         self.start_ipc_watcher();
     }
@@ -230,10 +233,9 @@ impl GpuApp {
         } else {
             let before_atlas = Instant::now();
             self.ensure_atlas(dpi)?;
-            let atlas = self
-                .atlas_cache
-                .get(&dpi)
-                .expect("atlas should exist for dpi");
+            let atlas = self.atlas_cache.get(&dpi).with_context(|| {
+                format!("atlas cache missing after initialization for dpi {dpi}")
+            })?;
             let _fallback_atlas_ms = before_atlas.elapsed();
             (atlas.cell_width.max(1), atlas.cell_height.max(1), None)
         };
@@ -254,7 +256,8 @@ impl GpuApp {
         let terminal = Terminal::new_with_scrollback(cols, rows, self.config.scrollback.lines);
         let terminal_ms = before_terminal.elapsed();
         let before_pty = Instant::now();
-        let pty = PtyChild::spawn_default_shell(cols, rows).expect("pty should spawn");
+        let pty = PtyChild::spawn_default_shell(cols, rows)
+            .with_context(|| format!("failed to spawn PTY for {cols}x{rows} window"))?;
         let pty_ms = before_pty.elapsed();
         let pty_spawned_at = Instant::now();
 
@@ -267,7 +270,7 @@ impl GpuApp {
         let atlas = self
             .atlas_cache
             .get(&dpi)
-            .expect("atlas should exist for dpi");
+            .with_context(|| format!("atlas cache missing before surface init for dpi {dpi}"))?;
 
         let before_surface = Instant::now();
         let preferred_surface_defaults = self
@@ -284,7 +287,7 @@ impl GpuApp {
                 preferred_surface_defaults,
                 Some(window_ms),
             )
-            .expect("gpu surface state should initialize");
+            .context("failed to initialize gpu surface state")?;
         let surface_total_ms = before_surface.elapsed();
         eprintln!("handterm: {}", renderer.surface_debug_summary());
         let stop = Arc::new(AtomicBool::new(false));

@@ -1674,6 +1674,65 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "local-fonts")]
+    fn configured_jcode_font_renders_jcode_specific_glyphs() {
+        let mut atlas = GlyphAtlas::with_family("JetBrainsMono Nerd Font Light", 11.0)
+            .expect("should load configured JCode font family");
+
+        for sample in [
+            "󰌘",
+            "⟨client⟩",
+            "⠼ connecting…",
+            "Ancient Coral 🪸",
+            "🔥 blazing",
+            "🐦‍⬛ raven",
+            "🪿 goose",
+            "🫎 moose",
+            "● an  ● or  ● oa  ● cu  ● cp  ● ge(oauth)  ○ ag",
+        ] {
+            let w = atlas.cell_width * sample.chars().count().max(4) * 2;
+            let h = atlas.cell_height * 2;
+            let mut buf = vec![0u32; w * h];
+
+            let mut col = 0usize;
+            for grapheme in unicode_segmentation::UnicodeSegmentation::graphemes(sample, true) {
+                if grapheme.chars().count() == 1 {
+                    let ch = grapheme.chars().next().unwrap_or(' ');
+                    atlas.draw_glyph(&mut buf, w, h, col, 0, ch as u32, 0xffffff);
+                    col += unicode_width::UnicodeWidthStr::width(grapheme).clamp(1, 2);
+                } else {
+                    atlas.draw_grapheme(&mut buf, w, h, col, 0, grapheme, 0xffffff);
+                    col += unicode_width::UnicodeWidthStr::width(grapheme).clamp(1, 2);
+                }
+            }
+
+            assert!(
+                buf.iter().any(|&pixel| pixel != 0),
+                "configured JCode font should render visible pixels for {:?}",
+                sample
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "local-fonts")]
+    fn configured_jcode_font_has_private_use_send_mode_glyph() {
+        let mut atlas = GlyphAtlas::with_family("JetBrainsMono Nerd Font Light", 11.0)
+            .expect("should load configured JCode font family");
+        let pua = '󰌘' as u32;
+
+        assert!(
+            atlas.ensure_glyph(pua),
+            "PUA send-mode glyph should resolve"
+        );
+        let glyph = atlas
+            .get_glyph(pua)
+            .expect("PUA send-mode glyph should be retrievable after ensure_glyph");
+        assert!(glyph.width > 0);
+        assert!(glyph.height > 0);
+    }
+
+    #[test]
     fn rgba_glyph_pixels_alpha_blend_against_existing_rgb() {
         let mut pixel = 0x204060;
         blend_rgba_pixel(&mut pixel, &[0xff, 0x00, 0x00, 0x80]);

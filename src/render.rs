@@ -797,6 +797,25 @@ mod tests {
     }
 
     #[test]
+    fn jcode_like_glyph_probe_replay_matches_full_redraw() {
+        let chunks: &[&[u8]] = &[
+            "⟨client⟩\r\n".as_bytes(),
+            "Ancient Coral 🪸\r\n".as_bytes(),
+            "● an  ● or  ● oa  ● cu  ● cp  ● ge(oauth)  ○ ag\r\n".as_bytes(),
+            "⠼ connecting… 3.6s · websocket/persistent-fresh 󰌘".as_bytes(),
+        ];
+
+        replay_chunks_match_full_redraw(64, 6, chunks, |terminal, idx| {
+            if idx == chunks.len() - 1 {
+                assert_eq!(terminal.grid.cell_grapheme_at(1, 14), None);
+                assert_eq!(terminal.grid.cell_char(1, 14), '🪸');
+                assert_eq!(terminal.grid.cell_char(3, 0), '⠼');
+                assert_eq!(terminal.grid.cell_char(3, 48), '󰌘');
+            }
+        });
+    }
+
+    #[test]
     fn persistent_cpu_framebuffer_can_present_into_fresh_front_buffers() {
         let config = AppConfig::default();
         let cols = 32;

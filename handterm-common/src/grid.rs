@@ -1538,8 +1538,16 @@ mod tests {
             let mut g = Grid::new(80, 24, [0xff; 3], [0; 3]);
             g.write_bytes(format!("A{sample}B").as_bytes());
 
-            assert_eq!(g.cell_char(0, 0), 'A', "left sentinel should stay aligned for {sample}");
-            assert_eq!(g.cell_char(0, 3), 'B', "right sentinel should stay aligned for {sample}");
+            assert_eq!(
+                g.cell_char(0, 0),
+                'A',
+                "left sentinel should stay aligned for {sample}"
+            );
+            assert_eq!(
+                g.cell_char(0, 3),
+                'B',
+                "right sentinel should stay aligned for {sample}"
+            );
             assert_eq!(
                 g.cell_at(0, 1).flags & FLAG_WIDE,
                 FLAG_WIDE,
@@ -1550,7 +1558,11 @@ mod tests {
                 FLAG_WIDE_CONT,
                 "emoji should occupy a wide continuation cell for {sample}"
             );
-            assert_eq!(g.cell_grapheme_at(0, 1), expect_grapheme, "unexpected grapheme storage for {sample}");
+            assert_eq!(
+                g.cell_grapheme_at(0, 1),
+                expect_grapheme,
+                "unexpected grapheme storage for {sample}"
+            );
         }
     }
 }

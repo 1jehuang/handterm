@@ -1783,12 +1783,16 @@ mod tests {
         textures: &std::collections::HashMap<(u32, u32, u32, u32), TestAtlasTexture>,
     ) {
         for instance in instances {
-            let px_x = instance.pos[0].floor().max(0.0) as usize;
-            let px_y = instance.pos[1].floor().max(0.0) as usize;
+            let raw_px_x = instance.pos[0].floor() as isize;
+            let raw_px_y = instance.pos[1].floor() as isize;
+            let px_x = raw_px_x.max(0) as usize;
+            let px_y = raw_px_y.max(0) as usize;
             let draw_w = instance.size[0].ceil().max(0.0) as usize;
             let draw_h = instance.size[1].ceil().max(0.0) as usize;
-            let x_end = (px_x + draw_w).min(buf_w);
-            let y_end = (px_y + draw_h).min(buf_h);
+            let raw_x_end = raw_px_x + draw_w as isize;
+            let raw_y_end = raw_px_y + draw_h as isize;
+            let x_end = raw_x_end.clamp(0, buf_w as isize) as usize;
+            let y_end = raw_y_end.clamp(0, buf_h as isize) as usize;
             let texture = textures.get(&(
                 instance.uv_offset[0] as u32,
                 instance.uv_offset[1] as u32,
@@ -1798,8 +1802,8 @@ mod tests {
 
             for y in px_y..y_end {
                 for x in px_x..x_end {
-                    let dx = x - px_x;
-                    let dy = y - px_y;
+                    let dx = (x as isize - raw_px_x) as usize;
+                    let dy = (y as isize - raw_px_y) as usize;
                     let rgba = rgba_bytes(shader_color_for_cell_instance(
                         instance, texture, dx, dy, draw_w, draw_h,
                     ));
@@ -1817,12 +1821,16 @@ mod tests {
         textures: &std::collections::HashMap<(u32, u32, u32, u32), TestAtlasTexture>,
     ) {
         for instance in instances {
-            let px_x = instance.pos[0].floor().max(0.0) as usize;
-            let px_y = instance.pos[1].floor().max(0.0) as usize;
+            let raw_px_x = instance.pos[0].floor() as isize;
+            let raw_px_y = instance.pos[1].floor() as isize;
+            let px_x = raw_px_x.max(0) as usize;
+            let px_y = raw_px_y.max(0) as usize;
             let draw_w = instance.size[0].ceil().max(0.0) as usize;
             let draw_h = instance.size[1].ceil().max(0.0) as usize;
-            let x_end = (px_x + draw_w).min(buf_w);
-            let y_end = (px_y + draw_h).min(buf_h);
+            let raw_x_end = raw_px_x + draw_w as isize;
+            let raw_y_end = raw_px_y + draw_h as isize;
+            let x_end = raw_x_end.clamp(0, buf_w as isize) as usize;
+            let y_end = raw_y_end.clamp(0, buf_h as isize) as usize;
             let Some(texture) = textures.get(&(
                 instance.uv_offset[0] as u32,
                 instance.uv_offset[1] as u32,
@@ -1834,8 +1842,8 @@ mod tests {
 
             for y in px_y..y_end {
                 for x in px_x..x_end {
-                    let dx = x - px_x;
-                    let dy = y - px_y;
+                    let dx = (x as isize - raw_px_x) as usize;
+                    let dy = (y as isize - raw_px_y) as usize;
                     let rgba = rgba_bytes(sample_texture(texture, dx, dy, draw_w, draw_h));
                     blend_rgba_over_rgb(&mut buffer[y * buf_w + x], &rgba);
                 }
@@ -2349,6 +2357,24 @@ mod tests {
                 assert_eq!(terminal.grid.cell_grapheme_at(2, 6), Some("🇺🇸"));
                 assert_eq!(terminal.grid.cell_grapheme_at(2, 11), Some("👍🏻"));
                 assert_eq!(terminal.grid.cell_grapheme_at(2, 16), Some("1️⃣"));
+            }
+        });
+    }
+
+    #[test]
+    fn gpu_framebuffer_matches_cpu_for_jcode_like_glyph_probe() {
+        let chunks: &[&[u8]] = &[
+            "⟨client⟩\r\n".as_bytes(),
+            "Ancient Coral 🪸\r\n".as_bytes(),
+            "● an  ● or  ● oa  ● cu  ● cp  ● ge(oauth)  ○ ag\r\n".as_bytes(),
+            "⠼ connecting… 3.6s · websocket/persistent-fresh 󰌘".as_bytes(),
+        ];
+
+        assert_gpu_framebuffer_matches_cpu(64, 6, chunks, |terminal, idx| {
+            if idx == chunks.len() - 1 {
+                assert_eq!(terminal.grid.cell_char(1, 14), '🪸');
+                assert_eq!(terminal.grid.cell_char(3, 0), '⠼');
+                assert_eq!(terminal.grid.cell_char(3, 48), '󰌘');
             }
         });
     }

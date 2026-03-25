@@ -160,6 +160,14 @@ fn bytes_need_grapheme_clusters(bytes: &[u8]) -> bool {
                     }
                 }
             }
+            0xF3 if i + 3 < bytes.len() => {
+                if bytes[i + 1] == 0xA0
+                    && bytes[i + 2] == 0x81
+                    && (0x81..=0xBF).contains(&bytes[i + 3])
+                {
+                    return true;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -1336,7 +1344,7 @@ impl Grid {
 
 #[cfg(test)]
 mod tests {
-    use super::Grid;
+    use super::{Grid, bytes_need_grapheme_clusters};
 
     #[test]
     fn writes_simple_text() {
@@ -1467,5 +1475,49 @@ mod tests {
         assert_eq!(g.cell_grapheme_at(1, 0), None);
         assert_eq!(g.cell_char(1, 0), 'x');
         assert_eq!(g.cell_char(1, 1), 'y');
+    }
+
+    #[test]
+    fn detects_complex_emoji_sequences_for_grapheme_segmentation() {
+        for sample in [
+            "🇺🇸",
+            "👨‍👩‍👧‍👦",
+            "👍🏻",
+            "1️⃣",
+            "🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}",
+        ] {
+            assert!(
+                bytes_need_grapheme_clusters(sample.as_bytes()),
+                "expected {:?} to route through grapheme-aware path",
+                sample
+            );
+        }
+    }
+
+    #[test]
+    fn writes_complex_emoji_sequences_into_single_grapheme_cells() {
+        for sample in [
+            "🇺🇸",
+            "👨‍👩‍👧‍👦",
+            "👍🏻",
+            "1️⃣",
+            "🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}",
+        ] {
+            let mut g = Grid::new(80, 24, [0xff; 3], [0; 3]);
+            g.write_bytes(sample.as_bytes());
+
+            assert_eq!(
+                g.cell_grapheme_at(0, 0),
+                Some(sample),
+                "expected {:?} to be stored as a grapheme cluster",
+                sample
+            );
+            assert_eq!(
+                g.get_text(0, 2).trim_end_matches('\n'),
+                sample,
+                "expected {:?} to roundtrip from the grid text view",
+                sample
+            );
+        }
     }
 }

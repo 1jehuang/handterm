@@ -418,6 +418,46 @@ mod tests {
     }
 
     #[test]
+    fn server_complex_emoji_grapheme_cells_roundtrip() {
+        let samples = [
+            "🇺🇸",
+            "👨‍👩‍👧‍👦",
+            "👍🏻",
+            "1️⃣",
+            "🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}",
+        ];
+
+        let message = ServerMessage::CellUpdate {
+            window_id: 27,
+            dirty_cells: samples
+                .into_iter()
+                .enumerate()
+                .map(|(col, grapheme)| DirtyCell {
+                    row: 0,
+                    col: col as u16,
+                    ch: grapheme.chars().next().unwrap_or(' ') as u32,
+                    grapheme: Some(grapheme.to_string()),
+                    fg: 0xffffff,
+                    bg: 0,
+                    underline_color: 0,
+                    hyperlink_id: 0,
+                    attrs: 0,
+                    flags: 1,
+                    underline_style: 0,
+                })
+                .collect(),
+            cursor: None,
+            modes: WindowModes::default(),
+        };
+
+        let encoded =
+            encode_server_message(&message).expect("complex grapheme update should encode");
+        let decoded =
+            decode_server_message(&encoded).expect("complex grapheme update should decode");
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
     fn atlas_update_roundtrips_color_payload() {
         let message = ServerMessage::AtlasUpdate {
             glyph: GlyphBitmap {

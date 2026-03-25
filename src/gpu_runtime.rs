@@ -2332,6 +2332,28 @@ mod tests {
     }
 
     #[test]
+    fn gpu_framebuffer_matches_cpu_for_generic_emoji_probe() {
+        let chunks: &[&[u8]] = &[
+            "A🪸B A🫠B A🫡B\r\n".as_bytes(),
+            "A🩷B A😀B A❤️B\r\n".as_bytes(),
+            "A👨‍💻B A🇺🇸B A👍🏻B A1️⃣B".as_bytes(),
+        ];
+
+        assert_gpu_framebuffer_matches_cpu(32, 4, chunks, |terminal, idx| {
+            if idx == chunks.len() - 1 {
+                assert_eq!(terminal.grid.cell_char(0, 3), 'B');
+                assert_eq!(terminal.grid.cell_char(1, 3), 'B');
+                assert_eq!(terminal.grid.cell_char(2, 3), 'B');
+                assert_eq!(terminal.grid.cell_grapheme_at(1, 11), Some("❤️"));
+                assert_eq!(terminal.grid.cell_grapheme_at(2, 1), Some("👨‍💻"));
+                assert_eq!(terminal.grid.cell_grapheme_at(2, 6), Some("🇺🇸"));
+                assert_eq!(terminal.grid.cell_grapheme_at(2, 11), Some("👍🏻"));
+                assert_eq!(terminal.grid.cell_grapheme_at(2, 16), Some("1️⃣"));
+            }
+        });
+    }
+
+    #[test]
     fn gpu_framebuffer_matches_cpu_for_starship_prompt_transcript() {
         assert_gpu_framebuffer_matches_cpu(80, 24, STARSHIP_PROMPT_TRANSCRIPT, |terminal, idx| {
             if idx == STARSHIP_PROMPT_TRANSCRIPT.len() - 1 {

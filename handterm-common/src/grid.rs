@@ -1344,7 +1344,7 @@ impl Grid {
 
 #[cfg(test)]
 mod tests {
-    use super::{Grid, bytes_need_grapheme_clusters};
+    use super::{FLAG_WIDE, FLAG_WIDE_CONT, Grid, bytes_need_grapheme_clusters};
 
     #[test]
     fn writes_simple_text() {
@@ -1518,6 +1518,39 @@ mod tests {
                 "expected {:?} to roundtrip from the grid text view",
                 sample
             );
+        }
+    }
+
+    #[test]
+    fn generic_emoji_keep_following_text_aligned() {
+        for (sample, expect_grapheme) in [
+            ("🪸", None),
+            ("🫠", None),
+            ("🫡", None),
+            ("🩷", None),
+            ("😀", None),
+            ("❤️", Some("❤️")),
+            ("👨‍💻", Some("👨‍💻")),
+            ("🇺🇸", Some("🇺🇸")),
+            ("👍🏻", Some("👍🏻")),
+            ("1️⃣", Some("1️⃣")),
+        ] {
+            let mut g = Grid::new(80, 24, [0xff; 3], [0; 3]);
+            g.write_bytes(format!("A{sample}B").as_bytes());
+
+            assert_eq!(g.cell_char(0, 0), 'A', "left sentinel should stay aligned for {sample}");
+            assert_eq!(g.cell_char(0, 3), 'B', "right sentinel should stay aligned for {sample}");
+            assert_eq!(
+                g.cell_at(0, 1).flags & FLAG_WIDE,
+                FLAG_WIDE,
+                "emoji should occupy a wide leading cell for {sample}"
+            );
+            assert_eq!(
+                g.cell_at(0, 2).flags & FLAG_WIDE_CONT,
+                FLAG_WIDE_CONT,
+                "emoji should occupy a wide continuation cell for {sample}"
+            );
+            assert_eq!(g.cell_grapheme_at(0, 1), expect_grapheme, "unexpected grapheme storage for {sample}");
         }
     }
 }

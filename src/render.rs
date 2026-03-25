@@ -775,6 +775,28 @@ mod tests {
     }
 
     #[test]
+    fn generic_emoji_probe_replay_matches_full_redraw() {
+        let chunks: &[&[u8]] = &[
+            "A🪸B A🫠B A🫡B\r\n".as_bytes(),
+            "A🩷B A😀B A❤️B\r\n".as_bytes(),
+            "A👨‍💻B A🇺🇸B A👍🏻B A1️⃣B".as_bytes(),
+        ];
+
+        replay_chunks_match_full_redraw(32, 4, chunks, |terminal, idx| {
+            if idx == chunks.len() - 1 {
+                assert_eq!(terminal.grid.cell_char(0, 3), 'B');
+                assert_eq!(terminal.grid.cell_char(1, 3), 'B');
+                assert_eq!(terminal.grid.cell_char(2, 3), 'B');
+                assert_eq!(terminal.grid.cell_grapheme_at(1, 11), Some("❤️"));
+                assert_eq!(terminal.grid.cell_grapheme_at(2, 1), Some("👨‍💻"));
+                assert_eq!(terminal.grid.cell_grapheme_at(2, 6), Some("🇺🇸"));
+                assert_eq!(terminal.grid.cell_grapheme_at(2, 11), Some("👍🏻"));
+                assert_eq!(terminal.grid.cell_grapheme_at(2, 16), Some("1️⃣"));
+            }
+        });
+    }
+
+    #[test]
     fn persistent_cpu_framebuffer_can_present_into_fresh_front_buffers() {
         let config = AppConfig::default();
         let cols = 32;

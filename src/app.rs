@@ -138,12 +138,12 @@ impl HandtermApp {
     }
 
     fn ensure_initial_window(&mut self, event_loop: &ActiveEventLoop) {
-        if self.windows.is_empty() {
-            if let Err(err) = self.open_window(event_loop, None, None) {
-                eprintln!("handterm cpu host: failed to open initial window: {err:#}");
-                event_loop.exit();
-                return;
-            }
+        if self.windows.is_empty()
+            && let Err(err) = self.open_window(event_loop, None, None)
+        {
+            eprintln!("handterm cpu host: failed to open initial window: {err:#}");
+            event_loop.exit();
+            return;
         }
         self.start_ipc_watcher();
     }

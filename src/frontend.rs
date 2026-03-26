@@ -13,6 +13,7 @@ use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 const IME_KEY_DEDUPE_WINDOW: Duration = Duration::from_millis(50);
+const SCROLLBACK_WHEEL_STEP_MULTIPLIER: usize = 2;
 
 fn input_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -462,6 +463,10 @@ pub fn scroll_to_bytes(up: bool, app_cursor: bool) -> Vec<u8> {
     }
 }
 
+pub fn scrollback_wheel_delta(lines: usize) -> usize {
+    lines.saturating_mul(SCROLLBACK_WHEEL_STEP_MULTIPLIER)
+}
+
 pub fn normalize_ime_dedupe_text(text: &str) -> Option<String> {
     if text.is_empty() {
         return None;
@@ -844,6 +849,12 @@ mod tests {
             heavy: false,
         });
         assert!(decision.request_redraw);
+    }
+
+    #[test]
+    fn scrollback_wheel_delta_uses_reduced_multiplier() {
+        assert_eq!(scrollback_wheel_delta(1), 2);
+        assert_eq!(scrollback_wheel_delta(3), 6);
     }
 
     #[test]

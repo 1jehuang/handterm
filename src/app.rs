@@ -3,7 +3,7 @@ use crate::font::{GlyphAtlas, bootstrap_font_metrics_with_family_dpi};
 use crate::frontend::{
     FrameDecision, FrameScheduler, KeyEventKind, RecentTextKeyEvent, RedrawWork, StartupTiming,
     VisualState, base64_decode, classify_redraw_work, copy_to_clipboard, key_to_bytes, open_url,
-    paste_from_clipboard, remember_text_key_event, scroll_to_bytes,
+    paste_from_clipboard, remember_text_key_event, scroll_to_bytes, scrollback_wheel_delta,
     should_skip_duplicate_ime_input, should_skip_ime_commit_after_key_event, spawn_fd_watcher,
     visual_signature,
 };
@@ -1083,12 +1083,13 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                             }
                         } else {
                             let max = state.terminal.grid.scrollback_len();
+                            let delta = scrollback_wheel_delta(lines);
                             if up {
                                 state.terminal.grid.scroll_offset =
-                                    (state.terminal.grid.scroll_offset + lines * 3).min(max);
+                                    (state.terminal.grid.scroll_offset + delta).min(max);
                             } else {
                                 state.terminal.grid.scroll_offset =
-                                    state.terminal.grid.scroll_offset.saturating_sub(lines * 3);
+                                    state.terminal.grid.scroll_offset.saturating_sub(delta);
                             }
                             state.scheduler.mark_redraw_needed();
                         }

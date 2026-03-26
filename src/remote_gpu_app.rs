@@ -4,8 +4,8 @@ use crate::font::GlyphAtlas;
 use crate::frontend::{
     FrameScheduler, KeyEventKind, RecentTextKeyEvent, RedrawWork, base64_decode,
     classify_redraw_work, copy_to_clipboard, key_to_bytes, open_url, paste_from_clipboard,
-    remember_text_key_event, scroll_to_bytes, should_skip_duplicate_ime_input,
-    should_skip_ime_commit_after_key_event, spawn_fd_watcher,
+    remember_text_key_event, scroll_to_bytes, scrollback_wheel_delta,
+    should_skip_duplicate_ime_input, should_skip_ime_commit_after_key_event, spawn_fd_watcher,
 };
 use crate::gpu_runtime::{
     GpuSurfaceState, create_surface_state, render_surface_state, resize_surface_state,
@@ -507,12 +507,13 @@ impl ApplicationHandler<AppEvent> for RemoteGpuApp {
                     }
                 } else {
                     let max = state.terminal.grid.scrollback_len();
+                    let delta = scrollback_wheel_delta(lines);
                     if up {
                         state.terminal.grid.scroll_offset =
-                            (state.terminal.grid.scroll_offset + lines * 3).min(max);
+                            (state.terminal.grid.scroll_offset + delta).min(max);
                     } else {
                         state.terminal.grid.scroll_offset =
-                            state.terminal.grid.scroll_offset.saturating_sub(lines * 3);
+                            state.terminal.grid.scroll_offset.saturating_sub(delta);
                     }
                     self.scheduler.mark_redraw_needed();
                 }

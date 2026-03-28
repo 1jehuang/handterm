@@ -1,4 +1,4 @@
-use crate::frontend::ViewportScroll;
+use crate::frontend::{ViewportScroll, compute_scrollbar_geometry};
 use crate::terminal::{CursorStyle, KittyPlacement, TerminalView};
 use crate::visual::{is_in_selection, resolve_cell_colors, resolve_underline_color};
 
@@ -373,6 +373,58 @@ pub(crate) fn fill_text_batches<F>(
             batches.overlay_instances.push(overlay_instance);
         }
     }
+}
+
+fn solid_rect_instance(pos: [f32; 2], size: [f32; 2], bg: [f32; 4]) -> CellInstance {
+    CellInstance {
+        pos,
+        size,
+        uv_offset: [0.0, 0.0],
+        uv_size: [0.0, 0.0],
+        fg: [0.0, 0.0, 0.0, 0.0],
+        bg,
+        deco: [0.0, 0.0, 0.0, 0.0],
+        flags: 0,
+        _pad: [0; 2],
+    }
+}
+
+pub(crate) fn append_scrollbar_overlay_instances(
+    overlay_instances: &mut Vec<CellInstance>,
+    base_fg: u32,
+    viewport_w_px: f32,
+    viewport_h_px: f32,
+    scrollback_rows: usize,
+    visible_rows: usize,
+    scroll_rows: f32,
+) {
+    const SCROLLBAR_WIDTH_PX: f32 = 4.0;
+    const MIN_THUMB_PX: f32 = 24.0;
+    const TRACK_ALPHA: f32 = 0.10;
+    const THUMB_ALPHA: f32 = 0.55;
+
+    let Some(geometry) = compute_scrollbar_geometry(
+        scrollback_rows,
+        visible_rows,
+        scroll_rows,
+        viewport_h_px,
+        MIN_THUMB_PX,
+    ) else {
+        return;
+    };
+
+    let x = (viewport_w_px - SCROLLBAR_WIDTH_PX).max(0.0);
+    overlay_instances.reserve(2);
+    overlay_instances.push(solid_rect_instance(
+        [x, 0.0],
+        [SCROLLBAR_WIDTH_PX, viewport_h_px.max(0.0)],
+        rgb_to_f32_alpha(base_fg, TRACK_ALPHA),
+    ));
+    overlay_instances.push(solid_rect_instance(
+        [x, geometry.thumb_y_px],
+        [SCROLLBAR_WIDTH_PX, geometry.thumb_h_px],
+        rgb_to_f32_alpha(base_fg, THUMB_ALPHA),
+    ));
 }
 
 #[allow(dead_code)]
@@ -1095,6 +1147,26 @@ mod tests {
         assert_eq!(batches.fg_instances.len(), 2);
         assert_eq!(batches.overlay_instances.len(), 1);
         assert!(batches.overlay_instances[0].flags & FLAG_CURSOR_UNDERLINE != 0);
+    }
+
+    #[test]
+    fn append_scrollbar_overlay_instances_adds_track_and_thumb() {
+        let mut overlay_instances = Vec::new();
+        append_scrollbar_overlay_instances(
+            &mut overlay_instances,
+            0xffffff,
+            800.0,
+            320.0,
+            100,
+            20,
+            50.0,
+        );
+
+        assert_eq!(overlay_instances.len(), 2);
+        assert_eq!(overlay_instances[0].pos, [796.0, 0.0]);
+        assert_eq!(overlay_instances[0].size, [4.0, 320.0]);
+        assert_eq!(overlay_instances[1].pos, [796.0, 133.33333]);
+        assert_eq!(overlay_instances[1].size, [4.0, 53.333336]);
     }
 
     #[test]

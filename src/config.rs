@@ -119,6 +119,7 @@ pub struct ScrollbackConfig {
     pub lines: usize,
     pub smooth: bool,
     pub smooth_speed: f32,
+    pub scrollbar: bool,
 }
 
 impl Default for ScrollbackConfig {
@@ -127,6 +128,7 @@ impl Default for ScrollbackConfig {
             lines: 10_000,
             smooth: false,
             smooth_speed: 3.0,
+            scrollbar: true,
         }
     }
 }
@@ -161,6 +163,7 @@ mod tests {
         assert_eq!(cfg.scrollback.lines, 10_000);
         assert!(!cfg.scrollback.smooth);
         assert_eq!(cfg.scrollback.smooth_speed, 3.0);
+        assert!(cfg.scrollback.scrollbar);
     }
 
     #[test]
@@ -180,6 +183,7 @@ mod tests {
         assert_eq!(cfg.window.rows, 24);
         assert!(!cfg.scrollback.smooth);
         assert_eq!(cfg.scrollback.smooth_speed, 3.0);
+        assert!(cfg.scrollback.scrollbar);
     }
 
     #[test]
@@ -193,6 +197,7 @@ mod tests {
         assert!(cfg.scrollback.smooth);
         assert_eq!(cfg.scrollback.lines, 10_000);
         assert_eq!(cfg.scrollback.smooth_speed, 3.0);
+        assert!(cfg.scrollback.scrollbar);
     }
 
     #[test]
@@ -206,6 +211,17 @@ mod tests {
         let cfg: AppConfig = toml::from_str(raw).expect("config should parse");
         assert!(cfg.scrollback.smooth);
         assert_eq!(cfg.scrollback.smooth_speed, 2.5);
+    }
+
+    #[test]
+    fn parses_scrollbar_toggle() {
+        let raw = r##"
+            [scrollback]
+            scrollbar = false
+        "##;
+
+        let cfg: AppConfig = toml::from_str(raw).expect("config should parse");
+        assert!(!cfg.scrollback.scrollbar);
     }
 
     #[test]

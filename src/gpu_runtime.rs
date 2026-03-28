@@ -3,7 +3,7 @@ use crate::font::{GlyphAtlas, GlyphFormat};
 use crate::frontend::{ViewportScroll, VisualState, visual_signature};
 use crate::gpu_frame::{
     AtlasImageRect, CellInfo, CellInstance, FrameBatchStyle, FrameTextBatches, GlyphAtlasEntry,
-    ImageInstance, fill_cell_infos, fill_cell_infos_with_scroll,
+    ImageInstance, append_scrollbar_overlay_instances, fill_cell_infos, fill_cell_infos_with_scroll,
     fill_image_instances, fill_image_instances_with_viewport_offset, fill_text_batches,
 };
 use crate::terminal::TerminalView;
@@ -1161,6 +1161,17 @@ pub fn render_surface_state_profiled_with_scroll(
             }
         },
     );
+    if config.scrollback.scrollbar {
+        append_scrollbar_overlay_instances(
+            &mut text_batches.overlay_instances,
+            base_fg,
+            state.surface_config.width as f32,
+            state.surface_config.height as f32,
+            terminal.grid().scrollback_len(),
+            terminal.grid().rows,
+            scroll_rows,
+        );
+    }
 
     let image_placements = terminal.kitty_placements().to_vec();
     let mut image_instances = std::mem::take(&mut state.image_instances);

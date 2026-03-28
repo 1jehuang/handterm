@@ -330,6 +330,7 @@ rows = 24
 lines = 10000
 smooth = false
 smooth_speed = 3.0
+scrollbar = true
 
 [performance]
 repaint_delay_ms = 5
@@ -341,6 +342,8 @@ sync_to_monitor = true
 `scrollback.smooth = true` enables experimental GPU-side fractional scrollback rendering. It keeps the normal terminal/grid model, but the GPU renderer draws one extra row and applies a pixel Y offset so touchpad/pixel wheel input can reveal partial lines. Smooth mode now also adds inertial carry, so quick wheel/trackpad gestures continue gliding instead of stopping immediately.
 
 `scrollback.smooth_speed` controls how far each smooth-scroll gesture travels. The default is `3.0`, which is intentionally more aggressive than the initial 1:1 prototype and pairs with the momentum model to carry farther on flicks.
+
+`scrollback.scrollbar` controls a thin right-edge overlay scrollbar. It is enabled by default and does not consume a terminal column.
 
 This currently applies to the standalone/shared-GPU host path. CPU rendering still uses whole-row scrollback presentation, and remote thin clients do not yet have a protocol for server-owned smooth scrollback surfaces.
 

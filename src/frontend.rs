@@ -133,6 +133,12 @@ pub struct ViewportScroll {
     pub fractional_rows: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScrollbarGeometry {
+    pub thumb_y_px: f32,
+    pub thumb_h_px: f32,
+}
+
 impl ViewportScroll {
     pub const ZERO: Self = Self {
         sample_offset: 0,
@@ -180,6 +186,37 @@ impl ViewportScroll {
     }
 }
 
+pub fn compute_scrollbar_geometry(
+    scrollback_rows: usize,
+    visible_rows: usize,
+    scroll_rows: f32,
+    viewport_h_px: f32,
+    min_thumb_px: f32,
+) -> Option<ScrollbarGeometry> {
+    if scrollback_rows == 0 || visible_rows == 0 || viewport_h_px <= 0.0 {
+        return None;
+    }
+
+    let total_rows = (scrollback_rows + visible_rows) as f32;
+    let visible_rows = visible_rows as f32;
+    let track_h_px = viewport_h_px.max(0.0);
+    let thumb_h_px = (track_h_px * (visible_rows / total_rows))
+        .max(min_thumb_px)
+        .min(track_h_px);
+    let max_scroll = scrollback_rows as f32;
+    let progress = if max_scroll > 0.0 {
+        (scroll_rows.clamp(0.0, max_scroll)) / max_scroll
+    } else {
+        0.0
+    };
+    let travel_px = (track_h_px - thumb_h_px).max(0.0);
+
+    Some(ScrollbarGeometry {
+        thumb_y_px: travel_px * progress,
+        thumb_h_px,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SmoothScrollState {
     pub target_rows: f32,
@@ -202,9 +239,9 @@ impl Default for SmoothScrollState {
 impl SmoothScrollState {
     const SETTLE_EPSILON: f32 = 0.01;
     const VELOCITY_EPSILON: f32 = 0.05;
-    const SPRING_RATE: f32 = 20.0;
-    const MOMENTUM_DECAY_RATE: f32 = 12.0;
-    const MOMENTUM_IMPULSE_PER_ROW: f32 = 28.0;
+    const SPRING_RATE: f32 = 22.0;
+    const MOMENTUM_DECAY_RATE: f32 = 4.5;
+    const MOMENTUM_IMPULSE_PER_ROW: f32 = 110.0;
     const BOTTOM_SNAP_THRESHOLD: f32 = 0.3;
 
     pub fn reset(&mut self) {
@@ -1050,6 +1087,19 @@ mod tests {
         assert_eq!(viewport.mouse_row_for_pixel_y(0.0, 16.0, 24), 0);
         assert_eq!(viewport.mouse_row_for_pixel_y(5.0, 16.0, 24), 1);
         assert_eq!(viewport.mouse_row_for_pixel_y(20.0, 16.0, 24), 2);
+    }
+
+    #[test]
+    fn scrollbar_geometry_reflects_visible_fraction_and_progress() {
+        let geometry = compute_scrollbar_geometry(100, 20, 50.0, 200.0, 24.0).unwrap();
+        assert_eq!(geometry.thumb_h_px, 33.333336);
+        assert_eq!(geometry.thumb_y_px, 83.33333);
+    }
+
+    #[test]
+    fn scrollbar_geometry_respects_min_thumb_size() {
+        let geometry = compute_scrollbar_geometry(500, 10, 250.0, 120.0, 24.0).unwrap();
+        assert_eq!(geometry.thumb_h_px, 24.0);
     }
 
     #[test]

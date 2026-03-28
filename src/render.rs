@@ -1,7 +1,7 @@
 use crate::color::blend_rgba_over_rgb;
 use crate::config::AppConfig;
 use crate::font::GlyphAtlas;
-use crate::frontend::{VisualState, sync_visual_damage};
+use crate::frontend::{VisualState, compute_scrollbar_geometry, sync_visual_damage};
 use crate::grid::{COLOR_DEFAULT, Cell};
 use crate::terminal::{CursorStyle, TerminalView};
 use crate::visual::{is_in_selection, resolve_cell_colors, resolve_underline_color};
@@ -328,8 +328,96 @@ pub fn render_terminal_to_buffer(
         }
     }
 
+    if config.scrollback.scrollbar {
+        draw_scrollback_scrollbar(
+            buffer,
+            buf_w,
+            buf_h,
+            grid.scrollback_len(),
+            grid.rows,
+            grid.scroll_offset as f32,
+            base_fg,
+        );
+    }
+
     terminal.grid_mut().clear_dirty();
     *last_visual_state = Some(current_visual);
+}
+
+fn draw_scrollback_scrollbar(
+    buffer: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    scrollback_rows: usize,
+    visible_rows: usize,
+    scroll_rows: f32,
+    fg: u32,
+) {
+    const SCROLLBAR_WIDTH_PX: usize = 4;
+    const MIN_THUMB_PX: f32 = 24.0;
+    const TRACK_ALPHA: u8 = 26;
+    const THUMB_ALPHA: u8 = 140;
+
+    let Some(geometry) = compute_scrollbar_geometry(
+        scrollback_rows,
+        visible_rows,
+        scroll_rows,
+        buf_h as f32,
+        MIN_THUMB_PX,
+    ) else {
+        return;
+    };
+
+    let x_start = buf_w.saturating_sub(SCROLLBAR_WIDTH_PX);
+    draw_alpha_rect(
+        buffer,
+        buf_w,
+        buf_h,
+        x_start,
+        0,
+        SCROLLBAR_WIDTH_PX,
+        buf_h,
+        fg,
+        TRACK_ALPHA,
+    );
+    draw_alpha_rect(
+        buffer,
+        buf_w,
+        buf_h,
+        x_start,
+        geometry.thumb_y_px.floor() as usize,
+        SCROLLBAR_WIDTH_PX,
+        geometry.thumb_h_px.ceil() as usize,
+        fg,
+        THUMB_ALPHA,
+    );
+}
+
+fn draw_alpha_rect(
+    buffer: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    rgb: u32,
+    alpha: u8,
+) {
+    let x_end = (x + width).min(buf_w);
+    let y_end = (y + height).min(buf_h);
+    for py in y.min(buf_h)..y_end {
+        for px in x.min(buf_w)..x_end {
+            let idx = py * buf_w + px;
+            let rgba = [
+                ((rgb >> 16) & 0xff) as u8,
+                ((rgb >> 8) & 0xff) as u8,
+                (rgb & 0xff) as u8,
+                alpha,
+            ];
+            blend_rgba_over_rgb(&mut buffer[idx], &rgba);
+        }
+    }
 }
 
 fn has_complex_dirty_cells(grid: &crate::grid::Grid) -> bool {

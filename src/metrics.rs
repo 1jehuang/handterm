@@ -363,6 +363,7 @@ fn bench_gpu_frame_pipeline(cols: u16, rows: u16) -> (f64, f64, f64, f64, f64, f
                 background_alpha: 1.0,
                 cell_w: 8.0,
                 cell_h: 16.0,
+                viewport_offset_y: 0.0,
             },
             &mut batches,
             |ci| {
@@ -488,6 +489,7 @@ fn bench_gpu_transcript_replay() -> (f64, f64, f64) {
         background_alpha: 1.0,
         cell_w: 8.0,
         cell_h: 16.0,
+        viewport_offset_y: 0.0,
     };
     let iterations = 200usize;
     let mut cell_infos = Vec::new();

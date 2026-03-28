@@ -503,15 +503,15 @@ impl Grid {
         self.scrollback_len
     }
 
-    pub fn cell_at_scroll(&self, row: usize, col: usize) -> &Cell {
-        if self.scroll_offset == 0 {
+    pub fn cell_at_scrollback_offset(&self, scroll_offset: usize, row: usize, col: usize) -> &Cell {
+        if scroll_offset == 0 {
             return self.cell_at(row, col);
         }
         let sb_len = self.scrollback_len;
-        if self.scroll_offset > sb_len {
+        if scroll_offset > sb_len {
             return &Cell::BLANK;
         }
-        let sb_start = sb_len - self.scroll_offset;
+        let sb_start = sb_len - scroll_offset;
         let line_in_sb = sb_start + row;
         if line_in_sb < sb_len {
             let ring_idx = if self.scrollback_len >= self.scrollback_max {
@@ -535,15 +535,24 @@ impl Grid {
         }
     }
 
-    pub fn cell_grapheme_at_scroll(&self, row: usize, col: usize) -> Option<&str> {
-        if self.scroll_offset == 0 {
+    pub fn cell_at_scroll(&self, row: usize, col: usize) -> &Cell {
+        self.cell_at_scrollback_offset(self.scroll_offset, row, col)
+    }
+
+    pub fn cell_grapheme_at_scrollback_offset(
+        &self,
+        scroll_offset: usize,
+        row: usize,
+        col: usize,
+    ) -> Option<&str> {
+        if scroll_offset == 0 {
             return self.cell_grapheme_at(row, col);
         }
         let sb_len = self.scrollback_len;
-        if self.scroll_offset > sb_len {
+        if scroll_offset > sb_len {
             return None;
         }
-        let sb_start = sb_len - self.scroll_offset;
+        let sb_start = sb_len - scroll_offset;
         let line_in_sb = sb_start + row;
         if line_in_sb < sb_len {
             let ring_idx = if self.scrollback_len >= self.scrollback_max {
@@ -565,6 +574,10 @@ impl Grid {
                 None
             }
         }
+    }
+
+    pub fn cell_grapheme_at_scroll(&self, row: usize, col: usize) -> Option<&str> {
+        self.cell_grapheme_at_scrollback_offset(self.scroll_offset, row, col)
     }
 
     #[allow(dead_code)]

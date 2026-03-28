@@ -328,6 +328,7 @@ rows = 24
 
 [scrollback]
 lines = 10000
+smooth = false
 
 [performance]
 repaint_delay_ms = 5
@@ -335,6 +336,8 @@ sync_to_monitor = true
 ```
 
 `background_opacity` is implemented by the GPU backend. If you force `--backend cpu`, Handterm will stay opaque on Wayland because `softbuffer` presents `Xrgb8888` there.
+
+`scrollback.smooth = true` enables experimental GPU-side fractional scrollback rendering. It keeps the normal terminal/grid model, but the GPU renderer draws one extra row and applies a pixel Y offset so touchpad/pixel wheel input can reveal partial lines.
 
 ## Architecture
 

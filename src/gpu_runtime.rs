@@ -3,7 +3,8 @@ use crate::font::{GlyphAtlas, GlyphFormat};
 use crate::frontend::{VisualState, visual_signature};
 use crate::gpu_frame::{
     AtlasImageRect, CellInfo, CellInstance, FrameBatchStyle, FrameTextBatches, GlyphAtlasEntry,
-    ImageInstance, fill_cell_infos, fill_image_instances, fill_text_batches,
+    ImageInstance, ViewportScroll, fill_cell_infos, fill_cell_infos_with_scroll,
+    fill_image_instances, fill_image_instances_with_viewport_offset, fill_text_batches,
 };
 use crate::terminal::TerminalView;
 use anyhow::{Context, Result};
@@ -96,6 +97,7 @@ pub struct GpuSurfaceState {
     image_instances: Vec<ImageInstance>,
     pub last_visual_state: Option<VisualState>,
     pub last_presented_signature: Option<u64>,
+    pub last_viewport_scroll_quantized: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -912,6 +914,7 @@ pub fn create_surface_state_for_window_with_shared_profiled_with_defaults(
             image_instances: Vec::with_capacity(max_image_instances),
             last_visual_state: None,
             last_presented_signature: None,
+            last_viewport_scroll_quantized: None,
         },
         GpuSurfaceCreateProfile {
             window_create,
@@ -1016,7 +1019,17 @@ pub fn render_surface_state(
     atlas: &mut GlyphAtlas,
     config: &AppConfig,
 ) {
-    let _ = render_surface_state_profiled(state, terminal, atlas, config);
+    let _ = render_surface_state_with_scroll(state, terminal, atlas, config, 0.0);
+}
+
+pub fn render_surface_state_with_scroll(
+    state: &mut GpuSurfaceState,
+    terminal: &mut impl TerminalView,
+    atlas: &mut GlyphAtlas,
+    config: &AppConfig,
+    scroll_rows: f32,
+) {
+    let _ = render_surface_state_profiled_with_scroll(state, terminal, atlas, config, scroll_rows);
 }
 
 pub fn render_surface_state_profiled(
@@ -1025,10 +1038,24 @@ pub fn render_surface_state_profiled(
     atlas: &mut GlyphAtlas,
     config: &AppConfig,
 ) -> Option<GpuRenderProfile> {
+    render_surface_state_profiled_with_scroll(state, terminal, atlas, config, 0.0)
+}
+
+pub fn render_surface_state_profiled_with_scroll(
+    state: &mut GpuSurfaceState,
+    terminal: &mut impl TerminalView,
+    atlas: &mut GlyphAtlas,
+    config: &AppConfig,
+    scroll_rows: f32,
+) -> Option<GpuRenderProfile> {
     let total_start = Instant::now();
     let current_visual = VisualState::capture(terminal);
     let signature = visual_signature(terminal);
-    if state.last_presented_signature == Some(signature) {
+    let viewport_scroll = ViewportScroll::from_scroll_rows(scroll_rows);
+    let viewport_quantized = (scroll_rows.max(0.0) * 1024.0).round() as u32;
+    if state.last_presented_signature == Some(signature)
+        && state.last_viewport_scroll_quantized == Some(viewport_quantized)
+    {
         terminal.grid_mut().clear_dirty();
         state.last_visual_state = Some(current_visual);
         return None;
@@ -1042,6 +1069,7 @@ pub fn render_surface_state_profiled(
                 .surface
                 .configure(&state.shared.device, &state.surface_config);
             state.last_presented_signature = None;
+            state.last_viewport_scroll_quantized = None;
             return None;
         }
         Err(_) => return None,
@@ -1072,7 +1100,11 @@ pub fn render_surface_state_profiled(
     let cell_h = atlas.cell_height as f32;
     let step_start = Instant::now();
     let mut frame_cells = std::mem::take(&mut state.frame_cells);
-    fill_cell_infos(terminal, &mut frame_cells);
+    if viewport_scroll == ViewportScroll::ZERO {
+        fill_cell_infos(terminal, &mut frame_cells);
+    } else {
+        fill_cell_infos_with_scroll(terminal, &mut frame_cells, viewport_scroll);
+    }
     let mut text_batches = std::mem::take(&mut state.text_batches);
     let mut atlas_state = state
         .shared
@@ -1088,6 +1120,7 @@ pub fn render_surface_state_profiled(
             background_alpha,
             cell_w,
             cell_h,
+            viewport_offset_y: viewport_scroll.viewport_offset_y(cell_h),
         },
         &mut text_batches,
         |ci| {
@@ -1131,13 +1164,36 @@ pub fn render_surface_state_profiled(
 
     let image_placements = terminal.kitty_placements().to_vec();
     let mut image_instances = std::mem::take(&mut state.image_instances);
-    fill_image_instances(
-        &image_placements,
-        cell_w,
-        cell_h,
-        &mut image_instances,
-        |placement| {
-            ensure_kitty_image_in_atlas(
+    if viewport_scroll == ViewportScroll::ZERO {
+        fill_image_instances(
+            &image_placements,
+            cell_w,
+            cell_h,
+            &mut image_instances,
+            |placement| {
+                ensure_kitty_image_in_atlas(
+                    &mut atlas_state,
+                    &state.shared.queue,
+                    terminal,
+                    placement.image_id,
+                )
+                .map(|entry| AtlasImageRect {
+                    x: entry.x,
+                    y: entry.y,
+                    width: entry.width,
+                    height: entry.height,
+                })
+            },
+        );
+    } else {
+        fill_image_instances_with_viewport_offset(
+            &image_placements,
+            cell_w,
+            cell_h,
+            viewport_scroll.viewport_offset_y(cell_h),
+            &mut image_instances,
+            |placement| {
+                ensure_kitty_image_in_atlas(
                 &mut atlas_state,
                 &state.shared.queue,
                 terminal,
@@ -1147,10 +1203,11 @@ pub fn render_surface_state_profiled(
                 x: entry.x,
                 y: entry.y,
                 width: entry.width,
-                height: entry.height,
-            })
-        },
-    );
+                    height: entry.height,
+                })
+            },
+        );
+    }
     drop(atlas_state);
 
     state.frame_cells = frame_cells;
@@ -1253,6 +1310,7 @@ pub fn render_surface_state_profiled(
     terminal.grid_mut().clear_dirty();
     state.last_visual_state = Some(current_visual);
     state.last_presented_signature = Some(signature);
+    state.last_viewport_scroll_quantized = Some(viewport_quantized);
 
     Some(GpuRenderProfile {
         acquire_surface,
@@ -1882,6 +1940,7 @@ mod tests {
                 background_alpha: clamp_background_alpha(config.style.background_opacity),
                 cell_w: atlas.cell_width as f32,
                 cell_h: atlas.cell_height as f32,
+                viewport_offset_y: 0.0,
             },
             &mut batches,
             |ci| {
@@ -2031,6 +2090,7 @@ mod tests {
                         background_alpha: clamp_background_alpha(config.style.background_opacity),
                         cell_w: atlas.cell_width as f32,
                         cell_h: atlas.cell_height as f32,
+                        viewport_offset_y: 0.0,
                     },
                     &mut batches,
                     |ci| {

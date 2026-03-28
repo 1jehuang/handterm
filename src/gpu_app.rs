@@ -9,8 +9,8 @@ use crate::frontend::{
 use crate::gpu_runtime::{
     GpuSurfaceState, SharedGpuContext, create_shared_gpu_context,
     create_surface_state_for_window_with_shared_profiled_with_defaults,
-    create_window_attributes_for_metrics, render_surface_state, render_surface_state_profiled,
-    resize_surface_state,
+    create_window_attributes_for_metrics, render_surface_state_profiled_with_scroll,
+    render_surface_state_with_scroll, resize_surface_state,
 };
 use crate::ipc::{IpcAction, IpcServer, Request, Response, SyntheticKeyEvent};
 use crate::pty::PtyChild;
@@ -100,6 +100,7 @@ struct GpuWindowState {
     startup_timing: StartupTiming,
     hot_until: Option<Instant>,
     next_hot_frame_at: Option<Instant>,
+    smooth_scroll_rows: f32,
 }
 
 impl GpuApp {
@@ -152,6 +153,61 @@ impl GpuApp {
     fn enter_hot_mode(state: &mut GpuWindowState, now: Instant) {
         state.hot_until = Some(now + HOT_MODE_DURATION);
         state.next_hot_frame_at = Some(now);
+    }
+
+    fn sync_scrollback_view(state: &mut GpuWindowState) {
+        let max = state.terminal.grid.scrollback_len() as f32;
+        state.smooth_scroll_rows = state.smooth_scroll_rows.clamp(0.0, max);
+        if state.smooth_scroll_rows <= 0.001 {
+            state.smooth_scroll_rows = 0.0;
+        }
+        let quantized = state.smooth_scroll_rows.ceil() as usize;
+        if state.terminal.grid.scroll_offset != quantized {
+            state.terminal.grid.scroll_offset = quantized;
+            state.terminal.grid.all_dirty = true;
+        }
+    }
+
+    fn reset_scrollback_view(state: &mut GpuWindowState) {
+        state.smooth_scroll_rows = 0.0;
+        Self::sync_scrollback_view(state);
+    }
+
+    fn apply_scrollback_delta(state: &mut GpuWindowState, delta_rows: f32, up: bool) {
+        if up {
+            state.smooth_scroll_rows += delta_rows.max(0.0);
+        } else {
+            state.smooth_scroll_rows = (state.smooth_scroll_rows - delta_rows.max(0.0)).max(0.0);
+        }
+        Self::sync_scrollback_view(state);
+    }
+
+    fn wheel_delta_rows(config: &AppConfig, delta: &MouseScrollDelta, cell_height: f32) -> (bool, f32) {
+        match delta {
+            MouseScrollDelta::LineDelta(_, y) => {
+                let lines = y.abs().max(1.0);
+                let delta_rows = if config.scrollback.smooth {
+                    lines
+                } else {
+                    scrollback_wheel_delta(lines as usize) as f32
+                };
+                (*y > 0.0, delta_rows)
+            }
+            MouseScrollDelta::PixelDelta(pos) => {
+                let ch = cell_height.max(1.0) as f64;
+                let rows = if config.scrollback.smooth {
+                    (pos.y.abs() / ch) as f32
+                } else {
+                    (pos.y.abs() / ch).max(1.0) as f32
+                };
+                let delta_rows = if config.scrollback.smooth {
+                    rows
+                } else {
+                    scrollback_wheel_delta(rows as usize) as f32
+                };
+                (pos.y > 0.0, delta_rows.max(0.0))
+            }
+        }
     }
 
     fn resolve_dpi(&self, event_loop: &ActiveEventLoop) -> u32 {
@@ -339,6 +395,7 @@ impl GpuApp {
                 },
                 hot_until: None,
                 next_hot_frame_at: None,
+                smooth_scroll_rows: 0.0,
             },
         );
         if let Some(state) = self.windows.get(&winit_id) {
@@ -465,8 +522,7 @@ impl GpuApp {
         state.pending_ime_commit = Some(ime_commit_text);
         let _ = state.pty.write_all(text.as_bytes());
         if state.terminal.grid.scroll_offset > 0 {
-            state.terminal.grid.scroll_offset = 0;
-            state.terminal.grid.all_dirty = true;
+            Self::reset_scrollback_view(state);
         }
         state.terminal.grid.selection = None;
         drain_pty(state) > 0
@@ -528,8 +584,7 @@ impl GpuApp {
             Self::enter_hot_mode(state, Instant::now());
             let _ = state.pty.write_all(&bytes);
             if state.terminal.grid.scroll_offset > 0 {
-                state.terminal.grid.scroll_offset = 0;
-                state.terminal.grid.all_dirty = true;
+                Self::reset_scrollback_view(state);
             }
             state.terminal.grid.selection = None;
             drain_pty(state) > 0
@@ -846,8 +901,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                             state.pending_ime_commit = Some(ime_commit_text);
                             let _ = state.pty.write_all(text.as_bytes());
                             if state.terminal.grid.scroll_offset > 0 {
-                                state.terminal.grid.scroll_offset = 0;
-                                state.terminal.grid.all_dirty = true;
+                                Self::reset_scrollback_view(state);
                             }
                             state.terminal.grid.selection = None;
                             let changed = drain_pty(state) > 0;
@@ -901,17 +955,18 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
 
                             if shift {
                                 if let Key::Named(NamedKey::PageUp) = &event.logical_key {
-                                    let max = state.terminal.grid.scrollback_len();
-                                    let half = state.terminal.rows as usize / 2;
-                                    state.terminal.grid.scroll_offset =
-                                        (state.terminal.grid.scroll_offset + half).min(max);
+                                    let max = state.terminal.grid.scrollback_len() as f32;
+                                    let half = state.terminal.rows as f32 / 2.0;
+                                    state.smooth_scroll_rows = (state.smooth_scroll_rows + half).min(max);
+                                    Self::sync_scrollback_view(state);
                                     state.scheduler.mark_redraw_needed();
                                     return;
                                 }
                                 if let Key::Named(NamedKey::PageDown) = &event.logical_key {
-                                    let half = state.terminal.rows as usize / 2;
-                                    state.terminal.grid.scroll_offset =
-                                        state.terminal.grid.scroll_offset.saturating_sub(half);
+                                    let half = state.terminal.rows as f32 / 2.0;
+                                    state.smooth_scroll_rows =
+                                        (state.smooth_scroll_rows - half).max(0.0);
+                                    Self::sync_scrollback_view(state);
                                     state.scheduler.mark_redraw_needed();
                                     return;
                                 }
@@ -971,8 +1026,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                             Self::enter_hot_mode(state, Instant::now());
                             let _ = state.pty.write_all(&bytes);
                             if state.terminal.grid.scroll_offset > 0 {
-                                state.terminal.grid.scroll_offset = 0;
-                                state.terminal.grid.all_dirty = true;
+                                Self::reset_scrollback_view(state);
                             }
                             state.terminal.grid.selection = None;
                             let changed = drain_pty(state) > 0;
@@ -1088,15 +1142,9 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                         }
                     }
                     WindowEvent::MouseWheel { delta, .. } => {
-                        let (up, lines) = match delta {
-                            MouseScrollDelta::LineDelta(_, y) => {
-                                (y > 0.0, y.abs().max(1.0) as usize)
-                            }
-                            MouseScrollDelta::PixelDelta(pos) => {
-                                let ch = atlas.cell_height.max(1) as f64;
-                                (pos.y > 0.0, (pos.y.abs() / ch).max(1.0) as usize)
-                            }
-                        };
+                        let (up, delta_rows) =
+                            Self::wheel_delta_rows(&self.config, &delta, atlas.cell_height as f32);
+                        let lines = delta_rows.ceil().max(1.0) as usize;
                         if state.terminal.mouse_mode != crate::terminal::MouseMode::Off {
                             for _ in 0..lines {
                                 if let Some(bytes) = state.terminal.encode_mouse_scroll(
@@ -1115,15 +1163,8 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                                 let _ = state.pty.write_all(&bytes);
                             }
                         } else {
-                            let max = state.terminal.grid.scrollback_len();
-                            let delta = scrollback_wheel_delta(lines);
-                            if up {
-                                state.terminal.grid.scroll_offset =
-                                    (state.terminal.grid.scroll_offset + delta).min(max);
-                            } else {
-                                state.terminal.grid.scroll_offset =
-                                    state.terminal.grid.scroll_offset.saturating_sub(delta);
-                            }
+                            Self::enter_hot_mode(state, Instant::now());
+                            Self::apply_scrollback_delta(state, delta_rows, up);
                             state.scheduler.mark_redraw_needed();
                         }
                     }
@@ -1142,11 +1183,16 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                     }
                     WindowEvent::RedrawRequested => {
                         if !state.first_frame_logged {
-                            let render_profile = render_surface_state_profiled(
+                            let render_profile = render_surface_state_profiled_with_scroll(
                                 &mut state.renderer,
                                 &mut state.terminal,
                                 atlas,
                                 &self.config,
+                                if self.config.scrollback.smooth {
+                                    state.smooth_scroll_rows
+                                } else {
+                                    0.0
+                                },
                             );
                             state.first_frame_logged = true;
                             if let Some(rp) = render_profile {
@@ -1175,11 +1221,16 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                             }
                             state.open_window_start = None;
                         } else {
-                            render_surface_state(
+                            render_surface_state_with_scroll(
                                 &mut state.renderer,
                                 &mut state.terminal,
                                 atlas,
                                 &self.config,
+                                if self.config.scrollback.smooth {
+                                    state.smooth_scroll_rows
+                                } else {
+                                    0.0
+                                },
                             );
                             state.startup_timing.mark_present(Instant::now());
                             state.startup_timing.emit_if_ready("gpu host", state.id);

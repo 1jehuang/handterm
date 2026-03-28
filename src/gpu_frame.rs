@@ -88,6 +88,49 @@ pub(crate) struct FrameBatchStyle {
     pub background_alpha: f32,
     pub cell_w: f32,
     pub cell_h: f32,
+    pub viewport_offset_y: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ViewportScroll {
+    pub sample_offset: usize,
+    pub fractional_rows: f32,
+}
+
+impl ViewportScroll {
+    pub const ZERO: Self = Self {
+        sample_offset: 0,
+        fractional_rows: 0.0,
+    };
+
+    pub fn from_scroll_rows(scroll_rows: f32) -> Self {
+        const EPSILON: f32 = 0.001;
+
+        let clamped = scroll_rows.max(0.0);
+        let sample_offset = clamped.ceil() as usize;
+        let fractional_rows = if sample_offset > 0 {
+            sample_offset as f32 - clamped
+        } else {
+            0.0
+        };
+
+        Self {
+            sample_offset,
+            fractional_rows: if fractional_rows.abs() < EPSILON {
+                0.0
+            } else {
+                fractional_rows
+            },
+        }
+    }
+
+    pub fn extra_visible_rows(self) -> usize {
+        usize::from(self.fractional_rows > 0.0)
+    }
+
+    pub fn viewport_offset_y(self, cell_h: f32) -> f32 {
+        -(self.fractional_rows * cell_h)
+    }
 }
 
 pub(crate) fn image_instance_for_placement(
@@ -128,18 +171,28 @@ pub(crate) fn fill_frame_plan(terminal: &impl TerminalView, plan: &mut FramePlan
 }
 
 pub(crate) fn fill_cell_infos(terminal: &impl TerminalView, cell_infos: &mut Vec<CellInfo>) {
+    fill_cell_infos_with_scroll(terminal, cell_infos, ViewportScroll::ZERO);
+}
+
+pub(crate) fn fill_cell_infos_with_scroll(
+    terminal: &impl TerminalView,
+    cell_infos: &mut Vec<CellInfo>,
+    viewport_scroll: ViewportScroll,
+) {
     let grid = terminal.grid();
     let (cursor_col, cursor_row) = grid.cursor_pos();
-    let show_cursor = terminal.cursor_visible() && grid.scroll_offset == 0;
+    let show_cursor = terminal.cursor_visible() && viewport_scroll.sample_offset == 0;
     let cursor_style = terminal.cursor_style();
     let selection = grid.selection;
+    let visible_rows = grid.rows + viewport_scroll.extra_visible_rows();
 
     cell_infos.clear();
-    cell_infos.reserve(grid.rows * grid.cols - cell_infos.capacity().min(grid.rows * grid.cols));
+    let target_cells = visible_rows * grid.cols;
+    cell_infos.reserve(target_cells.saturating_sub(cell_infos.capacity()));
 
-    for row in 0..grid.rows {
+    for row in 0..visible_rows {
         for col in 0..grid.cols {
-            let cell = grid.cell_at_scroll(row, col);
+            let cell = grid.cell_at_scrollback_offset(viewport_scroll.sample_offset, row, col);
             if cell.flags & crate::grid::FLAG_WIDE_CONT != 0 {
                 continue;
             }
@@ -158,7 +211,7 @@ pub(crate) fn fill_cell_infos(terminal: &impl TerminalView, cell_infos: &mut Vec
                 ch: cell.ch,
                 grapheme: terminal
                     .grid()
-                    .cell_grapheme_at_scroll(row, col)
+                    .cell_grapheme_at_scrollback_offset(viewport_scroll.sample_offset, row, col)
                     .map(Into::into),
                 cells: cell_span(cell),
                 cell: *cell,
@@ -229,7 +282,10 @@ pub(crate) fn build_cell_instances(
     }
 
     let bg_instance = (colors.bg != style.base_bg).then_some(CellInstance {
-        pos: [ci.col as f32 * style.cell_w, ci.row as f32 * style.cell_h],
+        pos: [
+            ci.col as f32 * style.cell_w,
+            ci.row as f32 * style.cell_h + style.viewport_offset_y,
+        ],
         size: [style.cell_w * ci.cells as f32, style.cell_h],
         uv_offset: [0.0, 0.0],
         uv_size: [0.0, 0.0],
@@ -247,7 +303,7 @@ pub(crate) fn build_cell_instances(
         Some(CellInstance {
             pos: [
                 ci.col as f32 * style.cell_w - glyph_left_pad,
-                ci.row as f32 * style.cell_h - glyph_top_pad,
+                ci.row as f32 * style.cell_h + style.viewport_offset_y - glyph_top_pad,
             ],
             size: [
                 glyph_width.max(style.cell_w * ci.cells as f32 + glyph_left_pad),
@@ -267,7 +323,10 @@ pub(crate) fn build_cell_instances(
 
     let overlay = match ci.cursor_style {
         Some(CursorStyle::Bar) => Some(CellInstance {
-            pos: [ci.col as f32 * style.cell_w, ci.row as f32 * style.cell_h],
+            pos: [
+                ci.col as f32 * style.cell_w,
+                ci.row as f32 * style.cell_h + style.viewport_offset_y,
+            ],
             size: [style.cell_w, style.cell_h],
             uv_offset: [0.0, 0.0],
             uv_size: [0.0, 0.0],
@@ -278,7 +337,10 @@ pub(crate) fn build_cell_instances(
             _pad: [0; 2],
         }),
         Some(CursorStyle::Underline) => Some(CellInstance {
-            pos: [ci.col as f32 * style.cell_w, ci.row as f32 * style.cell_h],
+            pos: [
+                ci.col as f32 * style.cell_w,
+                ci.row as f32 * style.cell_h + style.viewport_offset_y,
+            ],
             size: [style.cell_w, style.cell_h],
             uv_offset: [0.0, 0.0],
             uv_size: [0.0, 0.0],
@@ -380,6 +442,26 @@ pub(crate) fn fill_image_instances<F>(
     cell_w: f32,
     cell_h: f32,
     image_instances: &mut Vec<ImageInstance>,
+    image_rect_for: F,
+) where
+    F: FnMut(&KittyPlacement) -> Option<AtlasImageRect>,
+{
+    fill_image_instances_with_viewport_offset(
+        placements,
+        cell_w,
+        cell_h,
+        0.0,
+        image_instances,
+        image_rect_for,
+    );
+}
+
+pub(crate) fn fill_image_instances_with_viewport_offset<F>(
+    placements: &[KittyPlacement],
+    cell_w: f32,
+    cell_h: f32,
+    viewport_offset_y: f32,
+    image_instances: &mut Vec<ImageInstance>,
     mut image_rect_for: F,
 ) where
     F: FnMut(&KittyPlacement) -> Option<AtlasImageRect>,
@@ -388,9 +470,9 @@ pub(crate) fn fill_image_instances<F>(
     image_instances.reserve(placements.len().saturating_sub(image_instances.capacity()));
     for placement in placements {
         if let Some(entry) = image_rect_for(placement) {
-            image_instances.push(image_instance_for_placement(
-                placement, entry, cell_w, cell_h,
-            ));
+            let mut instance = image_instance_for_placement(placement, entry, cell_w, cell_h);
+            instance.pos[1] += viewport_offset_y;
+            image_instances.push(instance);
         }
     }
 }
@@ -438,7 +520,39 @@ mod tests {
             background_alpha: 1.0,
             cell_w: 8.0,
             cell_h: 16.0,
+            viewport_offset_y: 0.0,
         }
+    }
+
+    #[test]
+    fn viewport_scroll_uses_extra_row_for_fractional_scrollback() {
+        let scroll = ViewportScroll::from_scroll_rows(0.25);
+        assert_eq!(scroll.sample_offset, 1);
+        assert_eq!(scroll.extra_visible_rows(), 1);
+        assert!((scroll.viewport_offset_y(16.0) + 12.0).abs() < f32::EPSILON);
+
+        let exact = ViewportScroll::from_scroll_rows(2.0);
+        assert_eq!(exact.sample_offset, 2);
+        assert_eq!(exact.extra_visible_rows(), 0);
+        assert_eq!(exact.viewport_offset_y(16.0), 0.0);
+    }
+
+    #[test]
+    fn fractional_scrollback_adds_one_visible_row_to_frame_plan() {
+        let mut terminal = Terminal::new_with_scrollback(2, 2, 8);
+        terminal.process(b"1\r\n2\r\n3\r\n");
+        assert!(terminal.grid.scrollback_len() >= 1);
+
+        let mut baseline = Vec::new();
+        fill_cell_infos(&terminal, &mut baseline);
+
+        let mut fractional = Vec::new();
+        fill_cell_infos_with_scroll(&terminal, &mut fractional, ViewportScroll::from_scroll_rows(0.25));
+
+        assert_eq!(baseline.len(), 4);
+        assert_eq!(fractional.len(), 6);
+        assert_eq!(fractional[0].row, 0);
+        assert_eq!(fractional[4].row, 2);
     }
 
     fn test_glyph_entry(ci: &CellInfo) -> Option<GlyphAtlasEntry> {
@@ -694,6 +808,7 @@ mod tests {
             background_alpha: 1.0,
             cell_w: atlas.cell_width as f32,
             cell_h: atlas.cell_height as f32,
+            viewport_offset_y: 0.0,
         };
 
         let mut cell_infos = Vec::new();
@@ -925,6 +1040,7 @@ mod tests {
                 background_alpha: 1.0,
                 cell_w: 8.0,
                 cell_h: 16.0,
+                viewport_offset_y: 0.0,
             },
             None,
         );
@@ -961,6 +1077,7 @@ mod tests {
                 background_alpha: 1.0,
                 cell_w: 8.0,
                 cell_h: 16.0,
+                viewport_offset_y: 0.0,
             },
             Some(GlyphAtlasEntry {
                 x: 32,
@@ -1000,6 +1117,7 @@ mod tests {
                 background_alpha: 1.0,
                 cell_w: 8.0,
                 cell_h: 16.0,
+                viewport_offset_y: 0.0,
             },
             |_ci| {
                 Some(GlyphAtlasEntry {
@@ -1081,6 +1199,7 @@ mod tests {
                 background_alpha: 1.0,
                 cell_w: 8.0,
                 cell_h: 16.0,
+                viewport_offset_y: 0.0,
             },
             Some(GlyphAtlasEntry {
                 x: 0,
@@ -1129,6 +1248,7 @@ mod tests {
                 background_alpha: 1.0,
                 cell_w: 8.0,
                 cell_h: 16.0,
+                viewport_offset_y: 0.0,
             },
             Some(GlyphAtlasEntry {
                 x: 0,
@@ -1167,6 +1287,7 @@ mod tests {
                 background_alpha: 1.0,
                 cell_w: 8.0,
                 cell_h: 16.0,
+                viewport_offset_y: 0.0,
             },
             Some(GlyphAtlasEntry {
                 x: 0,
@@ -1209,6 +1330,7 @@ mod tests {
                 background_alpha: 0.9,
                 cell_w: 8.0,
                 cell_h: 16.0,
+                viewport_offset_y: 0.0,
             },
             None,
         );

@@ -117,11 +117,15 @@ impl Default for PerformanceConfig {
 #[serde(default)]
 pub struct ScrollbackConfig {
     pub lines: usize,
+    pub smooth: bool,
 }
 
 impl Default for ScrollbackConfig {
     fn default() -> Self {
-        Self { lines: 10_000 }
+        Self {
+            lines: 10_000,
+            smooth: false,
+        }
     }
 }
 
@@ -153,6 +157,7 @@ mod tests {
         assert_eq!(cfg.window.columns, 80);
         assert_eq!(cfg.window.rows, 24);
         assert_eq!(cfg.scrollback.lines, 10_000);
+        assert!(!cfg.scrollback.smooth);
     }
 
     #[test]
@@ -170,6 +175,19 @@ mod tests {
         assert_eq!(cfg.style.foreground.to_string(), "#cdd6f4");
         assert_eq!(cfg.window.columns, 100);
         assert_eq!(cfg.window.rows, 24);
+        assert!(!cfg.scrollback.smooth);
+    }
+
+    #[test]
+    fn parses_smooth_scrollback_flag() {
+        let raw = r##"
+            [scrollback]
+            smooth = true
+        "##;
+
+        let cfg: AppConfig = toml::from_str(raw).expect("config should parse");
+        assert!(cfg.scrollback.smooth);
+        assert_eq!(cfg.scrollback.lines, 10_000);
     }
 
     #[test]

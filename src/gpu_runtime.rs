@@ -1,9 +1,9 @@
 use crate::config::AppConfig;
 use crate::font::{GlyphAtlas, GlyphFormat};
-use crate::frontend::{VisualState, visual_signature};
+use crate::frontend::{ViewportScroll, VisualState, visual_signature};
 use crate::gpu_frame::{
     AtlasImageRect, CellInfo, CellInstance, FrameBatchStyle, FrameTextBatches, GlyphAtlasEntry,
-    ImageInstance, ViewportScroll, fill_cell_infos, fill_cell_infos_with_scroll,
+    ImageInstance, fill_cell_infos, fill_cell_infos_with_scroll,
     fill_image_instances, fill_image_instances_with_viewport_offset, fill_text_batches,
 };
 use crate::terminal::TerminalView;

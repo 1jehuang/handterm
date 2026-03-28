@@ -127,6 +127,153 @@ pub struct RecentTextKeyEvent {
     at: Instant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewportScroll {
+    pub sample_offset: usize,
+    pub fractional_rows: f32,
+}
+
+impl ViewportScroll {
+    pub const ZERO: Self = Self {
+        sample_offset: 0,
+        fractional_rows: 0.0,
+    };
+
+    pub fn from_scroll_rows(scroll_rows: f32) -> Self {
+        const EPSILON: f32 = 0.001;
+
+        let clamped = scroll_rows.max(0.0);
+        let sample_offset = clamped.ceil() as usize;
+        let fractional_rows = if sample_offset > 0 {
+            sample_offset as f32 - clamped
+        } else {
+            0.0
+        };
+
+        Self {
+            sample_offset,
+            fractional_rows: if fractional_rows.abs() < EPSILON {
+                0.0
+            } else {
+                fractional_rows
+            },
+        }
+    }
+
+    pub fn extra_visible_rows(self) -> usize {
+        usize::from(self.fractional_rows > 0.0)
+    }
+
+    pub fn viewport_offset_y(self, cell_h: f32) -> f32 {
+        -(self.fractional_rows * cell_h)
+    }
+
+    pub fn visible_rows(self, base_rows: usize) -> usize {
+        base_rows + self.extra_visible_rows()
+    }
+
+    pub fn mouse_row_for_pixel_y(self, y_px: f32, cell_h: f32, base_rows: usize) -> usize {
+        let cell_h = cell_h.max(1.0);
+        let row = ((y_px - self.viewport_offset_y(cell_h)) / cell_h).floor();
+        row.max(0.0)
+            .min(self.visible_rows(base_rows).saturating_sub(1) as f32) as usize
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SmoothScrollState {
+    pub target_rows: f32,
+    pub display_rows: f32,
+    last_tick_at: Option<Instant>,
+}
+
+impl Default for SmoothScrollState {
+    fn default() -> Self {
+        Self {
+            target_rows: 0.0,
+            display_rows: 0.0,
+            last_tick_at: None,
+        }
+    }
+}
+
+impl SmoothScrollState {
+    const SETTLE_EPSILON: f32 = 0.01;
+    const SPRING_RATE: f32 = 18.0;
+
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn clamp(&mut self, max_rows: f32) {
+        self.target_rows = self.target_rows.clamp(0.0, max_rows.max(0.0));
+        self.display_rows = self.display_rows.clamp(0.0, max_rows.max(0.0));
+        if self.target_rows <= Self::SETTLE_EPSILON {
+            self.target_rows = 0.0;
+        }
+        if self.display_rows <= Self::SETTLE_EPSILON {
+            self.display_rows = 0.0;
+        }
+    }
+
+    pub fn apply_delta(&mut self, delta_rows: f32, up: bool, max_rows: f32) {
+        if up {
+            self.target_rows += delta_rows.max(0.0);
+        } else {
+            self.target_rows = (self.target_rows - delta_rows.max(0.0)).max(0.0);
+        }
+        self.clamp(max_rows);
+    }
+
+    pub fn jump_to(&mut self, rows: f32, max_rows: f32) {
+        self.target_rows = rows;
+        self.clamp(max_rows);
+    }
+
+    pub fn snap_to_target(&mut self) {
+        self.display_rows = self.target_rows;
+        self.last_tick_at = None;
+    }
+
+    pub fn displayed_scroll_offset(&self) -> usize {
+        self.display_rows.ceil() as usize
+    }
+
+    pub fn is_animating(&self) -> bool {
+        (self.target_rows - self.display_rows).abs() > Self::SETTLE_EPSILON
+    }
+
+    pub fn advance(&mut self, now: Instant, max_rows: f32) -> bool {
+        self.clamp(max_rows);
+        if !self.is_animating() {
+            if (self.display_rows - self.target_rows).abs() > 0.0 {
+                self.display_rows = self.target_rows;
+                self.last_tick_at = None;
+                return true;
+            }
+            self.last_tick_at = None;
+            return false;
+        }
+
+        let previous = self.display_rows;
+        let dt = self
+            .last_tick_at
+            .map(|last| (now - last).as_secs_f32())
+            .unwrap_or(1.0 / 120.0)
+            .clamp(1.0 / 240.0, 0.05);
+        self.last_tick_at = Some(now);
+
+        let alpha = 1.0 - (-Self::SPRING_RATE * dt).exp();
+        self.display_rows += (self.target_rows - self.display_rows) * alpha;
+        if (self.target_rows - self.display_rows).abs() <= Self::SETTLE_EPSILON {
+            self.display_rows = self.target_rows;
+            self.last_tick_at = None;
+        }
+        self.clamp(max_rows);
+        (self.display_rows - previous).abs() > 0.0001
+    }
+}
+
 impl VisualState {
     pub fn capture<T: TerminalView + ?Sized>(terminal: &T) -> Self {
         let grid = terminal.grid();
@@ -855,6 +1002,37 @@ mod tests {
     fn scrollback_wheel_delta_uses_reduced_multiplier() {
         assert_eq!(scrollback_wheel_delta(1), 2);
         assert_eq!(scrollback_wheel_delta(3), 6);
+    }
+
+    #[test]
+    fn viewport_scroll_maps_mouse_rows_with_fractional_offset() {
+        let viewport = ViewportScroll::from_scroll_rows(0.25);
+        assert_eq!(viewport.mouse_row_for_pixel_y(0.0, 16.0, 24), 0);
+        assert_eq!(viewport.mouse_row_for_pixel_y(5.0, 16.0, 24), 1);
+        assert_eq!(viewport.mouse_row_for_pixel_y(20.0, 16.0, 24), 2);
+    }
+
+    #[test]
+    fn smooth_scroll_state_eases_toward_target() {
+        let start = Instant::now();
+        let mut scroll = SmoothScrollState::default();
+        scroll.apply_delta(4.0, true, 20.0);
+        assert_eq!(scroll.target_rows, 4.0);
+        assert_eq!(scroll.display_rows, 0.0);
+
+        assert!(scroll.advance(start + Duration::from_millis(16), 20.0));
+        assert!(scroll.display_rows > 0.0);
+        assert!(scroll.display_rows < 4.0);
+        assert!(scroll.is_animating());
+
+        for step in 1..20 {
+            scroll.advance(start + Duration::from_millis(16 * (step + 1)), 20.0);
+        }
+
+        assert!((scroll.display_rows - 4.0).abs() < 0.05);
+        scroll.snap_to_target();
+        assert_eq!(scroll.displayed_scroll_offset(), 4);
+        assert!(!scroll.is_animating());
     }
 
     #[test]

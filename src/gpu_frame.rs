@@ -1,3 +1,4 @@
+use crate::frontend::ViewportScroll;
 use crate::terminal::{CursorStyle, KittyPlacement, TerminalView};
 use crate::visual::{is_in_selection, resolve_cell_colors, resolve_underline_color};
 
@@ -89,48 +90,6 @@ pub(crate) struct FrameBatchStyle {
     pub cell_w: f32,
     pub cell_h: f32,
     pub viewport_offset_y: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct ViewportScroll {
-    pub sample_offset: usize,
-    pub fractional_rows: f32,
-}
-
-impl ViewportScroll {
-    pub const ZERO: Self = Self {
-        sample_offset: 0,
-        fractional_rows: 0.0,
-    };
-
-    pub fn from_scroll_rows(scroll_rows: f32) -> Self {
-        const EPSILON: f32 = 0.001;
-
-        let clamped = scroll_rows.max(0.0);
-        let sample_offset = clamped.ceil() as usize;
-        let fractional_rows = if sample_offset > 0 {
-            sample_offset as f32 - clamped
-        } else {
-            0.0
-        };
-
-        Self {
-            sample_offset,
-            fractional_rows: if fractional_rows.abs() < EPSILON {
-                0.0
-            } else {
-                fractional_rows
-            },
-        }
-    }
-
-    pub fn extra_visible_rows(self) -> usize {
-        usize::from(self.fractional_rows > 0.0)
-    }
-
-    pub fn viewport_offset_y(self, cell_h: f32) -> f32 {
-        -(self.fractional_rows * cell_h)
-    }
 }
 
 pub(crate) fn image_instance_for_placement(

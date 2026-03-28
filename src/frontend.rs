@@ -200,6 +200,7 @@ impl Default for SmoothScrollState {
 impl SmoothScrollState {
     const SETTLE_EPSILON: f32 = 0.01;
     const SPRING_RATE: f32 = 18.0;
+    const BOTTOM_SNAP_THRESHOLD: f32 = 0.3;
 
     pub fn reset(&mut self) {
         *self = Self::default();
@@ -221,6 +222,9 @@ impl SmoothScrollState {
             self.target_rows += delta_rows.max(0.0);
         } else {
             self.target_rows = (self.target_rows - delta_rows.max(0.0)).max(0.0);
+            if self.target_rows < Self::BOTTOM_SNAP_THRESHOLD {
+                self.target_rows = 0.0;
+            }
         }
         self.clamp(max_rows);
     }
@@ -1033,6 +1037,16 @@ mod tests {
         scroll.snap_to_target();
         assert_eq!(scroll.displayed_scroll_offset(), 4);
         assert!(!scroll.is_animating());
+    }
+
+    #[test]
+    fn smooth_scroll_state_snaps_to_full_bottom_when_close() {
+        let mut scroll = SmoothScrollState::default();
+        scroll.apply_delta(1.0, true, 20.0);
+        assert_eq!(scroll.target_rows, 1.0);
+
+        scroll.apply_delta(0.8, false, 20.0);
+        assert_eq!(scroll.target_rows, 0.0);
     }
 
     #[test]

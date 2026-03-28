@@ -184,6 +184,7 @@ impl ViewportScroll {
 pub struct SmoothScrollState {
     pub target_rows: f32,
     pub display_rows: f32,
+    velocity_rows_per_sec: f32,
     last_tick_at: Option<Instant>,
 }
 
@@ -192,6 +193,7 @@ impl Default for SmoothScrollState {
         Self {
             target_rows: 0.0,
             display_rows: 0.0,
+            velocity_rows_per_sec: 0.0,
             last_tick_at: None,
         }
     }
@@ -199,7 +201,10 @@ impl Default for SmoothScrollState {
 
 impl SmoothScrollState {
     const SETTLE_EPSILON: f32 = 0.01;
-    const SPRING_RATE: f32 = 18.0;
+    const VELOCITY_EPSILON: f32 = 0.05;
+    const SPRING_RATE: f32 = 20.0;
+    const MOMENTUM_DECAY_RATE: f32 = 12.0;
+    const MOMENTUM_IMPULSE_PER_ROW: f32 = 28.0;
     const BOTTOM_SNAP_THRESHOLD: f32 = 0.3;
 
     pub fn reset(&mut self) {
@@ -211,19 +216,38 @@ impl SmoothScrollState {
         self.display_rows = self.display_rows.clamp(0.0, max_rows.max(0.0));
         if self.target_rows <= Self::SETTLE_EPSILON {
             self.target_rows = 0.0;
+            if self.velocity_rows_per_sec < 0.0 {
+                self.velocity_rows_per_sec = 0.0;
+            }
         }
         if self.display_rows <= Self::SETTLE_EPSILON {
             self.display_rows = 0.0;
         }
+        if self.target_rows == 0.0 && self.display_rows < Self::BOTTOM_SNAP_THRESHOLD {
+            self.display_rows = 0.0;
+        }
+        if self.target_rows >= max_rows.max(0.0) - Self::SETTLE_EPSILON {
+            self.target_rows = max_rows.max(0.0);
+            if self.velocity_rows_per_sec > 0.0 {
+                self.velocity_rows_per_sec = 0.0;
+            }
+        }
+        if self.velocity_rows_per_sec.abs() <= Self::VELOCITY_EPSILON {
+            self.velocity_rows_per_sec = 0.0;
+        }
     }
 
     pub fn apply_delta(&mut self, delta_rows: f32, up: bool, max_rows: f32) {
+        let delta_rows = delta_rows.max(0.0);
         if up {
-            self.target_rows += delta_rows.max(0.0);
+            self.target_rows += delta_rows;
+            self.velocity_rows_per_sec += delta_rows * Self::MOMENTUM_IMPULSE_PER_ROW;
         } else {
-            self.target_rows = (self.target_rows - delta_rows.max(0.0)).max(0.0);
+            self.target_rows = (self.target_rows - delta_rows).max(0.0);
+            self.velocity_rows_per_sec -= delta_rows * Self::MOMENTUM_IMPULSE_PER_ROW;
             if self.target_rows < Self::BOTTOM_SNAP_THRESHOLD {
                 self.target_rows = 0.0;
+                self.velocity_rows_per_sec = 0.0;
             }
         }
         self.clamp(max_rows);
@@ -231,11 +255,13 @@ impl SmoothScrollState {
 
     pub fn jump_to(&mut self, rows: f32, max_rows: f32) {
         self.target_rows = rows;
+        self.velocity_rows_per_sec = 0.0;
         self.clamp(max_rows);
     }
 
     pub fn snap_to_target(&mut self) {
         self.display_rows = self.target_rows;
+        self.velocity_rows_per_sec = 0.0;
         self.last_tick_at = None;
     }
 
@@ -245,6 +271,7 @@ impl SmoothScrollState {
 
     pub fn is_animating(&self) -> bool {
         (self.target_rows - self.display_rows).abs() > Self::SETTLE_EPSILON
+            || self.velocity_rows_per_sec.abs() > Self::VELOCITY_EPSILON
     }
 
     pub fn advance(&mut self, now: Instant, max_rows: f32) -> bool {
@@ -267,10 +294,19 @@ impl SmoothScrollState {
             .clamp(1.0 / 240.0, 0.05);
         self.last_tick_at = Some(now);
 
+        if self.velocity_rows_per_sec != 0.0 {
+            self.target_rows += self.velocity_rows_per_sec * dt;
+            let decay = (-Self::MOMENTUM_DECAY_RATE * dt).exp();
+            self.velocity_rows_per_sec *= decay;
+        }
+
         let alpha = 1.0 - (-Self::SPRING_RATE * dt).exp();
         self.display_rows += (self.target_rows - self.display_rows) * alpha;
-        if (self.target_rows - self.display_rows).abs() <= Self::SETTLE_EPSILON {
+        if (self.target_rows - self.display_rows).abs() <= Self::SETTLE_EPSILON
+            && self.velocity_rows_per_sec.abs() <= Self::VELOCITY_EPSILON
+        {
             self.display_rows = self.target_rows;
+            self.velocity_rows_per_sec = 0.0;
             self.last_tick_at = None;
         }
         self.clamp(max_rows);
@@ -1026,16 +1062,18 @@ mod tests {
 
         assert!(scroll.advance(start + Duration::from_millis(16), 20.0));
         assert!(scroll.display_rows > 0.0);
-        assert!(scroll.display_rows < 4.0);
+        assert!(scroll.display_rows < scroll.target_rows);
         assert!(scroll.is_animating());
+        assert!(scroll.target_rows > 4.0);
 
-        for step in 1..20 {
+        for step in 1..30 {
             scroll.advance(start + Duration::from_millis(16 * (step + 1)), 20.0);
         }
 
-        assert!((scroll.display_rows - 4.0).abs() < 0.05);
+        assert!(scroll.display_rows > 4.0);
+        assert!((scroll.display_rows - scroll.target_rows).abs() < 0.2);
         scroll.snap_to_target();
-        assert_eq!(scroll.displayed_scroll_offset(), 4);
+        assert_eq!(scroll.displayed_scroll_offset(), scroll.target_rows.ceil() as usize);
         assert!(!scroll.is_animating());
     }
 
@@ -1047,6 +1085,38 @@ mod tests {
 
         scroll.apply_delta(0.8, false, 20.0);
         assert_eq!(scroll.target_rows, 0.0);
+    }
+
+    #[test]
+    fn smooth_scroll_state_has_momentum_after_input() {
+        let start = Instant::now();
+        let mut scroll = SmoothScrollState::default();
+        scroll.apply_delta(2.0, true, 50.0);
+        let initial_target = scroll.target_rows;
+
+        scroll.advance(start + Duration::from_millis(16), 50.0);
+        let after_first_target = scroll.target_rows;
+        assert!(after_first_target > initial_target);
+
+        scroll.advance(start + Duration::from_millis(32), 50.0);
+        assert!(scroll.target_rows > after_first_target);
+    }
+
+    #[test]
+    fn smooth_scroll_state_clamps_and_stops_momentum_at_bottom() {
+        let start = Instant::now();
+        let mut scroll = SmoothScrollState::default();
+        scroll.apply_delta(3.0, true, 50.0);
+        scroll.advance(start + Duration::from_millis(16), 50.0);
+        scroll.apply_delta(100.0, false, 50.0);
+
+        for step in 1..10 {
+            scroll.advance(start + Duration::from_millis(16 * (step + 1)), 50.0);
+        }
+
+        assert_eq!(scroll.target_rows, 0.0);
+        assert_eq!(scroll.display_rows, 0.0);
+        assert!(!scroll.is_animating());
     }
 
     #[test]

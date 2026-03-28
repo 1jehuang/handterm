@@ -126,7 +126,7 @@ impl Default for ScrollbackConfig {
         Self {
             lines: 10_000,
             smooth: false,
-            smooth_speed: 2.0,
+            smooth_speed: 3.0,
         }
     }
 }
@@ -160,7 +160,7 @@ mod tests {
         assert_eq!(cfg.window.rows, 24);
         assert_eq!(cfg.scrollback.lines, 10_000);
         assert!(!cfg.scrollback.smooth);
-        assert_eq!(cfg.scrollback.smooth_speed, 2.0);
+        assert_eq!(cfg.scrollback.smooth_speed, 3.0);
     }
 
     #[test]
@@ -179,7 +179,7 @@ mod tests {
         assert_eq!(cfg.window.columns, 100);
         assert_eq!(cfg.window.rows, 24);
         assert!(!cfg.scrollback.smooth);
-        assert_eq!(cfg.scrollback.smooth_speed, 2.0);
+        assert_eq!(cfg.scrollback.smooth_speed, 3.0);
     }
 
     #[test]
@@ -192,7 +192,7 @@ mod tests {
         let cfg: AppConfig = toml::from_str(raw).expect("config should parse");
         assert!(cfg.scrollback.smooth);
         assert_eq!(cfg.scrollback.lines, 10_000);
-        assert_eq!(cfg.scrollback.smooth_speed, 2.0);
+        assert_eq!(cfg.scrollback.smooth_speed, 3.0);
     }
 
     #[test]

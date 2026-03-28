@@ -329,7 +329,7 @@ rows = 24
 [scrollback]
 lines = 10000
 smooth = false
-smooth_speed = 2.0
+smooth_speed = 3.0
 
 [performance]
 repaint_delay_ms = 5
@@ -338,9 +338,9 @@ sync_to_monitor = true
 
 `background_opacity` is implemented by the GPU backend. If you force `--backend cpu`, Handterm will stay opaque on Wayland because `softbuffer` presents `Xrgb8888` there.
 
-`scrollback.smooth = true` enables experimental GPU-side fractional scrollback rendering. It keeps the normal terminal/grid model, but the GPU renderer draws one extra row and applies a pixel Y offset so touchpad/pixel wheel input can reveal partial lines. Line-wheel scrolling also eases toward its target instead of snapping instantly.
+`scrollback.smooth = true` enables experimental GPU-side fractional scrollback rendering. It keeps the normal terminal/grid model, but the GPU renderer draws one extra row and applies a pixel Y offset so touchpad/pixel wheel input can reveal partial lines. Smooth mode now also adds inertial carry, so quick wheel/trackpad gestures continue gliding instead of stopping immediately.
 
-`scrollback.smooth_speed` controls how far each smooth-scroll gesture travels. The default is `2.0`, which is intentionally more aggressive than the initial 1:1 prototype.
+`scrollback.smooth_speed` controls how far each smooth-scroll gesture travels. The default is `3.0`, which is intentionally more aggressive than the initial 1:1 prototype and pairs with the momentum model to carry farther on flicks.
 
 This currently applies to the standalone/shared-GPU host path. CPU rendering still uses whole-row scrollback presentation, and remote thin clients do not yet have a protocol for server-owned smooth scrollback surfaces.
 

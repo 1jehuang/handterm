@@ -210,7 +210,7 @@ impl GpuApp {
             MouseScrollDelta::LineDelta(_, y) => {
                 let lines = y.abs().max(1.0);
                 let delta_rows = if config.scrollback.smooth {
-                    lines
+                    lines * config.scrollback.smooth_speed.max(0.1)
                 } else {
                     scrollback_wheel_delta(lines as usize) as f32
                 };
@@ -224,7 +224,7 @@ impl GpuApp {
                     (pos.y.abs() / ch).max(1.0) as f32
                 };
                 let delta_rows = if config.scrollback.smooth {
-                    rows
+                    rows * config.scrollback.smooth_speed.max(0.1)
                 } else {
                     scrollback_wheel_delta(rows as usize) as f32
                 };

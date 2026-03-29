@@ -173,7 +173,7 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
                     {
                         return Ok(());
                     }
-                    crate::app::run(config)
+                    crate::app::run(config, cli.startup_command.clone())
                 }
                 #[cfg(not(feature = "cpu"))]
                 {
@@ -196,7 +196,7 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
                     {
                         return Ok(());
                     }
-                    crate::gpu_app::run(config)
+                    crate::gpu_app::run(config, cli.startup_command.clone())
                 }
                 #[cfg(not(feature = "gpu"))]
                 {

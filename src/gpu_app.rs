@@ -37,7 +37,7 @@ enum GpuAppEvent {
 const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 const HOT_MODE_DURATION: Duration = Duration::from_millis(160);
 
-pub fn run(config: AppConfig) -> Result<()> {
+pub fn run(config: AppConfig, startup_command: Option<String>) -> Result<()> {
     let event_loop = EventLoop::<GpuAppEvent>::with_user_event()
         .build()
         .context("failed to create event loop")?;
@@ -56,7 +56,7 @@ pub fn run(config: AppConfig) -> Result<()> {
         eprintln!("handterm: failed to bind {}", socket_path.display());
     }
 
-    let mut app = GpuApp::new(config, ipc, proxy);
+    let mut app = GpuApp::new(config, startup_command, ipc, proxy);
     event_loop
         .run_app(&mut app)
         .context("failed while running app")
@@ -64,6 +64,7 @@ pub fn run(config: AppConfig) -> Result<()> {
 
 struct GpuApp {
     config: AppConfig,
+    startup_command: Option<String>,
     shared: Option<Arc<SharedGpuContext>>,
     windows: HashMap<WinitWindowId, GpuWindowState>,
     window_ids: HashMap<u64, WinitWindowId>,
@@ -105,9 +106,15 @@ struct GpuWindowState {
 }
 
 impl GpuApp {
-    fn new(config: AppConfig, ipc: Option<IpcServer>, proxy: EventLoopProxy<GpuAppEvent>) -> Self {
+    fn new(
+        config: AppConfig,
+        startup_command: Option<String>,
+        ipc: Option<IpcServer>,
+        proxy: EventLoopProxy<GpuAppEvent>,
+    ) -> Self {
         Self {
             config,
+            startup_command,
             shared: None,
             windows: HashMap::new(),
             window_ids: HashMap::new(),
@@ -335,7 +342,11 @@ impl GpuApp {
         let terminal = Terminal::new_with_scrollback(cols, rows, self.config.scrollback.lines);
         let terminal_ms = before_terminal.elapsed();
         let before_pty = Instant::now();
-        let pty = PtyChild::spawn_default_shell(cols, rows)
+        let pty = PtyChild::spawn_default_shell_with_command(
+            cols,
+            rows,
+            self.startup_command.as_deref(),
+        )
             .with_context(|| format!("failed to spawn PTY for {cols}x{rows} window"))?;
         let pty_ms = before_pty.elapsed();
         let pty_spawned_at = Instant::now();

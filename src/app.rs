@@ -1,12 +1,18 @@
 use crate::config::AppConfig;
+use crate::fd_watcher::spawn_fd_watcher;
 use crate::font::{GlyphAtlas, bootstrap_font_metrics_with_family_dpi};
 use crate::frontend::{
     FrameDecision, FrameScheduler, KeyEventKind, RecentTextKeyEvent, RedrawWork, StartupTiming,
     VisualState, base64_decode, classify_redraw_work, copy_to_clipboard, key_to_bytes, open_url,
     paste_from_clipboard, remember_text_key_event, scroll_to_bytes, scrollback_wheel_delta,
-    should_skip_duplicate_ime_input, should_skip_ime_commit_after_key_event, spawn_fd_watcher,
+    should_skip_duplicate_ime_input, should_skip_ime_commit_after_key_event,
     visual_signature,
 };
+use crate::host_commands::{
+    HostControlRequest, host_list_windows_response, host_ls_response, parse_host_control_request,
+    target_window_from_args,
+};
+use crate::host_input::{SyntheticInputTarget, apply_synthetic_ime_commit, apply_synthetic_key_event};
 use crate::ipc::{IpcAction, IpcServer, Request, Response, SyntheticKeyEvent};
 use crate::pty::PtyChild;
 use crate::render::render_terminal_to_buffer;
@@ -35,7 +41,7 @@ enum AppEvent {
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 
-pub fn run(config: AppConfig) -> Result<()> {
+pub fn run(config: AppConfig, startup_command: Option<String>) -> Result<()> {
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
         .context("failed to create event loop")?;
@@ -55,7 +61,7 @@ pub fn run(config: AppConfig) -> Result<()> {
         eprintln!("handterm: failed to bind {}", socket_path.display());
     }
 
-    let mut app = HandtermApp::new(config, ipc, proxy);
+    let mut app = HandtermApp::new(config, startup_command, ipc, proxy);
     event_loop
         .run_app(&mut app)
         .context("failed while running app")
@@ -63,6 +69,7 @@ pub fn run(config: AppConfig) -> Result<()> {
 
 struct HandtermApp {
     config: AppConfig,
+    startup_command: Option<String>,
     windows: HashMap<WinitWindowId, HostWindowState>,
     window_ids: HashMap<u64, WinitWindowId>,
     next_window_id: u64,
@@ -102,10 +109,71 @@ struct HostWindowState {
     startup_timing: StartupTiming,
 }
 
+impl SyntheticInputTarget for HostWindowState {
+    fn label(&self) -> &'static str {
+        "cpu"
+    }
+
+    fn terminal(&mut self) -> &mut Terminal {
+        &mut self.terminal
+    }
+
+    fn pty(&mut self) -> &mut PtyChild {
+        &mut self.pty
+    }
+
+    fn pending_ime_commit(&mut self) -> &mut Option<String> {
+        &mut self.pending_ime_commit
+    }
+
+    fn recent_text_key_event(&mut self) -> &mut Option<RecentTextKeyEvent> {
+        &mut self.recent_text_key_event
+    }
+
+    fn hyper_modifier_mut(&mut self) -> &mut bool {
+        &mut self.hyper_modifier
+    }
+
+    fn meta_modifier_mut(&mut self) -> &mut bool {
+        &mut self.meta_modifier
+    }
+
+    fn caps_lock_modifier_mut(&mut self) -> &mut bool {
+        &mut self.caps_lock_modifier
+    }
+
+    fn num_lock_modifier_mut(&mut self) -> &mut bool {
+        &mut self.num_lock_modifier
+    }
+
+    fn caps_lock_modifier(&self) -> bool {
+        self.caps_lock_modifier
+    }
+
+    fn num_lock_modifier(&self) -> bool {
+        self.num_lock_modifier
+    }
+
+    fn reset_scrollback(&mut self) {
+        self.terminal.grid.scroll_offset = 0;
+        self.terminal.grid.all_dirty = true;
+    }
+
+    fn drain_pty(&mut self) -> bool {
+        drain_pty(self) > 0
+    }
+}
+
 impl HandtermApp {
-    fn new(config: AppConfig, ipc: Option<IpcServer>, proxy: EventLoopProxy<AppEvent>) -> Self {
+    fn new(
+        config: AppConfig,
+        startup_command: Option<String>,
+        ipc: Option<IpcServer>,
+        proxy: EventLoopProxy<AppEvent>,
+    ) -> Self {
         Self {
             config,
+            startup_command,
             windows: HashMap::new(),
             window_ids: HashMap::new(),
             next_window_id: 1,
@@ -265,7 +333,12 @@ impl HandtermApp {
             .map_err(|e| anyhow::anyhow!("softbuffer surface should be created: {e}"))?;
         let terminal = Terminal::new_with_scrollback(cols, rows, self.config.scrollback.lines);
         let before_pty = Instant::now();
-        let pty = PtyChild::spawn_default_shell(cols, rows).context("pty should spawn")?;
+        let pty = PtyChild::spawn_default_shell_with_command(
+            cols,
+            rows,
+            self.startup_command.as_deref(),
+        )
+        .context("pty should spawn")?;
         let pty_spawned_at = Instant::now();
         let stop = Arc::new(AtomicBool::new(false));
         let id = self.next_window_id;
@@ -354,254 +427,25 @@ impl HandtermApp {
             .or_else(|| self.windows.values().next().map(|state| state.id))
     }
 
-    fn target_window_from_args(req: &Request) -> Option<u64> {
-        req.args
-            .as_object()
-            .and_then(|o| o.get("window_id"))
-            .and_then(|v| v.as_u64())
-    }
-
-    fn synthetic_key_event_from_request(req: &Request) -> Result<SyntheticKeyEvent, &'static str> {
-        let Some(args) = req.args.as_object() else {
-            return Err("missing JSON object arguments");
-        };
-        let kind = match args.get("kind").and_then(|v| v.as_str()).unwrap_or("press") {
-            "press" => KeyEventKind::Press,
-            "repeat" => KeyEventKind::Repeat,
-            "release" => KeyEventKind::Release,
-            _ => return Err("invalid 'kind' argument"),
-        };
-        let Some(key) = args.get("key").and_then(|v| v.as_str()) else {
-            return Err("missing 'key' argument");
-        };
-        let text = args
-            .get("text")
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string);
-        Ok(SyntheticKeyEvent {
-            kind,
-            key: key.to_string(),
-            text,
-            ctrl: args.get("ctrl").and_then(|v| v.as_bool()).unwrap_or(false),
-            alt: args.get("alt").and_then(|v| v.as_bool()).unwrap_or(false),
-            shift: args.get("shift").and_then(|v| v.as_bool()).unwrap_or(false),
-            super_key: args
-                .get("super")
-                .or_else(|| args.get("super_key"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            hyper: args.get("hyper").and_then(|v| v.as_bool()).unwrap_or(false),
-            meta: args.get("meta").and_then(|v| v.as_bool()).unwrap_or(false),
-        })
-    }
-
-    fn apply_synthetic_ime_commit(state: &mut HostWindowState, text: &str) -> bool {
-        if text.is_empty() {
-            return false;
-        }
-        let ime_commit_text =
-            crate::frontend::normalize_ime_dedupe_text(text).unwrap_or_else(|| text.to_string());
-        crate::frontend::trace_input(format!(
-            "cpu synthetic ime-commit raw={:?} normalized={:?}",
-            text, ime_commit_text
-        ));
-        if should_skip_ime_commit_after_key_event(
-            &mut state.recent_text_key_event,
-            &ime_commit_text,
-            Instant::now(),
-        ) {
-            crate::frontend::trace_input("cpu synthetic ime-commit skipped after key-event dedupe");
-            return false;
-        }
-        state.pending_ime_commit = Some(ime_commit_text);
-        let _ = state.pty.write_all(text.as_bytes());
-        if state.terminal.grid.scroll_offset > 0 {
-            state.terminal.grid.scroll_offset = 0;
-            state.terminal.grid.all_dirty = true;
-        }
-        state.terminal.grid.selection = None;
-        drain_pty(state) > 0
-    }
-
-    fn apply_synthetic_key_event(state: &mut HostWindowState, event: &SyntheticKeyEvent) -> bool {
-        let logical_key = crate::frontend::parse_synthetic_key(&event.key);
-        let base_modifiers =
-            crate::frontend::synthetic_modifiers_state(crate::frontend::SyntheticModifierState {
-                ctrl: event.ctrl,
-                alt: event.alt,
-                shift: event.shift,
-                super_key: event.super_key,
-                hyper: event.hyper,
-                meta: event.meta,
-                caps_lock: state.caps_lock_modifier,
-                num_lock: state.num_lock_modifier,
-            });
-        let modifiers = crate::frontend::effective_modifiers_for_key_event(
-            base_modifiers,
-            event.hyper,
-            event.meta,
-            state.caps_lock_modifier,
-            state.num_lock_modifier,
-            &logical_key,
-            event.kind,
-        );
-        let ime_dedupe_text =
-            crate::frontend::key_ime_dedupe_text(&logical_key, event.text.as_deref());
-        let changed = if let Some(bytes) = key_to_bytes(
-            &logical_key,
-            event.text.as_deref(),
-            None,
-            state.terminal.application_cursor_keys,
-            modifiers,
-            state.terminal.kitty_keyboard_flags(),
-            event.kind,
-        ) {
-            crate::frontend::trace_input(format!(
-                "cpu synthetic key-event kind={:?} key={:?} text={:?} dedupe_text={:?} bytes={:?}",
-                event.kind, logical_key, event.text, ime_dedupe_text, bytes
-            ));
-            if should_skip_duplicate_ime_input(
-                &mut state.pending_ime_commit,
-                event.kind,
-                ime_dedupe_text.as_deref(),
-                Some(&bytes),
-            ) {
-                crate::frontend::trace_input("cpu synthetic key-event skipped by ime dedupe");
-                return false;
-            }
-            remember_text_key_event(
-                &mut state.recent_text_key_event,
-                event.kind,
-                ime_dedupe_text.as_deref(),
-                Some(&bytes),
-                Instant::now(),
-            );
-            let _ = state.pty.write_all(&bytes);
-            if state.terminal.grid.scroll_offset > 0 {
-                state.terminal.grid.scroll_offset = 0;
-                state.terminal.grid.all_dirty = true;
-            }
-            state.terminal.grid.selection = None;
-            drain_pty(state) > 0
-        } else {
-            remember_text_key_event(
-                &mut state.recent_text_key_event,
-                event.kind,
-                ime_dedupe_text.as_deref(),
-                None,
-                Instant::now(),
-            );
-            let _ = should_skip_duplicate_ime_input(
-                &mut state.pending_ime_commit,
-                event.kind,
-                ime_dedupe_text.as_deref(),
-                None,
-            );
-            false
-        };
-
-        crate::frontend::apply_modifier_key_transition(
-            &mut state.hyper_modifier,
-            &mut state.meta_modifier,
-            &mut state.caps_lock_modifier,
-            &mut state.num_lock_modifier,
-            &logical_key,
-            event.kind,
-        );
-
-        changed
-    }
-
     fn handle_host_ipc_request(&mut self, req: &Request) -> (Response, IpcAction) {
-        if req.cmd == "open-window" {
-            let cols = req
-                .args
-                .as_object()
-                .and_then(|o| o.get("cols"))
-                .and_then(|v| v.as_u64())
-                .and_then(|v| u16::try_from(v).ok());
-            let rows = req
-                .args
-                .as_object()
-                .and_then(|o| o.get("rows"))
-                .and_then(|v| v.as_u64())
-                .and_then(|v| u16::try_from(v).ok());
-            return (Response::ok_empty(), IpcAction::OpenWindow { cols, rows });
-        }
-
-        if req.cmd == "focus-window" {
-            let Some(window_id) = Self::target_window_from_args(req) else {
-                return (
-                    Response::err("missing 'window_id' argument"),
-                    IpcAction::None,
-                );
-            };
-            return (Response::ok_empty(), IpcAction::FocusWindow(window_id));
-        }
-
-        if req.cmd == "list-windows" {
-            let windows: Vec<u64> = self.windows.values().map(|state| state.id).collect();
-            return (
-                Response::ok(serde_json::json!({
-                    "windows": windows,
-                    "count": windows.len(),
-                    "focused": self.focused_window,
-                })),
-                IpcAction::None,
-            );
-        }
-
-        if req.cmd == "send-key-event" {
-            return match Self::synthetic_key_event_from_request(req) {
-                Ok(event) => (
-                    Response::ok_empty(),
-                    IpcAction::SyntheticKeyEvent {
-                        window: Self::target_window_from_args(req),
-                        event,
-                    },
-                ),
-                Err(error) => (Response::err(error), IpcAction::None),
-            };
-        }
-
-        if req.cmd == "send-ime-commit" {
-            let text = req
-                .args
-                .as_object()
-                .and_then(|o| o.get("text"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            return if text.is_empty() {
-                (Response::err("missing 'text' argument"), IpcAction::None)
-            } else {
-                (
-                    Response::ok_empty(),
-                    IpcAction::SyntheticImeCommit {
-                        window: Self::target_window_from_args(req),
-                        text: text.to_string(),
-                    },
-                )
-            };
+        match parse_host_control_request(req) {
+            Ok(Some(HostControlRequest::ListWindows)) => {
+                let windows: Vec<u64> = self.windows.values().map(|state| state.id).collect();
+                return (host_list_windows_response(windows, self.focused_window), IpcAction::None);
+            }
+            Ok(Some(control)) => return crate::host_commands::into_ipc_action(control),
+            Ok(None) => {}
+            Err(response) => return (response, IpcAction::None),
         }
 
         if self.windows.is_empty() {
             return match req.cmd.as_str() {
-                "ls" => (
-                    Response::ok(serde_json::json!({
-                        "commands": [
-                            "get-text", "send-text", "send-key",
-                            "send-key-event", "send-ime-commit",
-                            "get-cursor", "get-size", "set-title",
-                            "close", "open-window", "focus-window", "list-windows", "ls"
-                        ]
-                    })),
-                    IpcAction::None,
-                ),
+                "ls" => (host_ls_response(true), IpcAction::None),
                 _ => (Response::err("no open windows in host"), IpcAction::None),
             };
         }
 
-        let requested = Self::target_window_from_args(req);
+        let requested = target_window_from_args(req);
         let Some(target_id) = self.resolve_target_window_id(requested) else {
             return (Response::err("no target window available"), IpcAction::None);
         };

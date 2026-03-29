@@ -60,6 +60,7 @@ fn standalone_flag_bypasses_existing_host_reuse() {
         config: None,
         backend: Some(Backend::Gpu),
         standalone: true,
+        startup_command: None,
         command: None,
     };
     assert!(!should_reuse_existing_host(&cli));
@@ -68,6 +69,7 @@ fn standalone_flag_bypasses_existing_host_reuse() {
         config: None,
         backend: Some(Backend::Gpu),
         standalone: false,
+        startup_command: None,
         command: None,
     };
     assert!(should_reuse_existing_host(&cli));

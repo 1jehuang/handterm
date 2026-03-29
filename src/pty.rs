@@ -16,7 +16,37 @@ impl PtyChild {
         Self::spawn_shell(&shell, columns, rows)
     }
 
+    pub fn spawn_default_shell_with_command(
+        columns: u16,
+        rows: u16,
+        command: Option<&str>,
+    ) -> Result<Self> {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        match command.filter(|command| !command.trim().is_empty()) {
+            Some(command) => Self::spawn_shell_command(&shell, command, columns, rows),
+            None => Self::spawn_shell(&shell, columns, rows),
+        }
+    }
+
     pub fn spawn_shell(shell_path: &str, columns: u16, rows: u16) -> Result<Self> {
+        Self::spawn_shell_inner(shell_path, None, columns, rows)
+    }
+
+    pub fn spawn_shell_command(
+        shell_path: &str,
+        command: &str,
+        columns: u16,
+        rows: u16,
+    ) -> Result<Self> {
+        Self::spawn_shell_inner(shell_path, Some(command), columns, rows)
+    }
+
+    fn spawn_shell_inner(
+        shell_path: &str,
+        command: Option<&str>,
+        columns: u16,
+        rows: u16,
+    ) -> Result<Self> {
         let ws = Winsize {
             ws_row: rows,
             ws_col: columns,
@@ -42,7 +72,15 @@ impl PtyChild {
                 }
                 let shell = CString::new(shell_path)
                     .with_context(|| format!("invalid shell path: {shell_path}"))?;
-                let args: [&CStr; 1] = [shell.as_c_str()];
+                let mut owned_args = vec![shell.clone()];
+                if let Some(command) = command {
+                    owned_args.push(CString::new("-lc").expect("valid shell flag"));
+                    owned_args.push(
+                        CString::new(command)
+                            .with_context(|| format!("invalid shell command: {command}"))?,
+                    );
+                }
+                let args: Vec<&CStr> = owned_args.iter().map(|arg| arg.as_c_str()).collect();
                 let _ = execvp(shell.as_c_str(), &args);
                 std::process::exit(127);
             }
@@ -128,5 +166,33 @@ mod tests {
         }
 
         panic!("timed out waiting for shell output: {output}");
+    }
+
+    #[test]
+    fn pty_shell_command_runs_immediately() {
+        let child = PtyChild::spawn_shell_command(
+            "/bin/sh",
+            "printf 'handterm-pty-command-ok\\n'",
+            80,
+            24,
+        )
+        .expect("pty should spawn command shell");
+
+        let mut buffer = [0_u8; 8192];
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut output = String::new();
+
+        while Instant::now() < deadline {
+            let n = child.try_read(&mut buffer).expect("read should succeed");
+            if n == 0 {
+                continue;
+            }
+            output.push_str(&String::from_utf8_lossy(&buffer[..n]));
+            if output.contains("handterm-pty-command-ok") {
+                return;
+            }
+        }
+
+        panic!("timed out waiting for shell command output: {output}");
     }
 }

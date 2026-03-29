@@ -18,6 +18,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub standalone: bool,
 
+    /// Run a shell command in the initial window instead of an interactive login shell
+    #[arg(long = "exec", global = true)]
+    pub startup_command: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }

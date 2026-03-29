@@ -51,6 +51,7 @@ pub mod workloads;
 pub use handterm_common::grid;
 pub use handterm_common::parser;
 pub use handterm_common::protocol;
+pub use handterm_common::server_sync;
 pub use handterm_common::terminal;
 pub use runtime::print_daemon_mode_deprecation;
 #[cfg(feature = "cli")]

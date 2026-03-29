@@ -1,15 +1,11 @@
 use crate::font::GlyphAtlas;
-use crate::grid::{Cell, Grid};
+use crate::grid::Grid;
 use crate::protocol::{CursorState, ServerMessage, WindowId, WindowModes};
+use crate::server_sync::{
+    AppliedServerEffects, apply_cursor_state as apply_wire_cursor_state,
+    apply_dirty_cell as apply_wire_dirty_cell, kitty_images_from_wire, kitty_placements_from_wire,
+};
 use crate::terminal::{CursorStyle, KittyImage, KittyPlacement, MouseMode, TerminalView};
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct AppliedServerEffects {
-    pub title: Option<String>,
-    pub clipboard: Option<Vec<u8>>,
-    pub bell: bool,
-    pub closed: Option<Option<i32>>,
-}
 
 pub struct RemoteTerminalState {
     pub grid: Grid,
@@ -124,25 +120,8 @@ impl RemoteTerminalState {
                 placements,
                 ..
             } => {
-                self.kitty_images = images
-                    .iter()
-                    .map(|image| KittyImage {
-                        id: image.id,
-                        width: image.width,
-                        height: image.height,
-                        data: image.data.clone(),
-                    })
-                    .collect();
-                self.kitty_placements = placements
-                    .iter()
-                    .map(|placement| KittyPlacement {
-                        image_id: placement.image_id,
-                        col: placement.col as usize,
-                        row: placement.row as usize,
-                        cols: placement.cols as usize,
-                        rows: placement.rows as usize,
-                    })
-                    .collect();
+                self.kitty_images = kitty_images_from_wire(images);
+                self.kitty_placements = kitty_placements_from_wire(placements);
                 self.kitty_generation = *generation;
                 self.grid.mark_all_dirty();
             }
@@ -153,50 +132,16 @@ impl RemoteTerminalState {
     }
 
     fn apply_dirty_cell(&mut self, dirty: &crate::protocol::DirtyCell) {
-        let underline_style = match dirty.underline_style {
-            1 => crate::grid::UnderlineStyle::Single,
-            2 => crate::grid::UnderlineStyle::Double,
-            3 => crate::grid::UnderlineStyle::Curly,
-            4 => crate::grid::UnderlineStyle::Dotted,
-            5 => crate::grid::UnderlineStyle::Dashed,
-            _ => crate::grid::UnderlineStyle::None,
-        };
-
-        let grapheme = dirty.grapheme.clone().map(Into::into);
-        self.grid.set_cell_with_grapheme(
-            dirty.row as usize,
-            dirty.col as usize,
-            Cell::from_snapshot(crate::grid::CellSnapshot {
-                ch: dirty.ch,
-                grapheme: grapheme.clone(),
-                fg: dirty.fg,
-                bg: dirty.bg,
-                underline_color: dirty.underline_color,
-                hyperlink_id: dirty.hyperlink_id,
-                attrs: dirty.attrs,
-                flags: dirty.flags,
-                underline_style,
-            }),
-            grapheme,
-        );
+        apply_wire_dirty_cell(&mut self.grid, dirty);
     }
 
     fn apply_cursor_state(&mut self, cursor: Option<&CursorState>) {
-        match cursor {
-            Some(cursor) => {
-                self.grid
-                    .set_cursor(cursor.row as usize, cursor.col as usize);
-                self.cursor_visible = cursor.visible;
-                self.cursor_style = match cursor.style {
-                    1 => CursorStyle::Underline,
-                    2 => CursorStyle::Bar,
-                    _ => CursorStyle::Block,
-                };
-            }
-            None => {
-                self.cursor_visible = false;
-            }
-        }
+        apply_wire_cursor_state(
+            &mut self.grid,
+            &mut self.cursor_visible,
+            &mut self.cursor_style,
+            cursor,
+        );
     }
 
     fn apply_window_modes(&mut self, modes: WindowModes) {

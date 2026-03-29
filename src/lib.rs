@@ -12,6 +12,7 @@ pub mod color;
 pub mod config;
 #[cfg(feature = "daemon-server")]
 pub mod daemon;
+pub mod fd_watcher;
 #[allow(dead_code)]
 pub mod font;
 pub mod frontend;
@@ -21,11 +22,14 @@ pub mod gpu_app;
 pub mod gpu_frame;
 #[cfg(feature = "gpu")]
 pub mod gpu_runtime;
+pub mod host_commands;
+pub mod host_input;
 pub mod input;
 #[cfg(feature = "standalone")]
 pub mod ipc;
 #[cfg(feature = "standalone")]
 pub mod metrics;
+pub mod platform;
 #[cfg(any(feature = "standalone", feature = "daemon-server"))]
 pub mod pty;
 pub mod remote;

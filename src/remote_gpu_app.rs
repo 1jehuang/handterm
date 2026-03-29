@@ -1,15 +1,17 @@
 use crate::client::{ProtocolClient, TryRecvStatus};
 use crate::config::AppConfig;
+use crate::fd_watcher::spawn_fd_watcher;
 use crate::font::GlyphAtlas;
 use crate::frontend::{
     FrameScheduler, KeyEventKind, RecentTextKeyEvent, RedrawWork, base64_decode,
-    classify_redraw_work, copy_to_clipboard, key_to_bytes, open_url, paste_from_clipboard,
-    remember_text_key_event, scroll_to_bytes, scrollback_wheel_delta,
-    should_skip_duplicate_ime_input, should_skip_ime_commit_after_key_event, spawn_fd_watcher,
+    classify_redraw_work, key_to_bytes, remember_text_key_event, scroll_to_bytes,
+    scrollback_wheel_delta, should_skip_duplicate_ime_input,
+    should_skip_ime_commit_after_key_event,
 };
 use crate::gpu_runtime::{
     GpuSurfaceState, create_surface_state, render_surface_state, resize_surface_state,
 };
+use crate::platform::{copy_to_clipboard, open_url, paste_from_clipboard};
 use crate::protocol::{
     ClientMessage, KeyEvent as ProtocolKeyEvent, KeyEventKind as ProtocolKeyEventKind,
     MouseButton as ProtocolMouseButton, MouseEvent as ProtocolMouseEvent,

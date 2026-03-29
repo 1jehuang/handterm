@@ -3,17 +3,19 @@ use crate::fd_watcher::spawn_fd_watcher;
 use crate::font::{GlyphAtlas, bootstrap_font_metrics_with_family_dpi};
 use crate::frontend::{
     FrameDecision, FrameScheduler, KeyEventKind, RecentTextKeyEvent, RedrawWork, StartupTiming,
-    VisualState, base64_decode, classify_redraw_work, copy_to_clipboard, key_to_bytes, open_url,
-    paste_from_clipboard, remember_text_key_event, scroll_to_bytes, scrollback_wheel_delta,
-    should_skip_duplicate_ime_input, should_skip_ime_commit_after_key_event,
-    visual_signature,
+    VisualState, base64_decode, classify_redraw_work, key_to_bytes, remember_text_key_event,
+    scroll_to_bytes, scrollback_wheel_delta, should_skip_duplicate_ime_input,
+    should_skip_ime_commit_after_key_event, visual_signature,
 };
 use crate::host_commands::{
     HostControlRequest, host_list_windows_response, host_ls_response, parse_host_control_request,
     target_window_from_args,
 };
-use crate::host_input::{SyntheticInputTarget, apply_synthetic_ime_commit, apply_synthetic_key_event};
-use crate::ipc::{IpcAction, IpcServer, Request, Response, SyntheticKeyEvent};
+use crate::host_input::{
+    SyntheticInputTarget, apply_synthetic_ime_commit, apply_synthetic_key_event,
+};
+use crate::ipc::{IpcAction, IpcServer, Request, Response};
+use crate::platform::{copy_to_clipboard, open_url, paste_from_clipboard};
 use crate::pty::PtyChild;
 use crate::render::render_terminal_to_buffer;
 use crate::standalone_support::handle_ipc_request;
@@ -152,6 +154,17 @@ impl SyntheticInputTarget for HostWindowState {
 
     fn num_lock_modifier(&self) -> bool {
         self.num_lock_modifier
+    }
+
+    fn apply_modifier_transition(&mut self, logical_key: &Key, event_kind: KeyEventKind) {
+        crate::frontend::apply_modifier_key_transition(
+            &mut self.hyper_modifier,
+            &mut self.meta_modifier,
+            &mut self.caps_lock_modifier,
+            &mut self.num_lock_modifier,
+            logical_key,
+            event_kind,
+        );
     }
 
     fn reset_scrollback(&mut self) {
@@ -333,12 +346,9 @@ impl HandtermApp {
             .map_err(|e| anyhow::anyhow!("softbuffer surface should be created: {e}"))?;
         let terminal = Terminal::new_with_scrollback(cols, rows, self.config.scrollback.lines);
         let before_pty = Instant::now();
-        let pty = PtyChild::spawn_default_shell_with_command(
-            cols,
-            rows,
-            self.startup_command.as_deref(),
-        )
-        .context("pty should spawn")?;
+        let pty =
+            PtyChild::spawn_default_shell_with_command(cols, rows, self.startup_command.as_deref())
+                .context("pty should spawn")?;
         let pty_spawned_at = Instant::now();
         let stop = Arc::new(AtomicBool::new(false));
         let id = self.next_window_id;
@@ -431,7 +441,10 @@ impl HandtermApp {
         match parse_host_control_request(req) {
             Ok(Some(HostControlRequest::ListWindows)) => {
                 let windows: Vec<u64> = self.windows.values().map(|state| state.id).collect();
-                return (host_list_windows_response(windows, self.focused_window), IpcAction::None);
+                return (
+                    host_list_windows_response(windows, self.focused_window),
+                    IpcAction::None,
+                );
             }
             Ok(Some(control)) => return crate::host_commands::into_ipc_action(control),
             Ok(None) => {}
@@ -510,7 +523,7 @@ impl HandtermApp {
                         && let Some(winit_id) = self.window_ids.get(&id)
                         && let Some(state) = self.windows.get_mut(winit_id)
                     {
-                        let changed = Self::apply_synthetic_key_event(state, &event);
+                        let changed = apply_synthetic_key_event(state, &event);
                         let work = classify_redraw_work(&state.terminal, changed);
                         let should_redraw_now = if self.focused_window == Some(state.id) {
                             state.scheduler.mark_redraw_needed();
@@ -530,7 +543,7 @@ impl HandtermApp {
                         && let Some(winit_id) = self.window_ids.get(&id)
                         && let Some(state) = self.windows.get_mut(winit_id)
                     {
-                        let changed = Self::apply_synthetic_ime_commit(state, &text);
+                        let changed = apply_synthetic_ime_commit(state, &text);
                         let work = classify_redraw_work(&state.terminal, changed);
                         let should_redraw_now = if self.focused_window == Some(state.id) {
                             state.scheduler.mark_redraw_needed();

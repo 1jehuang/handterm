@@ -398,7 +398,7 @@ pub(crate) fn append_scrollbar_overlay_instances(
     visible_rows: usize,
     scroll_rows: f32,
 ) {
-    const SCROLLBAR_WIDTH_PX: f32 = 4.0;
+    const SCROLLBAR_WIDTH_PX: f32 = 1.0;
     const MIN_THUMB_PX: f32 = 24.0;
     const TRACK_ALPHA: f32 = 0.10;
     const THUMB_ALPHA: f32 = 0.55;
@@ -558,7 +558,11 @@ mod tests {
         fill_cell_infos(&terminal, &mut baseline);
 
         let mut fractional = Vec::new();
-        fill_cell_infos_with_scroll(&terminal, &mut fractional, ViewportScroll::from_scroll_rows(0.25));
+        fill_cell_infos_with_scroll(
+            &terminal,
+            &mut fractional,
+            ViewportScroll::from_scroll_rows(0.25),
+        );
 
         assert_eq!(baseline.len(), 4);
         assert_eq!(fractional.len(), 6);
@@ -1163,10 +1167,10 @@ mod tests {
         );
 
         assert_eq!(overlay_instances.len(), 2);
-        assert_eq!(overlay_instances[0].pos, [796.0, 0.0]);
-        assert_eq!(overlay_instances[0].size, [4.0, 320.0]);
-        assert_eq!(overlay_instances[1].pos, [796.0, 133.33333]);
-        assert_eq!(overlay_instances[1].size, [4.0, 53.333336]);
+        assert_eq!(overlay_instances[0].pos, [799.0, 0.0]);
+        assert_eq!(overlay_instances[0].size, [1.0, 320.0]);
+        assert_eq!(overlay_instances[1].pos, [799.0, 133.33333]);
+        assert_eq!(overlay_instances[1].size, [1.0, 53.333336]);
     }
 
     #[test]

@@ -3,8 +3,9 @@ use crate::font::{GlyphAtlas, GlyphFormat};
 use crate::frontend::{ViewportScroll, VisualState, visual_signature};
 use crate::gpu_frame::{
     AtlasImageRect, CellInfo, CellInstance, FrameBatchStyle, FrameTextBatches, GlyphAtlasEntry,
-    ImageInstance, append_scrollbar_overlay_instances, fill_cell_infos, fill_cell_infos_with_scroll,
-    fill_image_instances, fill_image_instances_with_viewport_offset, fill_text_batches,
+    ImageInstance, append_scrollbar_overlay_instances, fill_cell_infos,
+    fill_cell_infos_with_scroll, fill_image_instances, fill_image_instances_with_viewport_offset,
+    fill_text_batches,
 };
 use crate::terminal::TerminalView;
 use anyhow::{Context, Result};
@@ -1019,7 +1020,7 @@ pub fn render_surface_state(
     atlas: &mut GlyphAtlas,
     config: &AppConfig,
 ) {
-    let _ = render_surface_state_with_scroll(state, terminal, atlas, config, 0.0);
+    render_surface_state_with_scroll(state, terminal, atlas, config, 0.0);
 }
 
 pub fn render_surface_state_with_scroll(
@@ -1205,15 +1206,15 @@ pub fn render_surface_state_profiled_with_scroll(
             &mut image_instances,
             |placement| {
                 ensure_kitty_image_in_atlas(
-                &mut atlas_state,
-                &state.shared.queue,
-                terminal,
-                placement.image_id,
-            )
-            .map(|entry| AtlasImageRect {
-                x: entry.x,
-                y: entry.y,
-                width: entry.width,
+                    &mut atlas_state,
+                    &state.shared.queue,
+                    terminal,
+                    placement.image_id,
+                )
+                .map(|entry| AtlasImageRect {
+                    x: entry.x,
+                    y: entry.y,
+                    width: entry.width,
                     height: entry.height,
                 })
             },

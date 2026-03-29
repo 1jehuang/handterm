@@ -353,7 +353,7 @@ fn draw_scrollback_scrollbar(
     scroll_rows: f32,
     fg: u32,
 ) {
-    const SCROLLBAR_WIDTH_PX: usize = 4;
+    const SCROLLBAR_WIDTH_PX: usize = 1;
     const MIN_THUMB_PX: f32 = 24.0;
     const TRACK_ALPHA: u8 = 26;
     const THUMB_ALPHA: u8 = 140;
@@ -373,47 +373,50 @@ fn draw_scrollback_scrollbar(
         buffer,
         buf_w,
         buf_h,
-        x_start,
-        0,
-        SCROLLBAR_WIDTH_PX,
-        buf_h,
-        fg,
-        TRACK_ALPHA,
+        AlphaRect {
+            x: x_start,
+            y: 0,
+            width: SCROLLBAR_WIDTH_PX,
+            height: buf_h,
+            rgb: fg,
+            alpha: TRACK_ALPHA,
+        },
     );
     draw_alpha_rect(
         buffer,
         buf_w,
         buf_h,
-        x_start,
-        geometry.thumb_y_px.floor() as usize,
-        SCROLLBAR_WIDTH_PX,
-        geometry.thumb_h_px.ceil() as usize,
-        fg,
-        THUMB_ALPHA,
+        AlphaRect {
+            x: x_start,
+            y: geometry.thumb_y_px.floor() as usize,
+            width: SCROLLBAR_WIDTH_PX,
+            height: geometry.thumb_h_px.ceil() as usize,
+            rgb: fg,
+            alpha: THUMB_ALPHA,
+        },
     );
 }
 
-fn draw_alpha_rect(
-    buffer: &mut [u32],
-    buf_w: usize,
-    buf_h: usize,
+struct AlphaRect {
     x: usize,
     y: usize,
     width: usize,
     height: usize,
     rgb: u32,
     alpha: u8,
-) {
-    let x_end = (x + width).min(buf_w);
-    let y_end = (y + height).min(buf_h);
-    for py in y.min(buf_h)..y_end {
-        for px in x.min(buf_w)..x_end {
+}
+
+fn draw_alpha_rect(buffer: &mut [u32], buf_w: usize, buf_h: usize, rect: AlphaRect) {
+    let x_end = (rect.x + rect.width).min(buf_w);
+    let y_end = (rect.y + rect.height).min(buf_h);
+    for py in rect.y.min(buf_h)..y_end {
+        for px in rect.x.min(buf_w)..x_end {
             let idx = py * buf_w + px;
             let rgba = [
-                ((rgb >> 16) & 0xff) as u8,
-                ((rgb >> 8) & 0xff) as u8,
-                (rgb & 0xff) as u8,
-                alpha,
+                ((rect.rgb >> 16) & 0xff) as u8,
+                ((rect.rgb >> 8) & 0xff) as u8,
+                (rect.rgb & 0xff) as u8,
+                rect.alpha,
             ];
             blend_rgba_over_rgb(&mut buffer[idx], &rgba);
         }

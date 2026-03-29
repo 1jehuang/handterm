@@ -4,12 +4,8 @@ pub use crate::input::{
     modifiers_with_extra,
 };
 use crate::terminal::{CursorStyle, TerminalView};
-use std::io::Write;
-use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 const IME_KEY_DEDUPE_WINDOW: Duration = Duration::from_millis(50);
@@ -239,9 +235,9 @@ impl Default for SmoothScrollState {
 impl SmoothScrollState {
     const SETTLE_EPSILON: f32 = 0.01;
     const VELOCITY_EPSILON: f32 = 0.05;
-    const SPRING_RATE: f32 = 22.0;
-    const MOMENTUM_DECAY_RATE: f32 = 4.5;
-    const MOMENTUM_IMPULSE_PER_ROW: f32 = 110.0;
+    const SPRING_RATE: f32 = 20.0;
+    const MOMENTUM_DECAY_RATE: f32 = 8.0;
+    const MOMENTUM_IMPULSE_PER_ROW: f32 = 45.0;
     const BOTTOM_SNAP_THRESHOLD: f32 = 0.3;
 
     pub fn reset(&mut self) {
@@ -814,31 +810,6 @@ pub fn should_skip_ime_commit_after_key_event(
             .is_some_and(|elapsed| elapsed <= IME_KEY_DEDUPE_WINDOW)
 }
 
-pub fn paste_from_clipboard() -> Option<Vec<u8>> {
-    std::process::Command::new("wl-paste")
-        .arg("--no-newline")
-        .output()
-        .ok()
-        .map(|output| output.stdout)
-        .filter(|stdout| !stdout.is_empty())
-}
-
-pub fn copy_to_clipboard(text: &[u8]) {
-    let mut child = std::process::Command::new("wl-copy")
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .ok();
-    if let Some(ref mut child) = child
-        && let Some(ref mut stdin) = child.stdin
-    {
-        let _ = stdin.write_all(text);
-    }
-}
-
-pub fn open_url(url: &str) {
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Base64DecodeError {
     InvalidByte,
@@ -885,71 +856,6 @@ pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Base64DecodeError> {
     }
 
     Ok(out)
-}
-
-pub fn spawn_fd_watcher<E: Clone + Send + 'static>(
-    thread_name: &str,
-    primary_fd: i32,
-    secondary_fd: i32,
-    proxy: EventLoopProxy<E>,
-    event: E,
-    stop: Arc<AtomicBool>,
-) {
-    let thread_name = thread_name.to_string();
-    std::thread::Builder::new()
-        .name(thread_name)
-        .spawn(move || fd_watcher_thread(primary_fd, secondary_fd, proxy, event, stop))
-        .expect("failed to spawn fd watcher thread");
-}
-
-fn fd_watcher_thread<E: Clone + Send + 'static>(
-    primary_fd: i32,
-    secondary_fd: i32,
-    proxy: EventLoopProxy<E>,
-    event: E,
-    stop: Arc<AtomicBool>,
-) {
-    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
-    use std::os::fd::BorrowedFd;
-
-    let mut fds = Vec::with_capacity(2);
-    fds.push(PollFd::new(
-        unsafe { BorrowedFd::borrow_raw(primary_fd) },
-        PollFlags::POLLIN | PollFlags::POLLHUP,
-    ));
-    if secondary_fd >= 0 {
-        fds.push(PollFd::new(
-            unsafe { BorrowedFd::borrow_raw(secondary_fd) },
-            PollFlags::POLLIN,
-        ));
-    }
-
-    while !stop.load(Ordering::Relaxed) {
-        match poll(&mut fds, PollTimeout::from(500u16)) {
-            Ok(0) => continue,
-            Ok(_) => {
-                let has_data = fds[0]
-                    .revents()
-                    .is_some_and(|r| r.intersects(PollFlags::POLLIN));
-                let secondary_data = fds.len() > 1
-                    && fds[1]
-                        .revents()
-                        .is_some_and(|r| r.intersects(PollFlags::POLLIN));
-                if has_data || secondary_data {
-                    let _ = proxy.send_event(event.clone());
-                }
-                if fds[0]
-                    .revents()
-                    .is_some_and(|revents| revents.contains(PollFlags::POLLHUP))
-                {
-                    let _ = proxy.send_event(event.clone());
-                    break;
-                }
-            }
-            Err(nix::errno::Errno::EINTR) => continue,
-            Err(_) => break,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1123,7 +1029,10 @@ mod tests {
         assert!(scroll.display_rows > 4.0);
         assert!((scroll.display_rows - scroll.target_rows).abs() < 0.2);
         scroll.snap_to_target();
-        assert_eq!(scroll.displayed_scroll_offset(), scroll.target_rows.ceil() as usize);
+        assert_eq!(
+            scroll.displayed_scroll_offset(),
+            scroll.target_rows.ceil() as usize
+        );
         assert!(!scroll.is_animating());
     }
 

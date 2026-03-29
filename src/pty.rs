@@ -170,13 +170,9 @@ mod tests {
 
     #[test]
     fn pty_shell_command_runs_immediately() {
-        let child = PtyChild::spawn_shell_command(
-            "/bin/sh",
-            "printf 'handterm-pty-command-ok\\n'",
-            80,
-            24,
-        )
-        .expect("pty should spawn command shell");
+        let child =
+            PtyChild::spawn_shell_command("/bin/sh", "printf 'handterm-pty-command-ok\\n'", 80, 24)
+                .expect("pty should spawn command shell");
 
         let mut buffer = [0_u8; 8192];
         let deadline = Instant::now() + Duration::from_secs(2);

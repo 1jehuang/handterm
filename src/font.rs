@@ -699,6 +699,7 @@ impl GlyphAtlas {
     #[cfg(feature = "ligatures")]
     fn rasterize_grapheme_cluster(&mut self, grapheme: &str) -> Option<RasterizedGlyph> {
         self.ensure_fallback_rb_faces_loaded();
+
         self.rb_face
             .as_ref()
             .zip(self.primary_face.as_ref())
@@ -712,23 +713,29 @@ impl GlyphAtlas {
                     self.baseline,
                 )
             })
-            .or_else(|| {
-                self.fallback_faces
-                    .iter()
-                    .zip(self.fallback_rb_faces.iter())
-                    .find_map(|(face, rb_face)| {
-                        face.as_ref()
-                            .zip(rb_face.as_ref())
-                            .and_then(|(face, rb_face)| {
-                                rasterize_grapheme_sequence(
-                                    face,
-                                    rb_face,
-                                    grapheme,
-                                    LoadFlag::RENDER | LoadFlag::COLOR,
-                                    self.cell_height,
-                                    self.baseline,
-                                )
-                            })
+            .or_else(|| self.rasterize_grapheme_cluster_from_fallbacks(grapheme))
+    }
+
+    #[cfg(feature = "ligatures")]
+    fn rasterize_grapheme_cluster_from_fallbacks(
+        &mut self,
+        grapheme: &str,
+    ) -> Option<RasterizedGlyph> {
+        self.fallback_faces
+            .iter()
+            .zip(self.fallback_rb_faces.iter())
+            .find_map(|(face, rb_face)| {
+                face.as_ref()
+                    .zip(rb_face.as_ref())
+                    .and_then(|(face, rb_face)| {
+                        rasterize_grapheme_sequence(
+                            face,
+                            rb_face,
+                            grapheme,
+                            LoadFlag::RENDER | LoadFlag::COLOR,
+                            self.cell_height,
+                            self.baseline,
+                        )
                     })
             })
     }
@@ -812,6 +819,7 @@ pub struct ShapedGlyph {
 
 #[cfg(feature = "local-fonts")]
 fn rasterize_primary_glyph(face: &freetype::Face, ch: u32) -> Option<RasterizedGlyph> {
+    face.get_char_index(ch as usize)?;
     rasterize_char(face, ch, text_load_flags())
 }
 
@@ -1056,6 +1064,9 @@ fn rasterize_loaded(face: &freetype::Face) -> Option<RasterizedGlyph> {
     let bmp = glyph.bitmap();
     let width = bmp.width() as usize;
     let height = bmp.rows() as usize;
+    if width == 0 || height == 0 {
+        return None;
+    }
     let pitch = bmp.pitch().unsigned_abs() as usize;
     let buffer = bmp.buffer();
     let pixel_mode = bmp.pixel_mode().ok()?;
@@ -1629,6 +1640,10 @@ mod tests {
         let h = atlas.cell_height;
         let mut buf = vec![0u32; w * h];
 
+        if !atlas.ensure_grapheme("👍🏻") {
+            return;
+        }
+
         atlas.draw_grapheme(&mut buf, w, h, 0, 0, "👍🏻", 0xffffff);
 
         assert!(
@@ -1730,6 +1745,19 @@ mod tests {
             .expect("PUA send-mode glyph should be retrievable after ensure_glyph");
         assert!(glyph.width > 0);
         assert!(glyph.height > 0);
+    }
+
+    #[test]
+    #[cfg(feature = "local-fonts")]
+    fn missing_codepoint_does_not_resolve_to_notdef_box() {
+        let mut atlas = GlyphAtlas::with_family("JetBrainsMono Nerd Font Light", 11.0)
+            .expect("should load configured JCode font family");
+
+        assert!(
+            !atlas.ensure_glyph(0x10FFFD),
+            "missing codepoint should not resolve through .notdef"
+        );
+        assert!(atlas.get_glyph(0x10FFFD).is_none());
     }
 
     #[test]

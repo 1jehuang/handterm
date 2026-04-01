@@ -126,7 +126,7 @@ impl Default for ScrollbackConfig {
     fn default() -> Self {
         Self {
             lines: 10_000,
-            smooth: false,
+            smooth: true,
             smooth_speed: 3.0,
             scrollbar: true,
         }
@@ -161,7 +161,7 @@ mod tests {
         assert_eq!(cfg.window.columns, 80);
         assert_eq!(cfg.window.rows, 24);
         assert_eq!(cfg.scrollback.lines, 10_000);
-        assert!(!cfg.scrollback.smooth);
+        assert!(cfg.scrollback.smooth);
         assert_eq!(cfg.scrollback.smooth_speed, 3.0);
         assert!(cfg.scrollback.scrollbar);
     }
@@ -181,7 +181,7 @@ mod tests {
         assert_eq!(cfg.style.foreground.to_string(), "#cdd6f4");
         assert_eq!(cfg.window.columns, 100);
         assert_eq!(cfg.window.rows, 24);
-        assert!(!cfg.scrollback.smooth);
+        assert!(cfg.scrollback.smooth);
         assert_eq!(cfg.scrollback.smooth_speed, 3.0);
         assert!(cfg.scrollback.scrollbar);
     }

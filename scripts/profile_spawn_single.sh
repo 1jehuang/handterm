@@ -45,6 +45,14 @@ for _ in $(seq 1 500); do
   fi
   sleep 0.01
 done
+
+for _ in $(seq 1 300); do
+  if grep -q "handterm ${BACKEND} host: startup id=2" "$HOST_LOG" 2>/dev/null; then
+    break
+  fi
+  sleep 0.01
+done
+
 END_NS=$(date +%s%N)
 
 python - <<'PY' "$HOST_LOG" "$START_NS" "$END_NS" "$BACKEND" > "$OUT_FILE"
@@ -59,6 +67,9 @@ patterns=[
     (r'handterm gpu host: first-frame id=2\n\s+open_to_first_present=([0-9.]+)ms', 'first_present_ms'),
     (r'handterm gpu host: startup id=2\n(?:.*\n)*?\s+open_to_first_visible_output=([0-9.]+)ms', 'visible_output_ms'),
     (r'handterm gpu host: open-window id=2\n(?:.*\n)*?\s+surface_total=([0-9.]+)ms', 'surface_total_ms'),
+    (r'handterm gpu host: open-window id=2\n(?:.*\n)*?\s+host_cpu_user=([0-9.]+)ms host_cpu_system=([0-9.]+)ms host_cpu_total=([0-9.]+)ms', 'open_cpu'),
+    (r'handterm gpu host: first-frame id=2\n(?:.*\n)*?\s+host_cpu_user=([0-9.]+)ms host_cpu_system=([0-9.]+)ms host_cpu_total=([0-9.]+)ms', 'first_present_cpu'),
+    (r'handterm gpu host: startup-cpu id=2\n\s+open_to_first_visible_present_user=([0-9.]+)ms open_to_first_visible_present_system=([0-9.]+)ms open_to_first_visible_present_total=([0-9.]+)ms', 'startup_cpu'),
     (r'\s+window_create=([0-9.]+)ms ime=([0-9.]+)ms wgpu_surface=([0-9.]+)ms\n\s+default_config=([0-9.]+)ms caps=([0-9.]+)ms configure=([0-9.]+)ms', 'breakdown'),
 ]
 for pat, label in patterns:
@@ -73,6 +84,18 @@ for pat, label in patterns:
         print(f'default_config_ms={g[3]}')
         print(f'caps_ms={g[4]}')
         print(f'configure_ms={g[5]}')
+    elif label == 'open_cpu':
+        print(f'open_cpu_user_ms={g[0]}')
+        print(f'open_cpu_system_ms={g[1]}')
+        print(f'open_cpu_total_ms={g[2]}')
+    elif label == 'first_present_cpu':
+        print(f'first_present_cpu_user_ms={g[0]}')
+        print(f'first_present_cpu_system_ms={g[1]}')
+        print(f'first_present_cpu_total_ms={g[2]}')
+    elif label == 'startup_cpu':
+        print(f'startup_cpu_user_ms={g[0]}')
+        print(f'startup_cpu_system_ms={g[1]}')
+        print(f'startup_cpu_total_ms={g[2]}')
     else:
         print(f'{label}={g[0]}')
 print('--- host_log_tail ---')

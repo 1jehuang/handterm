@@ -412,13 +412,13 @@ impl StartupTiming {
         }
     }
 
-    pub fn emit_if_ready(&mut self, label: &str, id: u64) {
+    pub fn emit_if_ready(&mut self, label: &str, id: u64) -> bool {
         if self.logged
             || self.first_present_at.is_none()
             || self.first_visible_output_at.is_none()
             || self.first_present_after_visible_at.is_none()
         {
-            return;
+            return false;
         }
 
         fn fmt_ms(started_at: Instant, at: Option<Instant>) -> String {
@@ -469,6 +469,7 @@ impl StartupTiming {
                 .unwrap_or_else(|| "n/a".to_string()),
         );
         self.logged = true;
+        true
     }
 }
 

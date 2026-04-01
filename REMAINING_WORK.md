@@ -137,7 +137,7 @@ That should **not** be repeated in the same way.
   - total open-window time
   - window/surface creation time
   - PTY spawn time
-  - host CPU time deltas
+  - host CPU time deltas (**now emitted by the host open-window / startup profiling logs; keep using those instead of compositor-heavy external loops**)
 
 #### Important safety note
 

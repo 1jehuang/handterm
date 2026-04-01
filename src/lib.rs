@@ -30,6 +30,7 @@ pub mod ipc;
 #[cfg(feature = "standalone")]
 pub mod metrics;
 pub mod platform;
+pub mod profiling;
 #[cfg(any(feature = "standalone", feature = "daemon-server"))]
 pub mod pty;
 pub mod remote;

@@ -22,6 +22,7 @@ use crate::host_input::{
 };
 use crate::ipc::{IpcAction, IpcServer, Request, Response};
 use crate::platform::{copy_to_clipboard, open_url, paste_from_clipboard};
+use crate::profiling::ProcessCpuTime;
 use crate::pty::PtyChild;
 use crate::standalone_support::handle_ipc_request;
 use crate::terminal::Terminal;
@@ -106,6 +107,7 @@ struct GpuWindowState {
     scheduler: FrameScheduler,
     watcher_stop: Arc<AtomicBool>,
     open_window_start: Option<Instant>,
+    cpu_time_started: Option<ProcessCpuTime>,
     first_frame_logged: bool,
     startup_timing: StartupTiming,
     hot_until: Option<Instant>,
@@ -385,6 +387,7 @@ impl GpuApp {
         rows: Option<u16>,
     ) -> Result<u64> {
         let start = Instant::now();
+        let cpu_time_started = ProcessCpuTime::capture();
         let cols = cols.unwrap_or(self.config.window.columns).max(1);
         let rows = rows.unwrap_or(self.config.window.rows).max(1);
         let before_dpi = Instant::now();
@@ -506,6 +509,7 @@ impl GpuApp {
                 scheduler: FrameScheduler::default(),
                 watcher_stop: stop,
                 open_window_start: Some(start),
+                cpu_time_started,
                 first_frame_logged: false,
                 startup_timing: {
                     let mut timing = StartupTiming::new(start);
@@ -520,6 +524,9 @@ impl GpuApp {
         if let Some(state) = self.windows.get(&winit_id) {
             state.renderer.window.request_redraw();
         }
+        let open_cpu = cpu_time_started.and_then(|started| {
+            ProcessCpuTime::capture().map(|current| current.delta_since(started))
+        });
         let sp = &surface_profile;
         eprintln!(
             "handterm gpu host: open-window id={id}\n\
@@ -528,7 +535,8 @@ impl GpuApp {
              \x20   window_create={:.2}ms ime={:.2}ms wgpu_surface={:.2}ms\n\
              \x20   default_config={:.2}ms caps={:.2}ms configure={:.2}ms defaults_reused={}\n\
              \x20   atlas_tex={:.2}ms uniform_buf={:.2}ms inst_bufs={:.2}ms\n\
-             \x20   bind_group={:.2}ms pipeline={:.2}ms (cache_hit={})",
+             \x20   bind_group={:.2}ms pipeline={:.2}ms (cache_hit={})\n\
+             \x20 host_cpu_user={:.2}ms host_cpu_system={:.2}ms host_cpu_total={:.2}ms",
             start.elapsed().as_secs_f64() * 1000.0,
             dpi_ms.as_secs_f64() * 1000.0,
             bootstrap_ms.as_secs_f64() * 1000.0,
@@ -552,6 +560,9 @@ impl GpuApp {
             sp.bind_group.as_secs_f64() * 1000.0,
             sp.pipeline_lookup.as_secs_f64() * 1000.0,
             sp.pipeline_cache_hit,
+            open_cpu.map(ProcessCpuTime::user_ms).unwrap_or(0.0),
+            open_cpu.map(ProcessCpuTime::system_ms).unwrap_or(0.0),
+            open_cpu.map(ProcessCpuTime::total_ms).unwrap_or(0.0),
         );
         Ok(id)
     }
@@ -1110,14 +1121,31 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                                     .open_window_start
                                     .map(|s| s.elapsed().as_secs_f64() * 1000.0)
                                     .unwrap_or(0.0);
+                                let first_present_cpu =
+                                    state.cpu_time_started.and_then(|started| {
+                                        ProcessCpuTime::capture()
+                                            .map(|current| current.delta_since(started))
+                                    });
                                 state.startup_timing.mark_present(Instant::now());
-                                state.startup_timing.emit_if_ready("gpu host", state.id);
+                                if state.startup_timing.emit_if_ready("gpu host", state.id)
+                                    && let Some(delta) = first_present_cpu
+                                {
+                                    eprintln!(
+                                        "handterm gpu host: startup-cpu id={}\n\
+                                         \x20 open_to_first_visible_present_user={:.2}ms open_to_first_visible_present_system={:.2}ms open_to_first_visible_present_total={:.2}ms",
+                                        state.id,
+                                        delta.user_ms(),
+                                        delta.system_ms(),
+                                        delta.total_ms(),
+                                    );
+                                }
                                 eprintln!(
                                     "handterm gpu host: first-frame id={}\n\
                                      \x20 open_to_first_present={:.2}ms\n\
                                      \x20 acquire={:.2}ms display_list={:.2}ms upload={:.2}ms\n\
                                      \x20 encode={:.2}ms submit={:.2}ms present={:.2}ms\n\
-                                     \x20 render_total={:.2}ms",
+                                     \x20 render_total={:.2}ms\n\
+                                     \x20 host_cpu_user={:.2}ms host_cpu_system={:.2}ms host_cpu_total={:.2}ms",
                                     state.id,
                                     open_to_present,
                                     rp.acquire_surface.as_secs_f64() * 1000.0,
@@ -1127,6 +1155,15 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                                     rp.submit.as_secs_f64() * 1000.0,
                                     rp.present.as_secs_f64() * 1000.0,
                                     rp.total.as_secs_f64() * 1000.0,
+                                    first_present_cpu
+                                        .map(ProcessCpuTime::user_ms)
+                                        .unwrap_or(0.0),
+                                    first_present_cpu
+                                        .map(ProcessCpuTime::system_ms)
+                                        .unwrap_or(0.0),
+                                    first_present_cpu
+                                        .map(ProcessCpuTime::total_ms)
+                                        .unwrap_or(0.0),
                                 );
                             }
                             state.open_window_start = None;
@@ -1139,7 +1176,20 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                                 viewport_scroll,
                             );
                             state.startup_timing.mark_present(Instant::now());
-                            state.startup_timing.emit_if_ready("gpu host", state.id);
+                            if state.startup_timing.emit_if_ready("gpu host", state.id)
+                                && let Some(started) = state.cpu_time_started
+                                && let Some(current) = ProcessCpuTime::capture()
+                            {
+                                let delta = current.delta_since(started);
+                                eprintln!(
+                                    "handterm gpu host: startup-cpu id={}\n\
+                                     \x20 open_to_first_visible_present_user={:.2}ms open_to_first_visible_present_system={:.2}ms open_to_first_visible_present_total={:.2}ms",
+                                    state.id,
+                                    delta.user_ms(),
+                                    delta.system_ms(),
+                                    delta.total_ms(),
+                                );
+                            }
                         }
                     }
                     _ => {}

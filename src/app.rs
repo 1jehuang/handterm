@@ -16,6 +16,7 @@ use crate::host_input::{
 };
 use crate::ipc::{IpcAction, IpcServer, Request, Response};
 use crate::platform::{copy_to_clipboard, open_url, paste_from_clipboard};
+use crate::profiling::ProcessCpuTime;
 use crate::pty::PtyChild;
 use crate::render::render_terminal_to_buffer;
 use crate::standalone_support::handle_ipc_request;
@@ -108,6 +109,7 @@ struct HostWindowState {
     last_presented_signature: Option<u64>,
     scheduler: FrameScheduler,
     watcher_stop: Arc<AtomicBool>,
+    cpu_time_started: Option<ProcessCpuTime>,
     startup_timing: StartupTiming,
 }
 
@@ -302,6 +304,7 @@ impl HandtermApp {
         rows: Option<u16>,
     ) -> Result<u64> {
         let start = Instant::now();
+        let cpu_time_started = ProcessCpuTime::capture();
         let cols = cols.unwrap_or(self.config.window.columns).max(1);
         let rows = rows.unwrap_or(self.config.window.rows).max(1);
         let before_dpi = Instant::now();
@@ -393,6 +396,7 @@ impl HandtermApp {
                 last_presented_signature: None,
                 scheduler: FrameScheduler::default(),
                 watcher_stop: stop,
+                cpu_time_started,
                 startup_timing: {
                     let mut timing = StartupTiming::new(start);
                     timing.mark_pty_spawned(pty_spawned_at);
@@ -403,14 +407,22 @@ impl HandtermApp {
         if let Some(state) = self.windows.get(&winit_id) {
             state.window.request_redraw();
         }
+        let open_cpu = cpu_time_started.and_then(|started| {
+            ProcessCpuTime::capture().map(|current| current.delta_since(started))
+        });
         eprintln!(
-            "handterm cpu host: open-window total={:.2}ms dpi={:.2}ms bootstrap={:.2}ms window={:.2}ms atlas={:.2}ms pty={:.2}ms",
+            "handterm cpu host: open-window id={id}\n\
+             \x20 total={:.2}ms dpi={:.2}ms bootstrap={:.2}ms window={:.2}ms atlas={:.2}ms pty={:.2}ms\n\
+             \x20 host_cpu_user={:.2}ms host_cpu_system={:.2}ms host_cpu_total={:.2}ms",
             start.elapsed().as_secs_f64() * 1000.0,
             dpi_ms.as_secs_f64() * 1000.0,
             bootstrap_ms.as_secs_f64() * 1000.0,
             window_ms.as_secs_f64() * 1000.0,
             atlas_ms.as_secs_f64() * 1000.0,
             Instant::now().duration_since(before_pty).as_secs_f64() * 1000.0,
+            open_cpu.map(ProcessCpuTime::user_ms).unwrap_or(0.0),
+            open_cpu.map(ProcessCpuTime::system_ms).unwrap_or(0.0),
+            open_cpu.map(ProcessCpuTime::total_ms).unwrap_or(0.0),
         );
         Ok(id)
     }
@@ -969,7 +981,20 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                             .expect("atlas should exist for redraw");
                         render_grid(state, atlas, config).expect("frame render should succeed");
                         state.startup_timing.mark_present(Instant::now());
-                        state.startup_timing.emit_if_ready("cpu host", state.id);
+                        if state.startup_timing.emit_if_ready("cpu host", state.id)
+                            && let Some(started) = state.cpu_time_started
+                            && let Some(current) = ProcessCpuTime::capture()
+                        {
+                            let delta = current.delta_since(started);
+                            eprintln!(
+                                "handterm cpu host: startup-cpu id={}\n\
+                                 \x20 open_to_first_visible_present_user={:.2}ms open_to_first_visible_present_system={:.2}ms open_to_first_visible_present_total={:.2}ms",
+                                state.id,
+                                delta.user_ms(),
+                                delta.system_ms(),
+                                delta.total_ms(),
+                            );
+                        }
                     }
                     _ => {}
                 }

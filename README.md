@@ -8,7 +8,7 @@ A Wayland-native terminal emulator focused on reaching the theoretical limits of
 [![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org)
 [![Wayland](https://img.shields.io/badge/wayland-native-green.svg)](https://wayland.freedesktop.org)
 
-~8,400 lines of Rust. Workspace-split packages. Single-process host architecture for low-overhead multi-window scaling.
+Rust workspace split across 6 packages. Single-process host architecture for low-overhead multi-window scaling.
 
 ![handterm screenshot](assets/screenshot.png)
 
@@ -195,9 +195,11 @@ At 120x72 (HiDPI fullscreen), the pipeline can repaint the entire screen **2,507
 
 ### Codebase size
 
-| Terminal | Lines of code | Language | Dependencies |
-|----------|-------------:|:--------:|:------------:|
-| **handterm** | **~8,400** | Rust | 16 direct, ~290 total |
+Current workspace snapshot from this repository:
+
+| Terminal | Lines of code | Language | Packaging / dependencies |
+|----------|-------------:|:--------:|:------------------------:|
+| **handterm** | **~24,200** | Rust | 6 local workspace crates, 341 resolved Cargo packages |
 | alacritty | ~34,000 | Rust | ~100+ crates |
 | foot | ~55,000 | C | system libs only |
 | kitty | ~116,000 | C + Python | system libs + Python stdlib |
@@ -272,7 +274,8 @@ handterm bench
 **IPC / host control**
 - Unix socket remote control (`handterm @ <command>`)
 - Host window creation via `handterm open-window`
-- Commands: get-text, send-text, send-key, get-cursor, get-size, set-title, close
+- Core commands: get-text, send-text, send-key, send-key-event, send-ime-commit, get-cursor, get-size, set-title, close, ls
+- Host-specific commands: open-window, focus-window, list-windows
 
 ## Install
 
@@ -397,6 +400,7 @@ src/
 ## Development
 
 ```bash
+cargo check --workspace
 cargo test --workspace
 cargo run -- bench
 cargo run -- print-config

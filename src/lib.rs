@@ -29,6 +29,8 @@ pub mod input;
 pub mod ipc;
 #[cfg(feature = "standalone")]
 pub mod metrics;
+#[cfg(feature = "standalone")]
+pub mod native_scroll;
 pub mod platform;
 pub mod profiling;
 #[cfg(any(feature = "standalone", feature = "daemon-server"))]

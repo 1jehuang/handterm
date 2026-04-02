@@ -21,6 +21,7 @@ use crate::host_input::{
     SyntheticInputTarget, apply_synthetic_ime_commit, apply_synthetic_key_event,
 };
 use crate::ipc::{IpcAction, IpcServer, Request, Response};
+use crate::native_scroll::NativeScrollBridge;
 use crate::platform::{copy_to_clipboard, open_url, paste_from_clipboard};
 use crate::profiling::ProcessCpuTime;
 use crate::pty::PtyChild;
@@ -113,6 +114,7 @@ struct GpuWindowState {
     hot_until: Option<Instant>,
     next_hot_frame_at: Option<Instant>,
     smooth_scroll: SmoothScrollState,
+    native_scroll: Option<NativeScrollBridge>,
 }
 
 impl SyntheticInputTarget for GpuWindowState {
@@ -432,10 +434,26 @@ impl GpuApp {
         let before_terminal = Instant::now();
         let terminal = Terminal::new_with_scrollback(cols, rows, self.config.scrollback.lines);
         let terminal_ms = before_terminal.elapsed();
+        let id = self.next_window_id;
+        self.next_window_id += 1;
+        let native_scroll = NativeScrollBridge::new(id).ok();
+        let native_scroll_envs = native_scroll.as_ref().map(|bridge| bridge.child_envs(id));
+        let native_scroll_env_refs = native_scroll_envs
+            .as_ref()
+            .map(|envs| {
+                envs.iter()
+                    .map(|(key, value)| (*key, value.as_str()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let before_pty = Instant::now();
-        let pty =
-            PtyChild::spawn_default_shell_with_command(cols, rows, self.startup_command.as_deref())
-                .with_context(|| format!("failed to spawn PTY for {cols}x{rows} window"))?;
+        let pty = PtyChild::spawn_default_shell_with_command_and_env(
+            cols,
+            rows,
+            self.startup_command.as_deref(),
+            &native_scroll_env_refs,
+        )
+        .with_context(|| format!("failed to spawn PTY for {cols}x{rows} window"))?;
         let pty_ms = before_pty.elapsed();
         let pty_spawned_at = Instant::now();
 
@@ -469,8 +487,6 @@ impl GpuApp {
         let surface_total_ms = before_surface.elapsed();
         eprintln!("handterm: {}", renderer.surface_debug_summary());
         let stop = Arc::new(AtomicBool::new(false));
-        let id = self.next_window_id;
-        self.next_window_id += 1;
 
         let before_watcher = Instant::now();
         spawn_fd_watcher(
@@ -519,6 +535,7 @@ impl GpuApp {
                 hot_until: None,
                 next_hot_frame_at: None,
                 smooth_scroll: SmoothScrollState::default(),
+                native_scroll,
             },
         );
         if let Some(state) = self.windows.get(&winit_id) {
@@ -1062,6 +1079,21 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                         let (up, delta_rows) =
                             Self::wheel_delta_rows(&self.config, &delta, atlas.cell_height as f32);
                         let lines = delta_rows.ceil().max(1.0) as usize;
+                        if let Some(bridge) = state.native_scroll.as_mut()
+                            && let Some(pane) =
+                                bridge.hovered_pane(state.mouse_col, state.mouse_row)
+                            && bridge.send_scroll_delta(
+                                pane,
+                                if up {
+                                    -delta_rows.max(0.1)
+                                } else {
+                                    delta_rows.max(0.1)
+                                },
+                            )
+                        {
+                            Self::enter_hot_mode(state, Instant::now());
+                            return;
+                        }
                         if state.terminal.mouse_mode != crate::terminal::MouseMode::Off {
                             for _ in 0..lines {
                                 if let Some(bytes) = state.terminal.encode_mouse_scroll(

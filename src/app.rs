@@ -15,6 +15,7 @@ use crate::host_input::{
     SyntheticInputTarget, apply_synthetic_ime_commit, apply_synthetic_key_event,
 };
 use crate::ipc::{IpcAction, IpcServer, Request, Response};
+use crate::native_scroll::NativeScrollBridge;
 use crate::platform::{copy_to_clipboard, open_url, paste_from_clipboard};
 use crate::profiling::ProcessCpuTime;
 use crate::pty::PtyChild;
@@ -111,6 +112,7 @@ struct HostWindowState {
     watcher_stop: Arc<AtomicBool>,
     cpu_time_started: Option<ProcessCpuTime>,
     startup_timing: StartupTiming,
+    native_scroll: Option<NativeScrollBridge>,
 }
 
 impl SyntheticInputTarget for HostWindowState {
@@ -348,14 +350,28 @@ impl HandtermApp {
         let surface = Surface::new(&context, window.clone())
             .map_err(|e| anyhow::anyhow!("softbuffer surface should be created: {e}"))?;
         let terminal = Terminal::new_with_scrollback(cols, rows, self.config.scrollback.lines);
-        let before_pty = Instant::now();
-        let pty =
-            PtyChild::spawn_default_shell_with_command(cols, rows, self.startup_command.as_deref())
-                .context("pty should spawn")?;
-        let pty_spawned_at = Instant::now();
-        let stop = Arc::new(AtomicBool::new(false));
         let id = self.next_window_id;
         self.next_window_id += 1;
+        let native_scroll = NativeScrollBridge::new(id).ok();
+        let native_scroll_envs = native_scroll.as_ref().map(|bridge| bridge.child_envs(id));
+        let native_scroll_env_refs = native_scroll_envs
+            .as_ref()
+            .map(|envs| {
+                envs.iter()
+                    .map(|(key, value)| (*key, value.as_str()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let before_pty = Instant::now();
+        let pty = PtyChild::spawn_default_shell_with_command_and_env(
+            cols,
+            rows,
+            self.startup_command.as_deref(),
+            &native_scroll_env_refs,
+        )
+        .context("pty should spawn")?;
+        let pty_spawned_at = Instant::now();
+        let stop = Arc::new(AtomicBool::new(false));
 
         spawn_fd_watcher(
             &format!("handterm-pty-{id}"),
@@ -402,6 +418,7 @@ impl HandtermApp {
                     timing.mark_pty_spawned(pty_spawned_at);
                     timing
                 },
+                native_scroll,
             },
         );
         if let Some(state) = self.windows.get(&winit_id) {
@@ -933,6 +950,16 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                                 (pos.y > 0.0, (pos.y.abs() / ch).max(1.0) as usize)
                             }
                         };
+                        if let Some(bridge) = state.native_scroll.as_mut()
+                            && let Some(pane) =
+                                bridge.hovered_pane(state.mouse_col, state.mouse_row)
+                            && bridge.send_scroll_delta(
+                                pane,
+                                if up { -(lines as f32) } else { lines as f32 },
+                            )
+                        {
+                            return;
+                        }
                         if state.terminal.mouse_mode != crate::terminal::MouseMode::Off {
                             for _ in 0..lines {
                                 if let Some(bytes) = state.terminal.encode_mouse_scroll(

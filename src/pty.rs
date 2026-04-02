@@ -5,6 +5,8 @@ use nix::unistd::{Pid, execvp};
 use std::ffi::{CStr, CString};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 
+pub type ChildEnvVar<'a> = (&'a str, &'a str);
+
 pub struct PtyChild {
     master_fd: OwnedFd,
     _child_pid: Pid,
@@ -13,7 +15,7 @@ pub struct PtyChild {
 impl PtyChild {
     pub fn spawn_default_shell(columns: u16, rows: u16) -> Result<Self> {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        Self::spawn_shell(&shell, columns, rows)
+        Self::spawn_shell_with_env(&shell, columns, rows, &[])
     }
 
     pub fn spawn_default_shell_with_command(
@@ -21,15 +23,35 @@ impl PtyChild {
         rows: u16,
         command: Option<&str>,
     ) -> Result<Self> {
+        Self::spawn_default_shell_with_command_and_env(columns, rows, command, &[])
+    }
+
+    pub fn spawn_default_shell_with_command_and_env(
+        columns: u16,
+        rows: u16,
+        command: Option<&str>,
+        envs: &[ChildEnvVar<'_>],
+    ) -> Result<Self> {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
         match command.filter(|command| !command.trim().is_empty()) {
-            Some(command) => Self::spawn_shell_command(&shell, command, columns, rows),
-            None => Self::spawn_shell(&shell, columns, rows),
+            Some(command) => {
+                Self::spawn_shell_command_with_env(&shell, command, columns, rows, envs)
+            }
+            None => Self::spawn_shell_with_env(&shell, columns, rows, envs),
         }
     }
 
     pub fn spawn_shell(shell_path: &str, columns: u16, rows: u16) -> Result<Self> {
-        Self::spawn_shell_inner(shell_path, None, columns, rows)
+        Self::spawn_shell_with_env(shell_path, columns, rows, &[])
+    }
+
+    pub fn spawn_shell_with_env(
+        shell_path: &str,
+        columns: u16,
+        rows: u16,
+        envs: &[ChildEnvVar<'_>],
+    ) -> Result<Self> {
+        Self::spawn_shell_inner(shell_path, None, columns, rows, envs)
     }
 
     pub fn spawn_shell_command(
@@ -38,7 +60,17 @@ impl PtyChild {
         columns: u16,
         rows: u16,
     ) -> Result<Self> {
-        Self::spawn_shell_inner(shell_path, Some(command), columns, rows)
+        Self::spawn_shell_command_with_env(shell_path, command, columns, rows, &[])
+    }
+
+    pub fn spawn_shell_command_with_env(
+        shell_path: &str,
+        command: &str,
+        columns: u16,
+        rows: u16,
+        envs: &[ChildEnvVar<'_>],
+    ) -> Result<Self> {
+        Self::spawn_shell_inner(shell_path, Some(command), columns, rows, envs)
     }
 
     fn spawn_shell_inner(
@@ -46,6 +78,7 @@ impl PtyChild {
         command: Option<&str>,
         columns: u16,
         rows: u16,
+        envs: &[ChildEnvVar<'_>],
     ) -> Result<Self> {
         let ws = Winsize {
             ws_row: rows,
@@ -69,6 +102,11 @@ impl PtyChild {
                 unsafe {
                     std::env::set_var("TERM", "xterm-256color");
                     std::env::set_var("COLORTERM", "truecolor");
+                }
+                for (key, value) in envs {
+                    unsafe {
+                        std::env::set_var(key, value);
+                    }
                 }
                 let shell = CString::new(shell_path)
                     .with_context(|| format!("invalid shell path: {shell_path}"))?;

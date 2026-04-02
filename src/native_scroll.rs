@@ -305,6 +305,7 @@ pub fn window_env_key() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn pane_hit_testing_uses_cell_rect() {
@@ -332,5 +333,77 @@ mod tests {
         assert!((bridge.chat_residual - 0.4).abs() < f32::EPSILON);
         let _ = bridge.send_scroll_delta(PaneKind::Chat, 0.7);
         assert!(bridge.chat_residual >= 0.0 && bridge.chat_residual < 1.0);
+    }
+
+    #[test]
+    fn bridge_roundtrips_snapshot_and_scroll_command_over_socket() {
+        let mut bridge = NativeScrollBridge::new(999_992).expect("bridge should initialize");
+        let socket_path = bridge
+            .child_envs(999_992)
+            .into_iter()
+            .find_map(|(key, value)| (key == ENV_SOCKET).then_some(value))
+            .expect("socket env should be present");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut stream = loop {
+            match UnixStream::connect(&socket_path) {
+                Ok(stream) => break stream,
+                Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                Err(err) => panic!("failed to connect to native scroll socket: {err}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("read timeout should set");
+
+        let panes = vec![PaneState {
+            kind: PaneKind::Chat,
+            x: 1,
+            y: 2,
+            width: 8,
+            height: 5,
+            position: 3,
+            content_length: 20,
+            viewport_length: 5,
+        }];
+        write_line(
+            &mut stream,
+            &AppToHost::PaneSnapshot {
+                panes: panes.clone(),
+            },
+        )
+        .expect("snapshot write should succeed");
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline && bridge.hovered_pane(2, 3) != Some(PaneKind::Chat) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(bridge.hovered_pane(2, 3), Some(PaneKind::Chat));
+
+        assert!(bridge.send_scroll_delta(PaneKind::Chat, 2.0));
+        let command = read_host_command(&mut stream).expect("should read host scroll command");
+        assert_eq!(
+            command,
+            HostToApp::Scroll {
+                pane: PaneKind::Chat,
+                delta: 2,
+            }
+        );
+    }
+
+    fn read_host_command(stream: &mut UnixStream) -> Option<HostToApp> {
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 256];
+        loop {
+            let n = stream.read(&mut chunk).ok()?;
+            if n == 0 {
+                return None;
+            }
+            buffer.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
+                let line = &buffer[..pos];
+                return serde_json::from_slice(line).ok();
+            }
+        }
     }
 }

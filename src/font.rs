@@ -263,6 +263,14 @@ impl GlyphAtlas {
             }
         }
 
+        #[cfg(feature = "local-fonts")]
+        if let Some((index, glyph)) = self.rasterize_system_fallback_glyph(ch) {
+            self.glyphs.insert(ch, glyph);
+            #[cfg(feature = "local-fonts")]
+            self.glyph_sources.insert(ch, GlyphSource::Fallback(index));
+            return true;
+        }
+
         self.missing_glyphs.insert(ch);
         false
     }
@@ -692,8 +700,64 @@ impl GlyphAtlas {
                 } else {
                     None
                 }
+            })
+            .or_else(|| {
+                self.rasterize_system_fallback_glyph(ch)
+                    .map(|(_, glyph)| glyph)
             });
         glyph
+    }
+
+    #[cfg(feature = "local-fonts")]
+    fn rasterize_system_fallback_glyph(&mut self, ch: u32) -> Option<(usize, RasterizedGlyph)> {
+        self.ensure_fallback_faces_loaded();
+        if let Some((index, glyph)) = self
+            .fallback_faces
+            .iter()
+            .enumerate()
+            .filter_map(|(index, face)| {
+                face.as_ref()
+                    .and_then(|face| rasterize_fallback_glyph(face, ch))
+                    .map(|glyph| (index, glyph))
+            })
+            .next()
+        {
+            return Some((index, glyph));
+        }
+
+        let index = self.ensure_system_fallback_face_for_char(ch)?;
+        self.fallback_faces
+            .get(index)
+            .and_then(|face| face.as_ref())
+            .and_then(|face| rasterize_fallback_glyph(face, ch))
+            .map(|glyph| (index, glyph))
+    }
+
+    #[cfg(feature = "local-fonts")]
+    fn ensure_system_fallback_face_for_char(&mut self, ch: u32) -> Option<usize> {
+        let path = find_system_fallback_font_path(ch)?;
+        if path == self.font_path {
+            return None;
+        }
+        if let Some(index) = self
+            .fallback_paths
+            .iter()
+            .position(|existing| existing == &path)
+        {
+            return Some(index);
+        }
+
+        let index = self.fallback_paths.len();
+        self.fallback_paths.push(path.clone());
+        if self.fallback_loaded {
+            self.fallback_faces
+                .push(load_fallback_face(&path, self.font_size_pt, self.dpi));
+        }
+        #[cfg(feature = "ligatures")]
+        if self.fallback_rb_loaded {
+            self.fallback_rb_faces.push(init_rustybuzz(&path));
+        }
+        Some(index)
     }
 
     #[cfg(feature = "ligatures")]
@@ -1250,6 +1314,27 @@ fn find_emoji_font_paths() -> Result<Vec<String>> {
     Ok(paths)
 }
 
+#[cfg(feature = "local-fonts")]
+fn find_system_fallback_font_path(ch: u32) -> Option<String> {
+    let pattern = format!(":charset={ch:x}");
+    let output = std::process::Command::new("fc-match")
+        .arg(pattern)
+        .arg("-f")
+        .arg("%{file}\n")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let path = String::from_utf8(output.stdout).ok()?;
+    let path = path.lines().next()?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some(path.to_string())
+}
+
 fn should_try_emoji_fallback(ch: u32) -> bool {
     matches!(
         ch,
@@ -1650,6 +1735,30 @@ mod tests {
             buf.iter().any(|&pixel| pixel != 0),
             "grapheme fallback should draw visible pixels"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "local-fonts")]
+    fn general_unicode_symbol_uses_system_fallback_font() {
+        let mut atlas = GlyphAtlas::with_family("JetBrainsMono Nerd Font Light", 14.0)
+            .or_else(|_| GlyphAtlas::new(14.0))
+            .expect("should load a font atlas");
+
+        if atlas
+            .primary_face
+            .as_ref()
+            .and_then(|face| face.get_char_index('◐' as usize))
+            .is_some()
+        {
+            return;
+        }
+
+        assert!(atlas.ensure_glyph('◐' as u32));
+        let glyph = atlas
+            .get_glyph('◐' as u32)
+            .expect("fallback glyph should cache");
+        assert!(glyph.width > 0);
+        assert!(glyph.height > 0);
     }
 
     #[test]

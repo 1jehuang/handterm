@@ -95,6 +95,10 @@ pub fn render_terminal_to_buffer(
     let cell_h = atlas.cell_height;
 
     for row in 0..grid.rows {
+        let row_dirty = full_redraw || grid.row_has_dirty_cells(row);
+        if !row_dirty && !(show_cursor && row == cursor_row) {
+            continue;
+        }
         for col in 0..grid.cols {
             let is_cursor = show_cursor && row == cursor_row && col == cursor_col;
 
@@ -128,9 +132,7 @@ pub fn render_terminal_to_buffer(
         let mut run_attrs: u8 = 0;
 
         for row in 0..grid.rows {
-            let any_dirty = full_redraw
-                || (0..grid.cols).any(|c| grid.is_cell_dirty(row, c))
-                || (show_cursor && row == cursor_row);
+            let any_dirty = full_redraw || grid.row_has_dirty_cells(row) || (show_cursor && row == cursor_row);
             if !any_dirty {
                 continue;
             }
@@ -280,6 +282,10 @@ pub fn render_terminal_to_buffer(
     #[cfg(not(feature = "ligatures"))]
     {
         for row in 0..grid.rows {
+            let row_dirty = full_redraw || grid.row_has_dirty_cells(row);
+            if !row_dirty && !(show_cursor && row == cursor_row) {
+                continue;
+            }
             for col in 0..grid.cols {
                 let is_cursor = show_cursor && row == cursor_row && col == cursor_col;
 
@@ -425,6 +431,9 @@ fn draw_alpha_rect(buffer: &mut [u32], buf_w: usize, buf_h: usize, rect: AlphaRe
 
 fn has_complex_dirty_cells(grid: &crate::grid::Grid) -> bool {
     for row in 0..grid.rows {
+        if !grid.row_has_dirty_cells(row) {
+            continue;
+        }
         for col in 0..grid.cols {
             if !grid.is_cell_dirty(row, col) {
                 continue;

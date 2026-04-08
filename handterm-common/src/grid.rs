@@ -398,6 +398,41 @@ impl Grid {
         (self.dirty[word] >> bit) & 1 != 0
     }
 
+    #[inline]
+    pub fn row_has_dirty_cells(&self, row: usize) -> bool {
+        if self.all_dirty {
+            return true;
+        }
+        if row >= self.rows {
+            return false;
+        }
+
+        let phys = self.physical_row(row);
+        let start = phys * self.cols;
+        let end = start + self.cols;
+        let first_word = start / 64;
+        let last_word = (end - 1) / 64;
+
+        if first_word == last_word {
+            let start_bit = start % 64;
+            let end_bit = (end - 1) % 64;
+            let mask = ((!0u64) << start_bit) & ((!0u64) >> (63 - end_bit));
+            return self.dirty[first_word] & mask != 0;
+        }
+
+        let start_bit = start % 64;
+        if self.dirty[first_word] & (!0u64 << start_bit) != 0 {
+            return true;
+        }
+        for word in first_word + 1..last_word {
+            if self.dirty[word] != 0 {
+                return true;
+            }
+        }
+        let end_bit = (end - 1) % 64;
+        self.dirty[last_word] & (!0u64 >> (63 - end_bit)) != 0
+    }
+
     #[allow(dead_code)]
     pub fn has_any_dirty(&self) -> bool {
         self.all_dirty || self.dirty.iter().any(|&w| w != 0)
@@ -1577,5 +1612,35 @@ mod tests {
                 "unexpected grapheme storage for {sample}"
             );
         }
+    }
+
+    #[test]
+    fn row_has_dirty_cells_tracks_cleared_and_marked_rows() {
+        let mut g = Grid::new(8, 4, [0xff; 3], [0; 3]);
+
+        assert!(g.row_has_dirty_cells(0));
+        assert!(g.row_has_dirty_cells(3));
+
+        g.clear_dirty();
+        for row in 0..g.rows {
+            assert!(!g.row_has_dirty_cells(row), "row {row} should be clean");
+        }
+
+        g.mark_cell_dirty(2, 5);
+        assert!(!g.row_has_dirty_cells(0));
+        assert!(!g.row_has_dirty_cells(1));
+        assert!(g.row_has_dirty_cells(2));
+        assert!(!g.row_has_dirty_cells(3));
+    }
+
+    #[test]
+    fn row_has_dirty_cells_handles_rows_crossing_dirty_word_boundaries() {
+        let mut g = Grid::new(40, 3, [0xff; 3], [0; 3]);
+        g.clear_dirty();
+
+        g.mark_cell_dirty(1, 39);
+        assert!(!g.row_has_dirty_cells(0));
+        assert!(g.row_has_dirty_cells(1));
+        assert!(!g.row_has_dirty_cells(2));
     }
 }

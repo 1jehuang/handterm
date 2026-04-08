@@ -140,8 +140,7 @@ impl GlyphAtlas {
 
         let face = lib.new_face(path, 0).context("failed to load font face")?;
 
-        face.set_char_size((font_size_pt * 64.0) as isize, 0, dpi, 0)
-            .context("failed to set char size")?;
+        configure_face_size(&face, font_size_pt, dpi)?;
 
         let metrics = face.size_metrics().context("no size metrics")?;
         let cell_height = (metrics.height >> 6) as usize;
@@ -896,9 +895,42 @@ fn rasterize_fallback_glyph(face: &freetype::Face, ch: u32) -> Option<Rasterized
 fn load_fallback_face(path: &str, font_size_pt: f64, dpi: u32) -> Option<Face> {
     let lib = freetype::Library::init().ok()?;
     let face = lib.new_face(path, 0).ok()?;
-    face.set_char_size((font_size_pt * 64.0) as isize, 0, dpi, 0)
-        .ok()?;
+    configure_face_size(&face, font_size_pt, dpi).ok()?;
     Some(face)
+}
+
+#[cfg(feature = "local-fonts")]
+fn configure_face_size(face: &freetype::Face, font_size_pt: f64, dpi: u32) -> Result<()> {
+    if face.has_fixed_sizes() {
+        let raw = face.raw();
+        let count = raw.num_fixed_sizes.max(0) as usize;
+        if count > 0 && !raw.available_sizes.is_null() {
+            let target_px = (font_size_pt * f64::from(dpi) / 72.0).max(1.0);
+            let mut best_index = 0usize;
+            let mut best_error = f64::INFINITY;
+
+            for index in 0..count {
+                let strike = unsafe { *raw.available_sizes.add(index) };
+                let strike_px = if strike.y_ppem > 0 {
+                    strike.y_ppem as f64 / 64.0
+                } else {
+                    f64::from(strike.height.max(1))
+                };
+                let error = (strike_px - target_px).abs();
+                if error < best_error {
+                    best_error = error;
+                    best_index = index;
+                }
+            }
+
+            face.select_size(best_index as i32)
+                .context("failed to select fixed-size font strike")?;
+            return Ok(());
+        }
+    }
+
+    face.set_char_size((font_size_pt * 64.0) as isize, 0, dpi, 0)
+        .context("failed to set char size")
 }
 
 #[cfg(feature = "local-fonts")]
@@ -1275,8 +1307,7 @@ fn measure_font_metrics_from_path(
 ) -> Result<FontBootstrapMetrics> {
     let lib = freetype::Library::init().context("failed to init freetype")?;
     let face = lib.new_face(path, 0).context("failed to load font face")?;
-    face.set_char_size((font_size_pt * 64.0) as isize, 0, dpi, 0)
-        .context("failed to set char size")?;
+    configure_face_size(&face, font_size_pt, dpi)?;
 
     let metrics = face.size_metrics().context("no size metrics")?;
     let cell_height = (metrics.height >> 6) as usize;
@@ -1867,6 +1898,54 @@ mod tests {
             "missing codepoint should not resolve through .notdef"
         );
         assert!(atlas.get_glyph(0x10FFFD).is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "local-fonts")]
+    fn configured_font_resolves_emoji_samples_at_multiple_dpis() {
+        for dpi in [96u32, 144, 217] {
+            let mut atlas = GlyphAtlas::with_family_dpi("JetBrainsMono Nerd Font Light", 11.0, dpi)
+                .or_else(|_| GlyphAtlas::new_with_dpi(11.0, dpi))
+                .expect("should load configured font atlas");
+
+            for ch in ['😀', '🪸', '🫎'] {
+                assert!(
+                    atlas.ensure_glyph(ch as u32),
+                    "single-codepoint emoji {:?} should resolve at dpi {}",
+                    ch,
+                    dpi,
+                );
+                let glyph = atlas
+                    .get_glyph(ch as u32)
+                    .expect("resolved emoji glyph should be cached");
+                assert!(glyph.width > 0, "emoji {:?} should have width at dpi {}", ch, dpi);
+                assert!(glyph.height > 0, "emoji {:?} should have height at dpi {}", ch, dpi);
+            }
+
+            for grapheme in ["🐦‍⬛", "❤️", "👍🏻", "1️⃣", "🇺🇸", "👨‍💻"] {
+                assert!(
+                    atlas.ensure_grapheme(grapheme),
+                    "grapheme {:?} should resolve at dpi {}",
+                    grapheme,
+                    dpi,
+                );
+                let glyph = atlas
+                    .get_grapheme_glyph(grapheme)
+                    .expect("resolved grapheme glyph should be cached");
+                assert!(
+                    glyph.width > 0,
+                    "grapheme {:?} should have width at dpi {}",
+                    grapheme,
+                    dpi,
+                );
+                assert!(
+                    glyph.height > 0,
+                    "grapheme {:?} should have height at dpi {}",
+                    grapheme,
+                    dpi,
+                );
+            }
+        }
     }
 
     #[test]

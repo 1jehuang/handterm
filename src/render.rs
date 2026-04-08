@@ -642,9 +642,61 @@ mod tests {
         EMOJI_AND_SHADE_TRANSCRIPT, FISH_STARTUP_TRANSCRIPT, STARSHIP_PROMPT_TRANSCRIPT,
         TUI_HELP_OVERLAY_TRANSCRIPT,
     };
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
 
     fn new_atlas(config: &AppConfig) -> GlyphAtlas {
         GlyphAtlas::new(config.style.font_size).expect("should load a monospace font for rendering")
+    }
+
+    fn new_atlas_with_dpi(config: &AppConfig, dpi: u32) -> GlyphAtlas {
+        GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, dpi)
+            .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, dpi))
+            .expect("should load a monospace font atlas for requested dpi")
+    }
+
+    fn extract_cell_pixels(
+        renderer: &OffscreenRenderer,
+        col: usize,
+        row: usize,
+        cell_w: usize,
+        cell_h: usize,
+    ) -> Vec<u32> {
+        let mut out = Vec::with_capacity(cell_w * cell_h);
+        let x0 = col * cell_w;
+        let y0 = row * cell_h;
+        for y in y0..(y0 + cell_h).min(renderer.height) {
+            let row_start = y * renderer.width;
+            out.extend_from_slice(
+                &renderer.pixels[row_start + x0..row_start + (x0 + cell_w).min(renderer.width)],
+            );
+        }
+        out
+    }
+
+    fn cell_region_has_non_bg(
+        renderer: &OffscreenRenderer,
+        col: usize,
+        row: usize,
+        span_cols: usize,
+        cell_w: usize,
+        cell_h: usize,
+        bg: u32,
+    ) -> bool {
+        let x0 = col * cell_w;
+        let x1 = ((col + span_cols.max(1)) * cell_w).min(renderer.width);
+        let y0 = row * cell_h;
+        let y1 = ((row + 1) * cell_h).min(renderer.height);
+        for y in y0..y1 {
+            let row_start = y * renderer.width;
+            if renderer.pixels[row_start + x0..row_start + x1]
+                .iter()
+                .any(|&pixel| pixel != bg)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     fn replay_chunks_match_full_redraw(
@@ -938,5 +990,93 @@ mod tests {
         full.render(&mut terminal, &mut atlas, &config);
 
         assert_eq!(presented, full.pixels);
+    }
+
+    #[test]
+    #[cfg(feature = "local-fonts")]
+    fn configured_font_emoji_probe_draws_pixels_at_high_dpi() {
+        let config = AppConfig::default();
+        let sample = "😀 🪸 🫎 🐦‍⬛ ❤️ 👍🏻 1️⃣ 🇺🇸 👨‍💻";
+
+        for dpi in [96u32, 144, 217] {
+            let mut atlas = new_atlas_with_dpi(&config, dpi);
+            let mut terminal = Terminal::new(32, 2);
+            terminal.cursor_visible = false;
+            terminal.process(sample.as_bytes());
+            let mut renderer = OffscreenRenderer::new(terminal.cols, terminal.rows, &atlas);
+            renderer.render(&mut terminal, &mut atlas, &config);
+            let bg = config.style.background.as_u32_rgb();
+
+            let mut col = 0usize;
+            for grapheme in UnicodeSegmentation::graphemes(sample, true) {
+                let cells = UnicodeWidthStr::width(grapheme).clamp(1, 2);
+                if grapheme != " " {
+                    assert!(
+                        cell_region_has_non_bg(
+                            &renderer,
+                            col,
+                            0,
+                            cells,
+                            atlas.cell_width,
+                            atlas.cell_height,
+                            bg,
+                        ),
+                        "grapheme {:?} rendered no visible pixels at dpi {}",
+                        grapheme,
+                        dpi,
+                    );
+                }
+                col += cells;
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "local-fonts")]
+    fn digit_cells_are_stable_with_neighbors_at_high_dpi() {
+        let config = AppConfig::default();
+        let sequence = "0123456789";
+
+        for dpi in [96u32, 144, 217] {
+            let mut atlas = new_atlas_with_dpi(&config, dpi);
+            let mut seq_terminal = Terminal::new(sequence.len() as u16, 1);
+            seq_terminal.cursor_visible = false;
+            seq_terminal.process(sequence.as_bytes());
+            let mut seq_renderer = OffscreenRenderer::new(seq_terminal.cols, seq_terminal.rows, &atlas);
+            seq_renderer.render(&mut seq_terminal, &mut atlas, &config);
+
+            for (idx, ch) in sequence.chars().enumerate() {
+                let isolated = format!(" {} ", ch);
+                let mut isolated_terminal = Terminal::new(3, 1);
+                isolated_terminal.cursor_visible = false;
+                isolated_terminal.process(isolated.as_bytes());
+                let mut isolated_renderer = OffscreenRenderer::new(
+                    isolated_terminal.cols,
+                    isolated_terminal.rows,
+                    &atlas,
+                );
+                isolated_renderer.render(&mut isolated_terminal, &mut atlas, &config);
+
+                assert_eq!(
+                    extract_cell_pixels(
+                        &isolated_renderer,
+                        1,
+                        0,
+                        atlas.cell_width,
+                        atlas.cell_height,
+                    ),
+                    extract_cell_pixels(
+                        &seq_renderer,
+                        idx,
+                        0,
+                        atlas.cell_width,
+                        atlas.cell_height,
+                    ),
+                    "digit {:?} changed appearance in sequence context at dpi {}",
+                    ch,
+                    dpi,
+                );
+            }
+        }
     }
 }

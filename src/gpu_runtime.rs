@@ -2064,8 +2064,19 @@ mod tests {
         chunks: &[&[u8]],
         per_step_assert: impl Fn(&Terminal, usize),
     ) {
+        assert_gpu_framebuffer_matches_cpu_with_dpi(cols, rows, 96, chunks, per_step_assert);
+    }
+
+    fn assert_gpu_framebuffer_matches_cpu_with_dpi(
+        cols: u16,
+        rows: u16,
+        dpi: u32,
+        chunks: &[&[u8]],
+        per_step_assert: impl Fn(&Terminal, usize),
+    ) {
         let config = AppConfig::default();
-        let mut atlas = GlyphAtlas::new(config.style.font_size)
+        let mut atlas = GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, dpi)
+            .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, dpi))
             .expect("should load font atlas for GPU framebuffer parity");
         let mut terminal = Terminal::new(cols, rows);
         let mut cpu = OffscreenRenderer::new(cols, rows, &atlas);
@@ -2449,6 +2460,43 @@ mod tests {
                 assert_eq!(terminal.grid.cell_char(3, 48), '󰌘');
             }
         });
+    }
+
+    #[test]
+    fn gpu_framebuffer_matches_cpu_for_generic_emoji_probe_at_high_dpi() {
+        let chunks: &[&[u8]] = &[
+            "A🪸B A🫠B A🫡B\r\n".as_bytes(),
+            "A🩷B A😀B A❤️B\r\n".as_bytes(),
+            "A👨‍💻B A🇺🇸B A👍🏻B A1️⃣B".as_bytes(),
+        ];
+
+        for dpi in [144u32, 217] {
+            assert_gpu_framebuffer_matches_cpu_with_dpi(32, 4, dpi, chunks, |terminal, idx| {
+                if idx == chunks.len() - 1 {
+                    assert_eq!(terminal.grid.cell_char(0, 3), 'B');
+                    assert_eq!(terminal.grid.cell_char(1, 3), 'B');
+                    assert_eq!(terminal.grid.cell_char(2, 3), 'B');
+                    assert_eq!(terminal.grid.cell_grapheme_at(1, 11), Some("❤️"));
+                    assert_eq!(terminal.grid.cell_grapheme_at(2, 1), Some("👨‍💻"));
+                    assert_eq!(terminal.grid.cell_grapheme_at(2, 6), Some("🇺🇸"));
+                    assert_eq!(terminal.grid.cell_grapheme_at(2, 11), Some("👍🏻"));
+                    assert_eq!(terminal.grid.cell_grapheme_at(2, 16), Some("1️⃣"));
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn gpu_framebuffer_matches_cpu_for_digit_probe_at_high_dpi() {
+        let chunks: &[&[u8]] = &[
+            "0123456789\r\n".as_bytes(),
+            "9876543210\r\n".as_bytes(),
+            "1111111111 0000000000".as_bytes(),
+        ];
+
+        for dpi in [144u32, 217] {
+            assert_gpu_framebuffer_matches_cpu_with_dpi(24, 4, dpi, chunks, |_terminal, _idx| {});
+        }
     }
 
     #[test]

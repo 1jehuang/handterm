@@ -100,6 +100,40 @@ pub fn handle_ipc_request(terminal: &mut Terminal, req: &Request) -> (Response, 
                 IpcAction::None,
             )
         }
+        "apply-scroll-delta" => {
+            let delta_rows = req
+                .args
+                .as_object()
+                .and_then(|o| o.get("delta_rows"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let steps = delta_rows.abs().ceil() as usize;
+            let max = terminal.grid.scrollback_len();
+            if delta_rows > 0.0 {
+                terminal.grid.scroll_offset = (terminal.grid.scroll_offset + steps).min(max);
+            } else {
+                terminal.grid.scroll_offset = terminal.grid.scroll_offset.saturating_sub(steps);
+            }
+            (
+                Response::ok(serde_json::json!({
+                    "backend": "terminal",
+                    "scroll_offset": terminal.grid.scroll_offset,
+                    "scrollback_len": terminal.grid.scrollback_len(),
+                    "smooth_supported": false,
+                })),
+                IpcAction::None,
+            )
+        }
+        "get-scroll-state" => (
+            Response::ok(serde_json::json!({
+                "backend": "terminal",
+                "scroll_offset": terminal.grid.scroll_offset,
+                "scrollback_len": terminal.grid.scrollback_len(),
+                "rows": terminal.grid.rows,
+                "smooth_supported": false,
+            })),
+            IpcAction::None,
+        ),
         "get-size" => (
             Response::ok(serde_json::json!({
                 "cols": terminal.cols,
@@ -134,7 +168,7 @@ pub fn handle_ipc_request(terminal: &mut Terminal, req: &Request) -> (Response, 
                 "commands": [
                     "get-text", "send-text", "send-key",
                     "send-key-event", "send-ime-commit",
-                    "get-cursor", "get-size", "set-title",
+                    "get-cursor", "apply-scroll-delta", "get-scroll-state", "get-size", "set-title",
                     "close", "ls"
                 ]
             })),

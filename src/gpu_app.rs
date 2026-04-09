@@ -318,7 +318,7 @@ impl GpuApp {
             MouseScrollDelta::PixelDelta(pos) => {
                 let ch = cell_height.max(1.0) as f64;
                 let rows = if config.scrollback.smooth {
-                    (pos.y.abs() / ch) as f32
+                    (pos.y.abs() as f32) / cell_height.max(1.0)
                 } else {
                     (pos.y.abs() / ch).max(1.0) as f32
                 };
@@ -632,6 +632,57 @@ impl GpuApp {
                 IpcAction::None,
             );
         };
+
+        if req.cmd == "get-scroll-state" {
+            return (
+                Response::ok(serde_json::json!({
+                    "backend": "gpu",
+                    "window_id": target_id,
+                    "scroll_offset": state.terminal.grid.scroll_offset,
+                    "scrollback_len": state.terminal.grid.scrollback_len(),
+                    "rows": state.terminal.grid.rows,
+                    "smooth_supported": true,
+                    "smooth_target_rows": state.smooth_scroll.target_rows,
+                    "smooth_display_rows": state.smooth_scroll.display_rows,
+                    "smooth_animating": state.smooth_scroll.is_animating(),
+                    "native_scroll_connected": state.native_scroll.as_ref().map(|_| true).unwrap_or(false),
+                })),
+                IpcAction::None,
+            );
+        }
+
+        if req.cmd == "apply-scroll-delta" {
+            let delta_rows = req
+                .args
+                .as_object()
+                .and_then(|o| o.get("delta_rows"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0) as f32;
+            if delta_rows > 0.0 {
+                Self::enter_hot_mode(state, Instant::now());
+                Self::apply_scrollback_delta(state, delta_rows, true);
+            } else if delta_rows < 0.0 {
+                Self::enter_hot_mode(state, Instant::now());
+                Self::apply_scrollback_delta(state, -delta_rows, false);
+            }
+            state.scheduler.mark_redraw_needed();
+            state.renderer.window.request_redraw();
+            return (
+                Response::ok(serde_json::json!({
+                    "backend": "gpu",
+                    "window_id": target_id,
+                    "scroll_offset": state.terminal.grid.scroll_offset,
+                    "scrollback_len": state.terminal.grid.scrollback_len(),
+                    "rows": state.terminal.grid.rows,
+                    "smooth_supported": true,
+                    "smooth_target_rows": state.smooth_scroll.target_rows,
+                    "smooth_display_rows": state.smooth_scroll.display_rows,
+                    "smooth_animating": state.smooth_scroll.is_animating(),
+                })),
+                IpcAction::None,
+            );
+        }
+
         handle_ipc_request(&mut state.terminal, req)
     }
 
@@ -721,6 +772,41 @@ impl GpuApp {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winit::dpi::PhysicalPosition;
+
+    #[test]
+    fn smooth_pixel_wheel_delta_preserves_fractional_rows() {
+        let config = AppConfig::default();
+        let (_up, delta_rows) = GpuApp::wheel_delta_rows(
+            &config,
+            &MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 4.0)),
+            16.0,
+        );
+
+        assert!(
+            delta_rows > 0.0 && delta_rows < 1.0,
+            "expected fractional smooth scroll delta, got {delta_rows}"
+        );
+    }
+
+    #[test]
+    fn non_smooth_pixel_wheel_delta_still_steps_at_least_one_row() {
+        let mut config = AppConfig::default();
+        config.scrollback.smooth = false;
+
+        let (_up, delta_rows) = GpuApp::wheel_delta_rows(
+            &config,
+            &MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 4.0)),
+            16.0,
+        );
+
+        assert!(delta_rows >= 1.0);
     }
 }
 

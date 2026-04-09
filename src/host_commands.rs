@@ -75,6 +75,8 @@ pub fn host_ls_response(include_host_commands: bool) -> Response {
         "send-key-event",
         "send-ime-commit",
         "get-cursor",
+        "apply-scroll-delta",
+        "get-scroll-state",
         "get-size",
         "set-title",
         "close",

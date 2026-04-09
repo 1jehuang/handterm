@@ -810,6 +810,46 @@ mod tests {
         }
     }
 
+    fn mark_cells_for_glyph_pixels(
+        visible: &mut [bool],
+        glyph: crate::font::GlyphData<'_>,
+        origin: (usize, usize),
+        baseline: usize,
+        grid_size: (usize, usize),
+        cell_size: (usize, usize),
+    ) {
+        let (cell_col, cell_row) = origin;
+        let (cell_w, cell_h) = cell_size;
+        let px_x = cell_col * cell_w;
+        let px_y = cell_row * cell_h;
+        let origin_y = px_y as i32 + (cell_h as i32 - baseline as i32);
+        let glyph_top = origin_y - glyph.bearing_y;
+        let glyph_left = px_x as i32 + glyph.bearing_x;
+
+        for gy in 0..glyph.height {
+            let sy = glyph_top + gy as i32;
+            if sy < 0 {
+                continue;
+            }
+            for gx in 0..glyph.width {
+                let sx = glyph_left + gx as i32;
+                if sx < 0 {
+                    continue;
+                }
+                let non_transparent = match glyph.format {
+                    crate::font::GlyphFormat::Alpha => glyph.pixels[gy * glyph.width + gx] != 0,
+                    crate::font::GlyphFormat::Rgba => {
+                        glyph.pixels[(gy * glyph.width + gx) * 4 + 3] != 0
+                    }
+                };
+                if !non_transparent {
+                    continue;
+                }
+                mark_cells_for_pixel_rect(visible, grid_size, (sx, sy, 1, 1), cell_size);
+            }
+        }
+    }
+
     fn assert_gpu_visible_cells_match_cpu_framebuffer(terminal: &mut Terminal) {
         let config = AppConfig::default();
         let mut atlas = new_atlas(&config);
@@ -865,15 +905,12 @@ mod tests {
                 };
 
                 if let Some(glyph) = glyph {
-                    let px_x = ci.col * atlas.cell_width;
-                    let px_y = ci.row * atlas.cell_height;
-                    let origin_y = px_y as i32 + (atlas.cell_height as i32 - atlas.baseline as i32);
-                    let glyph_top = origin_y - glyph.bearing_y;
-                    let glyph_left = px_x as i32 + glyph.bearing_x;
-                    mark_cells_for_pixel_rect(
+                    mark_cells_for_glyph_pixels(
                         &mut gpu_visible,
+                        glyph,
+                        (ci.col, ci.row),
+                        atlas.baseline,
                         (cols, rows),
-                        (glyph_left, glyph_top, glyph.width, glyph.height),
                         (atlas.cell_width, atlas.cell_height),
                     );
                 }

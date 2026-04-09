@@ -500,6 +500,51 @@ impl HandtermApp {
                 IpcAction::None,
             );
         };
+
+        if req.cmd == "get-scroll-state" {
+            return (
+                Response::ok(serde_json::json!({
+                    "backend": "cpu",
+                    "window_id": target_id,
+                    "scroll_offset": state.terminal.grid.scroll_offset,
+                    "scrollback_len": state.terminal.grid.scrollback_len(),
+                    "rows": state.terminal.grid.rows,
+                    "smooth_supported": false,
+                    "native_scroll_connected": state.native_scroll.as_ref().map(|_| true).unwrap_or(false),
+                })),
+                IpcAction::None,
+            );
+        }
+
+        if req.cmd == "apply-scroll-delta" {
+            let delta_rows = req
+                .args
+                .as_object()
+                .and_then(|o| o.get("delta_rows"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let steps = delta_rows.abs().ceil() as usize;
+            let max = state.terminal.grid.scrollback_len();
+            if delta_rows > 0.0 {
+                state.terminal.grid.scroll_offset = (state.terminal.grid.scroll_offset + steps).min(max);
+            } else {
+                state.terminal.grid.scroll_offset = state.terminal.grid.scroll_offset.saturating_sub(steps);
+            }
+            state.scheduler.mark_redraw_needed();
+            state.window.request_redraw();
+            return (
+                Response::ok(serde_json::json!({
+                    "backend": "cpu",
+                    "window_id": target_id,
+                    "scroll_offset": state.terminal.grid.scroll_offset,
+                    "scrollback_len": state.terminal.grid.scrollback_len(),
+                    "rows": state.terminal.grid.rows,
+                    "smooth_supported": false,
+                })),
+                IpcAction::None,
+            );
+        }
+
         handle_ipc_request(&mut state.terminal, req)
     }
 

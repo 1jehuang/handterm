@@ -561,6 +561,10 @@ fn encode_kitty_named_key(
     report_events: bool,
     event_kind: KeyEventKind,
 ) -> Option<Vec<u8>> {
+    if matches!(key, Key::Named(NamedKey::Backspace)) && modifiers.control_key() {
+        return None;
+    }
+
     let mods = kitty_modifier_field(modifiers, report_events, event_kind);
     let letter_form = |prefix_o: bool, suffix: char| {
         if let Some(mods) = mods.clone() {
@@ -894,6 +898,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bytes, b"\r");
+    }
+
+    #[test]
+    fn kitty_ctrl_backspace_falls_back_to_legacy_ctrl_h() {
+        let bytes = key_to_bytes(
+            &Key::Named(NamedKey::Backspace),
+            None,
+            None,
+            false,
+            ModifiersState::CONTROL,
+            KITTY_KBD_DISAMBIGUATE | KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"\x08");
+    }
+
+    #[test]
+    fn kitty_alt_ctrl_backspace_keeps_escape_prefix() {
+        let bytes = key_to_bytes(
+            &Key::Named(NamedKey::Backspace),
+            None,
+            None,
+            false,
+            ModifiersState::CONTROL | ModifiersState::ALT,
+            KITTY_KBD_DISAMBIGUATE | KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"\x1b\x08");
     }
 
     #[test]

@@ -248,11 +248,20 @@ impl GlyphAtlas {
 
         #[cfg(feature = "local-fonts")]
         if should_try_emoji_fallback(ch) {
+            let span_cells = codepoint_span_cells(ch);
             self.ensure_fallback_faces_loaded();
             for (index, face) in self.fallback_faces.iter().enumerate() {
                 if let Some(glyph) = face
                     .as_ref()
-                    .and_then(|face| rasterize_fallback_glyph(face, ch))
+                    .and_then(|face| {
+                        rasterize_fallback_glyph(
+                            face,
+                            ch,
+                            self.cell_width,
+                            self.cell_height,
+                            span_cells,
+                        )
+                    })
                 {
                     self.glyphs.insert(ch, glyph);
                     #[cfg(feature = "local-fonts")]
@@ -674,12 +683,21 @@ impl GlyphAtlas {
                 .fallback_faces
                 .get(index)
                 .and_then(|face| face.as_ref())
-                .and_then(|face| rasterize_fallback_glyph(face, ch)),
+                .and_then(|face| {
+                    rasterize_fallback_glyph(
+                        face,
+                        ch,
+                        self.cell_width,
+                        self.cell_height,
+                        codepoint_span_cells(ch),
+                    )
+                }),
         }
     }
 
     fn rasterize_grapheme_fallback(&mut self, grapheme: &str) -> Option<RasterizedGlyph> {
         let ch = grapheme.chars().find(|ch| !ch.is_control())? as u32;
+        let span_cells = grapheme_span_cells(grapheme);
 
         let glyph = procedural_glyph(ch, self.cell_width, self.cell_height, self.baseline);
         #[cfg(feature = "local-fonts")]
@@ -695,7 +713,15 @@ impl GlyphAtlas {
                     self.fallback_faces
                         .iter()
                         .filter_map(|face| face.as_ref())
-                        .find_map(|face| rasterize_fallback_glyph(face, ch))
+                        .find_map(|face| {
+                            rasterize_fallback_glyph(
+                                face,
+                                ch,
+                                self.cell_width,
+                                self.cell_height,
+                                span_cells,
+                            )
+                        })
                 } else {
                     None
                 }
@@ -710,13 +736,22 @@ impl GlyphAtlas {
     #[cfg(feature = "local-fonts")]
     fn rasterize_system_fallback_glyph(&mut self, ch: u32) -> Option<(usize, RasterizedGlyph)> {
         self.ensure_fallback_faces_loaded();
+        let span_cells = codepoint_span_cells(ch);
         if let Some((index, glyph)) = self
             .fallback_faces
             .iter()
             .enumerate()
             .filter_map(|(index, face)| {
                 face.as_ref()
-                    .and_then(|face| rasterize_fallback_glyph(face, ch))
+                    .and_then(|face| {
+                        rasterize_fallback_glyph(
+                            face,
+                            ch,
+                            self.cell_width,
+                            self.cell_height,
+                            span_cells,
+                        )
+                    })
                     .map(|glyph| (index, glyph))
             })
             .next()
@@ -728,7 +763,15 @@ impl GlyphAtlas {
         self.fallback_faces
             .get(index)
             .and_then(|face| face.as_ref())
-            .and_then(|face| rasterize_fallback_glyph(face, ch))
+            .and_then(|face| {
+                rasterize_fallback_glyph(
+                    face,
+                    ch,
+                    self.cell_width,
+                    self.cell_height,
+                    span_cells,
+                )
+            })
             .map(|glyph| (index, glyph))
     }
 
@@ -762,6 +805,7 @@ impl GlyphAtlas {
     #[cfg(feature = "ligatures")]
     fn rasterize_grapheme_cluster(&mut self, grapheme: &str) -> Option<RasterizedGlyph> {
         self.ensure_fallback_rb_faces_loaded();
+        let span_cells = grapheme_span_cells(grapheme);
 
         self.rb_face
             .as_ref()
@@ -776,6 +820,18 @@ impl GlyphAtlas {
                     self.baseline,
                 )
             })
+            .map(|glyph| {
+                if let Some(face) = self.primary_face.as_ref() {
+                    normalize_fixed_size_glyph(
+                        face,
+                        glyph,
+                        span_cells.saturating_mul(self.cell_width).max(1),
+                        self.cell_height.max(1),
+                    )
+                } else {
+                    glyph
+                }
+            })
             .or_else(|| self.rasterize_grapheme_cluster_from_fallbacks(grapheme))
     }
 
@@ -784,6 +840,7 @@ impl GlyphAtlas {
         &mut self,
         grapheme: &str,
     ) -> Option<RasterizedGlyph> {
+        let span_cells = grapheme_span_cells(grapheme);
         self.fallback_faces
             .iter()
             .zip(self.fallback_rb_faces.iter())
@@ -799,6 +856,14 @@ impl GlyphAtlas {
                             self.cell_height,
                             self.baseline,
                         )
+                        .map(|glyph| {
+                            normalize_fixed_size_glyph(
+                                face,
+                                glyph,
+                                span_cells.saturating_mul(self.cell_width).max(1),
+                                self.cell_height.max(1),
+                            )
+                        })
                     })
             })
     }
@@ -887,8 +952,20 @@ fn rasterize_primary_glyph(face: &freetype::Face, ch: u32) -> Option<RasterizedG
 }
 
 #[cfg(feature = "local-fonts")]
-fn rasterize_fallback_glyph(face: &freetype::Face, ch: u32) -> Option<RasterizedGlyph> {
-    rasterize_char(face, ch, LoadFlag::RENDER | LoadFlag::COLOR)
+fn rasterize_fallback_glyph(
+    face: &freetype::Face,
+    ch: u32,
+    cell_width: usize,
+    cell_height: usize,
+    span_cells: usize,
+) -> Option<RasterizedGlyph> {
+    let glyph = rasterize_char(face, ch, LoadFlag::RENDER | LoadFlag::COLOR)?;
+    Some(normalize_fixed_size_glyph(
+        face,
+        glyph,
+        span_cells.saturating_mul(cell_width).max(1),
+        cell_height.max(1),
+    ))
 }
 
 #[cfg(feature = "local-fonts")]
@@ -931,6 +1008,116 @@ fn configure_face_size(face: &freetype::Face, font_size_pt: f64, dpi: u32) -> Re
 
     face.set_char_size((font_size_pt * 64.0) as isize, 0, dpi, 0)
         .context("failed to set char size")
+}
+
+#[cfg(feature = "local-fonts")]
+fn normalize_fixed_size_glyph(
+    face: &freetype::Face,
+    glyph: RasterizedGlyph,
+    max_width: usize,
+    max_height: usize,
+) -> RasterizedGlyph {
+    if !face.has_fixed_sizes() || glyph.width == 0 || glyph.height == 0 {
+        return glyph;
+    }
+
+    let max_width = max_width.max(1);
+    let max_height = max_height.max(1);
+    if glyph.width <= max_width && glyph.height <= max_height {
+        return glyph;
+    }
+
+    let scale = (max_width as f64 / glyph.width as f64)
+        .min(max_height as f64 / glyph.height as f64)
+        .min(1.0);
+    if scale >= 1.0 {
+        return glyph;
+    }
+
+    let new_width = ((glyph.width as f64 * scale).round() as usize).max(1);
+    let new_height = ((glyph.height as f64 * scale).round() as usize).max(1);
+    let pixels = resize_glyph_pixels(&glyph, new_width, new_height);
+
+    RasterizedGlyph {
+        pixels,
+        width: new_width,
+        height: new_height,
+        format: glyph.format,
+        bearing_x: (glyph.bearing_x as f64 * scale).round() as i32,
+        bearing_y: (glyph.bearing_y as f64 * scale).round() as i32,
+        advance: (glyph.advance as f64 * scale).round() as i32,
+    }
+}
+
+fn resize_glyph_pixels(glyph: &RasterizedGlyph, new_width: usize, new_height: usize) -> Vec<u8> {
+    match glyph.format {
+        GlyphFormat::Alpha => resize_alpha_pixels(&glyph.pixels, glyph.width, glyph.height, new_width, new_height),
+        GlyphFormat::Rgba => resize_rgba_pixels(&glyph.pixels, glyph.width, glyph.height, new_width, new_height),
+    }
+}
+
+fn resize_alpha_pixels(
+    src: &[u8],
+    src_width: usize,
+    src_height: usize,
+    dst_width: usize,
+    dst_height: usize,
+) -> Vec<u8> {
+    let mut dst = vec![0u8; dst_width * dst_height];
+    for y in 0..dst_height {
+        for x in 0..dst_width {
+            let (sx, sy) = sample_source_coords(x, y, src_width, src_height, dst_width, dst_height);
+            dst[y * dst_width + x] = src[sy * src_width + sx];
+        }
+    }
+    dst
+}
+
+fn resize_rgba_pixels(
+    src: &[u8],
+    src_width: usize,
+    src_height: usize,
+    dst_width: usize,
+    dst_height: usize,
+) -> Vec<u8> {
+    let mut dst = vec![0u8; dst_width * dst_height * 4];
+    for y in 0..dst_height {
+        for x in 0..dst_width {
+            let (sx, sy) = sample_source_coords(x, y, src_width, src_height, dst_width, dst_height);
+            let src_offset = (sy * src_width + sx) * 4;
+            let dst_offset = (y * dst_width + x) * 4;
+            dst[dst_offset..dst_offset + 4].copy_from_slice(&src[src_offset..src_offset + 4]);
+        }
+    }
+    dst
+}
+
+fn sample_source_coords(
+    x: usize,
+    y: usize,
+    src_width: usize,
+    src_height: usize,
+    dst_width: usize,
+    dst_height: usize,
+) -> (usize, usize) {
+    let sx = ((x as f64 + 0.5) * src_width as f64 / dst_width as f64)
+        .floor()
+        .clamp(0.0, (src_width.saturating_sub(1)) as f64) as usize;
+    let sy = ((y as f64 + 0.5) * src_height as f64 / dst_height as f64)
+        .floor()
+        .clamp(0.0, (src_height.saturating_sub(1)) as f64) as usize;
+    (sx, sy)
+}
+
+fn codepoint_span_cells(ch: u32) -> usize {
+    char::from_u32(ch)
+        .and_then(unicode_width::UnicodeWidthChar::width)
+        .unwrap_or(1)
+        .max(1)
+}
+
+fn grapheme_span_cells(grapheme: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(grapheme).max(1)
 }
 
 #[cfg(feature = "local-fonts")]
@@ -1793,6 +1980,126 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "local-fonts")]
+    fn braille_pattern_uses_system_fallback_and_does_not_render_as_question_mark() {
+        let mut atlas = GlyphAtlas::with_family("JetBrainsMono Nerd Font Light", 11.0)
+            .or_else(|_| GlyphAtlas::new(11.0))
+            .expect("should load configured font atlas");
+        let braille = '⠼' as u32;
+        let question = '?' as u32;
+
+        if atlas
+            .primary_face
+            .as_ref()
+            .and_then(|face| face.get_char_index(braille as usize))
+            .is_some()
+        {
+            return;
+        }
+
+        assert!(atlas.ensure_glyph(braille), "braille should resolve via fallback");
+        assert!(atlas.ensure_glyph(question), "question mark should resolve");
+        assert!(
+            matches!(atlas.glyph_sources.get(&braille), Some(GlyphSource::Fallback(_))),
+            "braille should come from a fallback font"
+        );
+
+        let (braille_width, braille_height) = {
+            let glyph = atlas
+                .get_glyph(braille)
+                .expect("braille glyph should be cached after ensure_glyph");
+            (glyph.width, glyph.height)
+        };
+        let (question_width, question_height) = {
+            let glyph = atlas
+                .get_glyph(question)
+                .expect("question mark glyph should be cached after ensure_glyph");
+            (glyph.width, glyph.height)
+        };
+
+        let w = atlas.cell_width * 2;
+        let h = atlas.cell_height;
+        let mut braille_buf = vec![0u32; w * h];
+        let mut question_buf = vec![0u32; w * h];
+        atlas.draw_glyph(&mut braille_buf, w, h, 0, 0, braille, 0xffffff);
+        atlas.draw_glyph(&mut question_buf, w, h, 0, 0, question, 0xffffff);
+
+        assert!(braille_width > 0 && braille_height > 0);
+        assert!(question_width > 0 && question_height > 0);
+        assert_ne!(
+            braille_buf, question_buf,
+            "braille fallback should not rasterize identically to question mark"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "local-fonts")]
+    fn configured_font_uses_general_system_fallback_for_multiple_unicode_blocks() {
+        let mut atlas = GlyphAtlas::with_family("JetBrainsMono Nerd Font Light", 11.0)
+            .or_else(|_| GlyphAtlas::new(11.0))
+            .expect("should load configured font atlas");
+        let question = '?' as u32;
+        let fallback_samples = ['⠼', '◐', '☃', '♫', '⚙', '⬢', '☯', '⚐', '♨'];
+        let mut fallback_paths = std::collections::HashSet::new();
+
+        assert!(atlas.ensure_glyph(question), "question mark should resolve");
+        let w = atlas.cell_width * 2;
+        let h = atlas.cell_height;
+        let mut question_buf = vec![0u32; w * h];
+        atlas.draw_glyph(&mut question_buf, w, h, 0, 0, question, 0xffffff);
+
+        for ch in fallback_samples {
+            let codepoint = ch as u32;
+            if atlas
+                .primary_face
+                .as_ref()
+                .and_then(|face| face.get_char_index(codepoint as usize))
+                .is_some()
+            {
+                continue;
+            }
+
+            let fallback_path = find_system_fallback_font_path(codepoint)
+                .expect("fontconfig should find a fallback path");
+            fallback_paths.insert(fallback_path);
+
+            assert!(
+                atlas.ensure_glyph(codepoint),
+                "fallback sample {:?} should resolve through general fallback",
+                ch
+            );
+            assert!(
+                matches!(atlas.glyph_sources.get(&codepoint), Some(GlyphSource::Fallback(_))),
+                "fallback sample {:?} should be sourced from a fallback face",
+                ch
+            );
+
+            let glyph = atlas
+                .get_glyph(codepoint)
+                .expect("fallback sample should be cached after ensure_glyph");
+            assert!(
+                glyph.width > 0 && glyph.height > 0,
+                "fallback sample {:?} should have visible geometry",
+                ch
+            );
+
+            let mut sample_buf = vec![0u32; w * h];
+            atlas.draw_glyph(&mut sample_buf, w, h, 0, 0, codepoint, 0xffffff);
+            assert_ne!(
+                sample_buf, question_buf,
+                "fallback sample {:?} should not rasterize identically to question mark",
+                ch
+            );
+        }
+
+        assert!(
+            fallback_paths.len() >= 3,
+            "expected system fallback test to exercise multiple fallback fonts, got {}",
+            fallback_paths.len()
+        );
+    }
+
+    #[test]
     fn protocol_only_atlas_can_store_and_render_color_emoji_grapheme() {
         let metrics = CellMetrics {
             cell_width: 8,
@@ -1941,6 +2248,177 @@ mod tests {
                 assert!(
                     glyph.height > 0,
                     "grapheme {:?} should have height at dpi {}",
+                    grapheme,
+                    dpi,
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "local-fonts")]
+    fn configured_emoji_glyph_metrics_fit_terminal_cells() {
+        use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+        for dpi in [96u32, 144, 217] {
+            let mut atlas = GlyphAtlas::with_family_dpi("JetBrainsMono Nerd Font Light", 11.0, dpi)
+                .or_else(|_| GlyphAtlas::new_with_dpi(11.0, dpi))
+                .expect("should load configured font atlas");
+
+            for ch in ['😀', '🪸', '🫎'] {
+                assert!(atlas.ensure_glyph(ch as u32), "emoji {:?} should resolve", ch);
+                let glyph = atlas
+                    .get_glyph(ch as u32)
+                    .expect("resolved emoji glyph should be cached");
+                let span_cells = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+                let max_width = span_cells * atlas.cell_width + 2;
+                let max_height = atlas.cell_height + 2;
+                assert!(
+                    glyph.width <= max_width,
+                    "emoji {:?} at dpi {} should fit width {} px but was {} px (cell_width={}, span_cells={})",
+                    ch,
+                    dpi,
+                    max_width,
+                    glyph.width,
+                    atlas.cell_width,
+                    span_cells,
+                );
+                assert!(
+                    glyph.height <= max_height,
+                    "emoji {:?} at dpi {} should fit height {} px but was {} px (cell_height={})",
+                    ch,
+                    dpi,
+                    max_height,
+                    glyph.height,
+                    atlas.cell_height,
+                );
+            }
+
+            for grapheme in ["🐦‍⬛", "❤️", "👍🏻", "1️⃣", "🇺🇸", "👨‍💻"] {
+                assert!(
+                    atlas.ensure_grapheme(grapheme),
+                    "emoji grapheme {:?} should resolve",
+                    grapheme
+                );
+                let glyph = atlas
+                    .get_grapheme_glyph(grapheme)
+                    .expect("resolved emoji grapheme should be cached");
+                let span_cells = UnicodeWidthStr::width(grapheme).max(1);
+                let max_width = span_cells * atlas.cell_width + 2;
+                let max_height = atlas.cell_height + 2;
+                assert!(
+                    glyph.width <= max_width,
+                    "emoji grapheme {:?} at dpi {} should fit width {} px but was {} px (cell_width={}, span_cells={})",
+                    grapheme,
+                    dpi,
+                    max_width,
+                    glyph.width,
+                    atlas.cell_width,
+                    span_cells,
+                );
+                assert!(
+                    glyph.height <= max_height,
+                    "emoji grapheme {:?} at dpi {} should fit height {} px but was {} px (cell_height={})",
+                    grapheme,
+                    dpi,
+                    max_height,
+                    glyph.height,
+                    atlas.cell_height,
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "local-fonts")]
+    fn fallback_emoji_font_covers_hundreds_of_single_codepoint_emoji() {
+        let paths = find_emoji_font_paths().expect("emoji font discovery should work");
+        let path = paths.first().expect("an emoji fallback font should exist");
+        let lib = freetype::Library::init().expect("freetype should init");
+        let face = lib.new_face(path, 0).expect("emoji fallback face should load");
+
+        let emoji_codepoints: Vec<u32> = face
+            .chars()
+            .map(|(charcode, _)| charcode as u32)
+            .filter(|&ch| should_try_emoji_fallback(ch))
+            .take(512)
+            .collect();
+
+        assert!(
+            emoji_codepoints.len() >= 200,
+            "expected at least 200 emoji-like codepoints from fallback font, got {}",
+            emoji_codepoints.len()
+        );
+
+        for dpi in [96u32, 144, 217] {
+            let mut atlas = GlyphAtlas::with_family_dpi("JetBrainsMono Nerd Font Light", 11.0, dpi)
+                .or_else(|_| GlyphAtlas::new_with_dpi(11.0, dpi))
+                .expect("should load configured font atlas");
+
+            for &ch in &emoji_codepoints {
+                assert!(
+                    atlas.ensure_glyph(ch),
+                    "emoji fallback codepoint U+{:04X} should resolve at dpi {}",
+                    ch,
+                    dpi,
+                );
+                let glyph = atlas
+                    .get_glyph(ch)
+                    .expect("resolved fallback glyph should be cached");
+                assert!(
+                    glyph.width > 0 && glyph.height > 0,
+                    "emoji fallback codepoint U+{:04X} should have visible geometry at dpi {}",
+                    ch,
+                    dpi,
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "local-fonts")]
+    fn configured_font_resolves_large_multi_codepoint_emoji_sequence_set() {
+        const GRAPHEMES: &[&str] = &[
+            "❤️", "🩷", "🧡", "💛", "💚", "💙", "🩵", "💜", "🖤", "🤍", "🤎",
+            "😀", "😃", "😄", "😁", "😆", "🥹", "😂", "🤣", "😊", "😍", "😘",
+            "👍🏻", "👍🏽", "👍🏿", "👎🏻", "👏🏽", "🙏🏿", "👋🏻", "🤝", "🫶",
+            "👨‍💻", "👩‍💻", "🧑‍💻", "👨‍🔬", "👩‍🔬", "🧑‍🚀", "👨‍🚀", "👩‍🚀",
+            "🐦‍⬛", "🧑‍🎨", "👨‍🎨", "👩‍🎨", "🧑‍🍳", "👨‍🍳", "👩‍🍳",
+            "🇺🇸", "🇨🇦", "🇯🇵", "🇺🇦", "🇫🇷", "🇩🇪", "🇰🇷", "🇧🇷", "🇮🇳", "🇲🇽",
+            "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "0️⃣",
+            "©️", "®️", "™️", "#️⃣", "*️⃣", "↔️", "↕️", "⬅️", "➡️", "⬆️", "⬇️",
+            "🪸", "🫎", "🪿", "🫠", "🫡", "🩶", "🩷", "🩵", "🪼", "🪽", "🪻",
+            "👨‍👩‍👧‍👦", "👩‍❤️‍👩", "👨‍❤️‍👨", "👩‍❤️‍💋‍👨", "👨‍❤️‍💋‍👨",
+            "🧔🏽‍♂️", "🧔🏽‍♀️", "🧑🏽‍🦽", "🧑🏽‍🦼", "🧑🏽‍🦯",
+            "👮🏻‍♂️", "👮🏽‍♀️", "🧑🏻‍⚕️", "🧑🏽‍🏫", "🧑🏿‍🌾", "🧑🏻‍🔧", "🧑🏾‍🏭",
+            "🧑🏽‍🎤", "🧑🏿‍🚒", "🧑🏻‍✈️", "🧑🏽‍⚖️", "🧑🏾‍🤝‍🧑🏻", "👩🏽‍🍼", "👨🏻‍🍼",
+            "🧑🏽‍🎄", "🧑🏻‍🎓", "🧑🏾‍💼", "🧑🏿‍🔬", "🧑🏻‍🚀", "🧑🏽‍🚀", "🧑🏿‍💻",
+            "🏳️‍🌈", "🏳️‍⚧️", "👁️‍🗨️", "🗣️", "🫱🏽‍🫲🏻", "🫱🏿‍🫲🏽", "🧑‍❤️‍💋‍🧑",
+            "👨🏽‍❤️‍👨🏻", "👩🏿‍❤️‍👩🏻", "👨🏻‍👨🏽‍👧", "👩🏻‍👩🏽‍👦", "👨🏻‍👩🏽‍👧‍👦",
+            "🧑🏻‍🎨", "🧑🏽‍🍳", "🧑🏿‍🔧", "🧑🏻‍🌾", "🧑🏽‍🚒", "🧑🏿‍✈️", "🧑🏻‍⚖️",
+            "😮‍💨", "😵‍💫", "❤️‍🔥", "❤️‍🩹", "🏴‍☠️", "🐕‍🦺", "🦮", "🧎🏽‍➡️", "🚶🏽‍➡️",
+        ];
+
+        assert!(GRAPHEMES.len() >= 100);
+
+        for dpi in [96u32, 144, 217] {
+            let mut atlas = GlyphAtlas::with_family_dpi("JetBrainsMono Nerd Font Light", 11.0, dpi)
+                .or_else(|_| GlyphAtlas::new_with_dpi(11.0, dpi))
+                .expect("should load configured font atlas");
+
+            for &grapheme in GRAPHEMES {
+                assert!(
+                    atlas.ensure_grapheme(grapheme),
+                    "grapheme {:?} should resolve at dpi {}",
+                    grapheme,
+                    dpi,
+                );
+                let glyph = atlas
+                    .get_grapheme_glyph(grapheme)
+                    .expect("resolved grapheme glyph should be cached");
+                assert!(
+                    glyph.width > 0 && glyph.height > 0,
+                    "grapheme {:?} should have visible geometry at dpi {}",
                     grapheme,
                     dpi,
                 );

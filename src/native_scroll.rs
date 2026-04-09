@@ -78,6 +78,7 @@ pub struct NativeScrollBridge {
     socket_path: PathBuf,
     snapshot: Arc<Mutex<PaneSnapshot>>,
     command_tx: Sender<HostToApp>,
+    connected: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     chat_residual: f32,
@@ -102,15 +103,23 @@ impl NativeScrollBridge {
             .context("failed setting native scroll listener nonblocking")?;
 
         let snapshot = Arc::new(Mutex::new(PaneSnapshot::default()));
+        let connected = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
         let (command_tx, command_rx) = mpsc::channel();
 
-        let thread = spawn_bridge_thread(listener, snapshot.clone(), stop.clone(), command_rx);
+        let thread = spawn_bridge_thread(
+            listener,
+            snapshot.clone(),
+            connected.clone(),
+            stop.clone(),
+            command_rx,
+        );
 
         Ok(Self {
             socket_path,
             snapshot,
             command_tx,
+            connected,
             stop,
             thread: Some(thread),
             chat_residual: 0.0,
@@ -131,6 +140,10 @@ impl NativeScrollBridge {
     }
 
     pub fn send_scroll_delta(&mut self, pane: PaneKind, delta_rows: f32) -> bool {
+        if !self.connected.load(Ordering::Relaxed) {
+            return false;
+        }
+
         let residual = match pane {
             PaneKind::Chat => &mut self.chat_residual,
             PaneKind::SidePanel => &mut self.side_panel_residual,
@@ -181,18 +194,20 @@ fn socket_path_for_window(window_id: u64) -> PathBuf {
 fn spawn_bridge_thread(
     listener: UnixListener,
     snapshot: Arc<Mutex<PaneSnapshot>>,
+    connected: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     command_rx: Receiver<HostToApp>,
 ) -> JoinHandle<()> {
     thread::Builder::new()
         .name("handterm-native-scroll".to_string())
-        .spawn(move || bridge_thread(listener, snapshot, stop, command_rx))
+        .spawn(move || bridge_thread(listener, snapshot, connected, stop, command_rx))
         .expect("native scroll bridge thread should spawn")
 }
 
 fn bridge_thread(
     listener: UnixListener,
     snapshot: Arc<Mutex<PaneSnapshot>>,
+    connected: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     command_rx: Receiver<HostToApp>,
 ) {
@@ -204,6 +219,7 @@ fn bridge_thread(
             match listener.accept() {
                 Ok((accepted, _)) => {
                     let _ = accepted.set_nonblocking(true);
+                    connected.store(true, Ordering::Relaxed);
                     stream = Some(accepted);
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -214,6 +230,7 @@ fn bridge_thread(
         if let Some(active) = stream.as_mut() {
             while let Ok(message) = command_rx.try_recv() {
                 if write_line(active, &message).is_err() {
+                    connected.store(false, Ordering::Relaxed);
                     stream = None;
                     break;
                 }
@@ -231,6 +248,7 @@ fn bridge_thread(
                     }
                 }
                 Err(_) => {
+                    connected.store(false, Ordering::Relaxed);
                     stream = None;
                     if let Ok(mut current) = snapshot.lock() {
                         current.panes.clear();
@@ -329,10 +347,39 @@ mod tests {
     #[test]
     fn scroll_delta_accumulates_fractional_rows() {
         let mut bridge = NativeScrollBridge::new(999_991).expect("bridge should initialize");
+        let socket_path = bridge
+            .child_envs(999_991)
+            .into_iter()
+            .find_map(|(key, value)| (key == ENV_SOCKET).then_some(value))
+            .expect("socket env should be present");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let _stream = loop {
+            match UnixStream::connect(&socket_path) {
+                Ok(stream) => break stream,
+                Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                Err(err) => panic!("failed to connect to native scroll socket: {err}"),
+            }
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline && !bridge.connected.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(bridge.connected.load(Ordering::Relaxed));
+
         let _ = bridge.send_scroll_delta(PaneKind::Chat, 0.4);
         assert!((bridge.chat_residual - 0.4).abs() < f32::EPSILON);
         let _ = bridge.send_scroll_delta(PaneKind::Chat, 0.7);
         assert!(bridge.chat_residual >= 0.0 && bridge.chat_residual < 1.0);
+    }
+
+    #[test]
+    fn bridge_does_not_claim_scroll_delivery_without_child_connection() {
+        let mut bridge = NativeScrollBridge::new(999_993).expect("bridge should initialize");
+        assert!(!bridge.connected.load(Ordering::Relaxed));
+        assert!(!bridge.send_scroll_delta(PaneKind::Chat, 1.0));
+        assert_eq!(bridge.chat_residual, 0.0);
     }
 
     #[test]

@@ -1921,10 +1921,11 @@ mod tests {
         }
     }
 
-    fn render_like_gpu(
+    fn render_like_gpu_with_scroll(
         terminal: &mut Terminal,
         atlas: &mut GlyphAtlas,
         config: &AppConfig,
+        scroll_rows: f32,
     ) -> Vec<u32> {
         let width = terminal.cols as usize * atlas.cell_width;
         let height = terminal.rows as usize * atlas.cell_height;
@@ -1932,8 +1933,14 @@ mod tests {
         let base_fg = config.style.foreground.as_u32_rgb();
         let mut buffer = vec![base_bg; width * height];
 
+        let viewport_scroll = ViewportScroll::from_scroll_rows(scroll_rows);
+
         let mut cell_infos = Vec::new();
-        fill_cell_infos(terminal, &mut cell_infos);
+        if viewport_scroll == ViewportScroll::ZERO {
+            fill_cell_infos(terminal, &mut cell_infos);
+        } else {
+            fill_cell_infos_with_scroll(terminal, &mut cell_infos, viewport_scroll);
+        }
 
         let mut glyph_textures = std::collections::HashMap::new();
         let mut next_x = 0u32;
@@ -1952,7 +1959,7 @@ mod tests {
                 background_alpha: clamp_background_alpha(config.style.background_opacity),
                 cell_w: atlas.cell_width as f32,
                 cell_h: atlas.cell_height as f32,
-                viewport_offset_y: 0.0,
+                viewport_offset_y: viewport_scroll.viewport_offset_y(atlas.cell_height as f32),
             },
             &mut batches,
             |ci| {
@@ -1997,34 +2004,66 @@ mod tests {
 
         let mut image_textures = std::collections::HashMap::new();
         let mut image_instances = Vec::new();
-        fill_image_instances(
-            terminal.kitty_placements(),
-            atlas.cell_width as f32,
-            atlas.cell_height as f32,
-            &mut image_instances,
-            |placement| {
-                let image = terminal.kitty_image(placement.image_id)?;
-                if image.data.len() != (image.width as usize) * (image.height as usize) * 4 {
-                    return None;
-                }
-                let rect = AtlasImageRect {
-                    x: next_x,
-                    y: 1,
-                    width: image.width,
-                    height: image.height,
-                };
-                image_textures.insert(
-                    (rect.x, rect.y, rect.width, rect.height),
-                    TestAtlasTexture {
-                        pixels: image.data.clone(),
+        if viewport_scroll == ViewportScroll::ZERO {
+            fill_image_instances(
+                terminal.kitty_placements(),
+                atlas.cell_width as f32,
+                atlas.cell_height as f32,
+                &mut image_instances,
+                |placement| {
+                    let image = terminal.kitty_image(placement.image_id)?;
+                    if image.data.len() != (image.width as usize) * (image.height as usize) * 4 {
+                        return None;
+                    }
+                    let rect = AtlasImageRect {
+                        x: next_x,
+                        y: 1,
                         width: image.width,
                         height: image.height,
-                    },
-                );
-                next_x = next_x.saturating_add(image.width.max(1) + 1);
-                Some(rect)
-            },
-        );
+                    };
+                    image_textures.insert(
+                        (rect.x, rect.y, rect.width, rect.height),
+                        TestAtlasTexture {
+                            pixels: image.data.clone(),
+                            width: image.width,
+                            height: image.height,
+                        },
+                    );
+                    next_x = next_x.saturating_add(image.width.max(1) + 1);
+                    Some(rect)
+                },
+            );
+        } else {
+            fill_image_instances_with_viewport_offset(
+                terminal.kitty_placements(),
+                atlas.cell_width as f32,
+                atlas.cell_height as f32,
+                viewport_scroll.viewport_offset_y(atlas.cell_height as f32),
+                &mut image_instances,
+                |placement| {
+                    let image = terminal.kitty_image(placement.image_id)?;
+                    if image.data.len() != (image.width as usize) * (image.height as usize) * 4 {
+                        return None;
+                    }
+                    let rect = AtlasImageRect {
+                        x: next_x,
+                        y: 1,
+                        width: image.width,
+                        height: image.height,
+                    };
+                    image_textures.insert(
+                        (rect.x, rect.y, rect.width, rect.height),
+                        TestAtlasTexture {
+                            pixels: image.data.clone(),
+                            width: image.width,
+                            height: image.height,
+                        },
+                    );
+                    next_x = next_x.saturating_add(image.width.max(1) + 1);
+                    Some(rect)
+                },
+            );
+        }
 
         draw_cell_instances(
             &mut buffer,
@@ -2056,6 +2095,18 @@ mod tests {
         );
 
         buffer
+    }
+
+    fn render_like_gpu(
+        terminal: &mut Terminal,
+        atlas: &mut GlyphAtlas,
+        config: &AppConfig,
+    ) -> Vec<u32> {
+        render_like_gpu_with_scroll(terminal, atlas, config, 0.0)
+    }
+
+    fn sample_rgb(buffer: &[u32], width: usize, x: usize, y: usize) -> u32 {
+        buffer[y * width + x] & 0x00ff_ffff
     }
 
     fn assert_gpu_framebuffer_matches_cpu(
@@ -2497,6 +2548,67 @@ mod tests {
         for dpi in [144u32, 217] {
             assert_gpu_framebuffer_matches_cpu_with_dpi(24, 4, dpi, chunks, |_terminal, _idx| {});
         }
+    }
+
+    #[test]
+    fn gpu_fractional_scroll_framebuffer_shifts_rows_by_partial_cell_height() {
+        let config = AppConfig::default();
+        let mut atlas = GlyphAtlas::with_family_dpi(
+            &config.style.font_family,
+            config.style.font_size,
+            96,
+        )
+        .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, 96))
+        .expect("should load font atlas for fractional scroll framebuffer test");
+        let mut terminal = Terminal::new_with_scrollback(2, 2, 8);
+        terminal.process(
+            b"\x1b[41m  \x1b[0m\r\n\
+              \x1b[42m  \x1b[0m\r\n\
+              \x1b[44m  \x1b[0m\r\n",
+        );
+
+        let width = terminal.cols as usize * atlas.cell_width;
+        let cell_h = atlas.cell_height;
+        assert!(cell_h >= 4, "expected at least 4 px cell height");
+
+        let integer_scroll = render_like_gpu_with_scroll(&mut terminal, &mut atlas, &config, 1.0);
+        let fractional_scroll =
+            render_like_gpu_with_scroll(&mut terminal, &mut atlas, &config, 0.25);
+        let baseline = render_like_gpu_with_scroll(&mut terminal, &mut atlas, &config, 0.0);
+
+        let x = atlas.cell_width + (atlas.cell_width / 2);
+
+        let top_color = sample_rgb(&integer_scroll, width, x, cell_h / 2);
+        let middle_color = sample_rgb(&integer_scroll, width, x, cell_h + cell_h / 2);
+        let bottom_color = sample_rgb(&baseline, width, x, cell_h + cell_h / 2);
+
+        assert_ne!(top_color, middle_color, "expected distinct older/current row colors");
+        assert_ne!(middle_color, bottom_color, "expected distinct current/newer row colors");
+
+        let mut runs: Vec<(u32, usize, usize)> = Vec::new();
+        for y in 0..(cell_h * 2) {
+            let color = sample_rgb(&fractional_scroll, width, x, y);
+            if let Some((run_color, _start, end)) = runs.last_mut()
+                && *run_color == color
+            {
+                *end = y + 1;
+            } else {
+                runs.push((color, y, y + 1));
+            }
+        }
+
+        assert_eq!(
+            runs.len(),
+            3,
+            "fractional scroll should produce exactly three visible color bands, got {runs:?}",
+        );
+        assert_eq!(runs[0].0, top_color, "top band should come from the older row");
+        assert_eq!(runs[1].0, middle_color, "middle band should come from the current row");
+        assert_eq!(runs[2].0, bottom_color, "bottom band should come from the newer row");
+        assert!(
+            runs.iter().all(|(_, start, end)| end.saturating_sub(*start) >= 2),
+            "each visible band should span at least two pixels: {runs:?}",
+        );
     }
 
     #[test]

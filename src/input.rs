@@ -9,6 +9,106 @@ const META_MODIFIER_BIT: u32 = 1 << 25;
 const CAPS_LOCK_MODIFIER_BIT: u32 = 1 << 26;
 const NUM_LOCK_MODIFIER_BIT: u32 = 1 << 27;
 
+const KITTY_LEGACY_LETTER_KEYS: &[(NamedKey, char, bool)] = &[
+    (NamedKey::ArrowUp, 'A', true),
+    (NamedKey::ArrowDown, 'B', true),
+    (NamedKey::ArrowRight, 'C', true),
+    (NamedKey::ArrowLeft, 'D', true),
+    (NamedKey::Home, 'H', true),
+    (NamedKey::End, 'F', true),
+    (NamedKey::F1, 'P', false),
+    (NamedKey::F2, 'Q', false),
+    (NamedKey::F4, 'S', false),
+];
+
+const KITTY_LEGACY_TILDE_KEYS: &[(NamedKey, u16)] = &[
+    (NamedKey::Insert, 2),
+    (NamedKey::Delete, 3),
+    (NamedKey::PageUp, 5),
+    (NamedKey::PageDown, 6),
+    (NamedKey::F3, 13),
+    (NamedKey::F5, 15),
+    (NamedKey::F6, 17),
+    (NamedKey::F7, 18),
+    (NamedKey::F8, 19),
+    (NamedKey::F9, 20),
+    (NamedKey::F10, 21),
+    (NamedKey::F11, 23),
+    (NamedKey::F12, 24),
+    (NamedKey::ContextMenu, 29),
+];
+
+const KITTY_DIRECT_NAMED_KEY_CODES: &[(NamedKey, u32)] = &[
+    (NamedKey::Escape, 27),
+    (NamedKey::Enter, 13),
+    (NamedKey::Tab, 9),
+    (NamedKey::Backspace, 127),
+    (NamedKey::Space, 32),
+    (NamedKey::CapsLock, 57358),
+    (NamedKey::ScrollLock, 57359),
+    (NamedKey::NumLock, 57360),
+    (NamedKey::PrintScreen, 57361),
+    (NamedKey::Pause, 57362),
+    (NamedKey::ContextMenu, 57363),
+    (NamedKey::F13, 57376),
+    (NamedKey::F14, 57377),
+    (NamedKey::F15, 57378),
+    (NamedKey::F16, 57379),
+    (NamedKey::F17, 57380),
+    (NamedKey::F18, 57381),
+    (NamedKey::F19, 57382),
+    (NamedKey::F20, 57383),
+    (NamedKey::F21, 57384),
+    (NamedKey::F22, 57385),
+    (NamedKey::F23, 57386),
+    (NamedKey::F24, 57387),
+    (NamedKey::F25, 57388),
+    (NamedKey::F26, 57389),
+    (NamedKey::F27, 57390),
+    (NamedKey::F28, 57391),
+    (NamedKey::F29, 57392),
+    (NamedKey::F30, 57393),
+    (NamedKey::F31, 57394),
+    (NamedKey::F32, 57395),
+    (NamedKey::F33, 57396),
+    (NamedKey::F34, 57397),
+    (NamedKey::F35, 57398),
+    (NamedKey::MediaPlay, 57428),
+    (NamedKey::MediaPause, 57429),
+    (NamedKey::MediaPlayPause, 57430),
+    (NamedKey::MediaStop, 57432),
+    (NamedKey::MediaFastForward, 57433),
+    (NamedKey::MediaRewind, 57434),
+    (NamedKey::MediaTrackNext, 57435),
+    (NamedKey::MediaTrackPrevious, 57436),
+    (NamedKey::MediaRecord, 57437),
+    (NamedKey::AudioVolumeDown, 57438),
+    (NamedKey::AudioVolumeUp, 57439),
+    (NamedKey::AudioVolumeMute, 57440),
+    (NamedKey::AltGraph, 57453),
+];
+
+const KITTY_KEYPAD_CODES: &[(KeyCode, u32, u32)] = &[
+    (KeyCode::Numpad0, 57399, 57425),
+    (KeyCode::Numpad1, 57400, 57424),
+    (KeyCode::Numpad2, 57401, 57420),
+    (KeyCode::Numpad3, 57402, 57422),
+    (KeyCode::Numpad4, 57403, 57417),
+    (KeyCode::Numpad5, 57404, 57427),
+    (KeyCode::Numpad6, 57405, 57418),
+    (KeyCode::Numpad7, 57406, 57423),
+    (KeyCode::Numpad8, 57407, 57419),
+    (KeyCode::Numpad9, 57408, 57421),
+    (KeyCode::NumpadDecimal, 57409, 57426),
+    (KeyCode::NumpadDivide, 57410, 57410),
+    (KeyCode::NumpadMultiply, 57411, 57411),
+    (KeyCode::NumpadSubtract, 57412, 57412),
+    (KeyCode::NumpadAdd, 57413, 57413),
+    (KeyCode::NumpadEnter, 57414, 57414),
+    (KeyCode::NumpadEqual, 57415, 57415),
+    (KeyCode::NumpadComma, 57416, 57416),
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyEventKind {
     Press,
@@ -197,6 +297,54 @@ fn legacy_key_to_bytes(key: &Key, app_cursor: bool, modifiers: ModifiersState) -
     Some(bytes)
 }
 
+fn lookup_named_mapping<T: Copy>(named: NamedKey, mappings: &[(NamedKey, T)]) -> Option<T> {
+    mappings
+        .iter()
+        .find_map(|(candidate, value)| (*candidate == named).then_some(*value))
+}
+
+fn kitty_legacy_letter_key(named: NamedKey) -> Option<(char, bool)> {
+    KITTY_LEGACY_LETTER_KEYS
+        .iter()
+        .find_map(|(candidate, suffix, use_app_cursor)| {
+            (*candidate == named).then_some((*suffix, *use_app_cursor))
+        })
+}
+
+fn format_kitty_legacy_letter_sequence(
+    prefix_o: bool,
+    suffix: char,
+    modifier_field: Option<&str>,
+) -> Vec<u8> {
+    if let Some(mods) = modifier_field {
+        let mut seq = String::from("\x1b[");
+        seq.push('1');
+        seq.push(';');
+        seq.push_str(mods);
+        seq.push(suffix);
+        seq.into_bytes()
+    } else if prefix_o {
+        let mut seq = String::from("\x1bO");
+        seq.push(suffix);
+        seq.into_bytes()
+    } else {
+        let mut seq = String::from("\x1b[");
+        seq.push(suffix);
+        seq.into_bytes()
+    }
+}
+
+fn format_kitty_legacy_tilde_sequence(number: u16, modifier_field: Option<&str>) -> Vec<u8> {
+    let mut seq = String::from("\x1b[");
+    seq.push_str(&number.to_string());
+    if let Some(mods) = modifier_field {
+        seq.push(';');
+        seq.push_str(mods);
+    }
+    seq.push('~');
+    seq.into_bytes()
+}
+
 fn legacy_named_key_to_bytes(
     named: NamedKey,
     app_cursor: bool,
@@ -349,6 +497,13 @@ fn encode_kitty_key(
         } else {
             None
         };
+        if !produces_text && matches!(physical_key, Some(PhysicalKey::Code(KeyCode::Numpad5))) {
+            return Some(format_kitty_legacy_letter_sequence(
+                false,
+                'E',
+                modifier_field.as_deref(),
+            ));
+        }
         return Some(format_kitty_csi_u(
             &code.to_string(),
             modifier_field,
@@ -566,34 +721,6 @@ fn encode_kitty_named_key(
     }
 
     let mods = kitty_modifier_field(modifiers, report_events, event_kind);
-    let letter_form = |prefix_o: bool, suffix: char| {
-        if let Some(mods) = mods.clone() {
-            let mut seq = String::from("\x1b[");
-            seq.push('1');
-            seq.push(';');
-            seq.push_str(&mods);
-            seq.push(suffix);
-            seq.into_bytes()
-        } else if prefix_o {
-            let mut seq = String::from("\x1bO");
-            seq.push(suffix);
-            seq.into_bytes()
-        } else {
-            let mut seq = String::from("\x1b[");
-            seq.push(suffix);
-            seq.into_bytes()
-        }
-    };
-    let tilde_form = |number: u16| {
-        let mut seq = String::from("\x1b[");
-        seq.push_str(&number.to_string());
-        if let Some(mods) = mods.clone() {
-            seq.push(';');
-            seq.push_str(&mods);
-        }
-        seq.push('~');
-        seq.into_bytes()
-    };
 
     match key {
         Key::Named(named) => Some(match named {
@@ -609,29 +736,17 @@ fn encode_kitty_named_key(
             {
                 return None;
             }
-            NamedKey::ArrowUp => letter_form(app_cursor, 'A'),
-            NamedKey::ArrowDown => letter_form(app_cursor, 'B'),
-            NamedKey::ArrowRight => letter_form(app_cursor, 'C'),
-            NamedKey::ArrowLeft => letter_form(app_cursor, 'D'),
-            NamedKey::Home => letter_form(app_cursor, 'H'),
-            NamedKey::End => letter_form(app_cursor, 'F'),
-            NamedKey::F1 => letter_form(false, 'P'),
-            NamedKey::F2 => letter_form(false, 'Q'),
-            NamedKey::F4 => letter_form(false, 'S'),
-            NamedKey::Insert => tilde_form(2),
-            NamedKey::Delete => tilde_form(3),
-            NamedKey::PageUp => tilde_form(5),
-            NamedKey::PageDown => tilde_form(6),
-            NamedKey::F3 => tilde_form(13),
-            NamedKey::F5 => tilde_form(15),
-            NamedKey::F6 => tilde_form(17),
-            NamedKey::F7 => tilde_form(18),
-            NamedKey::F8 => tilde_form(19),
-            NamedKey::F9 => tilde_form(20),
-            NamedKey::F10 => tilde_form(21),
-            NamedKey::F11 => tilde_form(23),
-            NamedKey::F12 => tilde_form(24),
             _ => {
+                if let Some((suffix, use_app_cursor)) = kitty_legacy_letter_key(*named) {
+                    return Some(format_kitty_legacy_letter_sequence(
+                        app_cursor && use_app_cursor,
+                        suffix,
+                        mods.as_deref(),
+                    ));
+                }
+                if let Some(number) = lookup_named_mapping(*named, KITTY_LEGACY_TILDE_KEYS) {
+                    return Some(format_kitty_legacy_tilde_sequence(number, mods.as_deref()));
+                }
                 let code = kitty_named_key_code(physical_key, *named)?;
                 format_kitty_csi_u(&code.to_string(), mods, None)
             }
@@ -641,54 +756,11 @@ fn encode_kitty_named_key(
 }
 
 fn kitty_named_key_code(physical_key: Option<&PhysicalKey>, named: NamedKey) -> Option<u32> {
+    if let Some(code) = lookup_named_mapping(named, KITTY_DIRECT_NAMED_KEY_CODES) {
+        return Some(code);
+    }
+
     match named {
-        NamedKey::Escape => Some(27),
-        NamedKey::Enter => Some(13),
-        NamedKey::Tab => Some(9),
-        NamedKey::Backspace => Some(127),
-        NamedKey::Space => Some(32),
-        NamedKey::CapsLock => Some(57358),
-        NamedKey::ScrollLock => Some(57359),
-        NamedKey::NumLock => Some(57360),
-        NamedKey::PrintScreen => Some(57361),
-        NamedKey::Pause => Some(57362),
-        NamedKey::ContextMenu => Some(57363),
-        NamedKey::F13 => Some(57376),
-        NamedKey::F14 => Some(57377),
-        NamedKey::F15 => Some(57378),
-        NamedKey::F16 => Some(57379),
-        NamedKey::F17 => Some(57380),
-        NamedKey::F18 => Some(57381),
-        NamedKey::F19 => Some(57382),
-        NamedKey::F20 => Some(57383),
-        NamedKey::F21 => Some(57384),
-        NamedKey::F22 => Some(57385),
-        NamedKey::F23 => Some(57386),
-        NamedKey::F24 => Some(57387),
-        NamedKey::F25 => Some(57388),
-        NamedKey::F26 => Some(57389),
-        NamedKey::F27 => Some(57390),
-        NamedKey::F28 => Some(57391),
-        NamedKey::F29 => Some(57392),
-        NamedKey::F30 => Some(57393),
-        NamedKey::F31 => Some(57394),
-        NamedKey::F32 => Some(57395),
-        NamedKey::F33 => Some(57396),
-        NamedKey::F34 => Some(57397),
-        NamedKey::F35 => Some(57398),
-        NamedKey::MediaPlay => Some(57428),
-        NamedKey::MediaPause => Some(57429),
-        NamedKey::MediaPlayPause => Some(57430),
-        NamedKey::MediaRecord => Some(57437),
-        NamedKey::MediaStop => Some(57432),
-        NamedKey::MediaFastForward => Some(57433),
-        NamedKey::MediaRewind => Some(57434),
-        NamedKey::MediaTrackNext => Some(57435),
-        NamedKey::MediaTrackPrevious => Some(57436),
-        NamedKey::AudioVolumeDown => Some(57438),
-        NamedKey::AudioVolumeUp => Some(57439),
-        NamedKey::AudioVolumeMute => Some(57440),
-        NamedKey::AltGraph => Some(57453),
         NamedKey::Shift
         | NamedKey::Control
         | NamedKey::Alt
@@ -725,27 +797,17 @@ fn modifier_named_key_code(physical_key: Option<&PhysicalKey>, named: &NamedKey)
 
 fn kitty_keypad_code(physical_key: Option<&PhysicalKey>, produces_text: bool) -> Option<u32> {
     match physical_key {
-        Some(PhysicalKey::Code(code)) => match code {
-            KeyCode::Numpad0 => Some(if produces_text { 57399 } else { 57425 }),
-            KeyCode::Numpad1 => Some(if produces_text { 57400 } else { 57424 }),
-            KeyCode::Numpad2 => Some(if produces_text { 57401 } else { 57420 }),
-            KeyCode::Numpad3 => Some(if produces_text { 57402 } else { 57422 }),
-            KeyCode::Numpad4 => Some(if produces_text { 57403 } else { 57417 }),
-            KeyCode::Numpad5 => Some(if produces_text { 57404 } else { 57427 }),
-            KeyCode::Numpad6 => Some(if produces_text { 57405 } else { 57418 }),
-            KeyCode::Numpad7 => Some(if produces_text { 57406 } else { 57423 }),
-            KeyCode::Numpad8 => Some(if produces_text { 57407 } else { 57419 }),
-            KeyCode::Numpad9 => Some(if produces_text { 57408 } else { 57421 }),
-            KeyCode::NumpadDecimal => Some(if produces_text { 57409 } else { 57426 }),
-            KeyCode::NumpadDivide => Some(57410),
-            KeyCode::NumpadMultiply => Some(57411),
-            KeyCode::NumpadSubtract => Some(57412),
-            KeyCode::NumpadAdd => Some(57413),
-            KeyCode::NumpadEnter => Some(57414),
-            KeyCode::NumpadEqual => Some(57415),
-            KeyCode::NumpadComma => Some(57416),
-            _ => None,
-        },
+        Some(PhysicalKey::Code(code)) => {
+            KITTY_KEYPAD_CODES
+                .iter()
+                .find_map(|(candidate, text_code, navigation_code)| {
+                    (*candidate == *code).then_some(if produces_text {
+                        *text_code
+                    } else {
+                        *navigation_code
+                    })
+                })
+        }
         _ => None,
     }
 }
@@ -1233,7 +1295,7 @@ mod tests {
             KeyEventKind::Press,
         )
         .unwrap();
-        assert_eq!(menu, b"\x1b[57363u");
+        assert_eq!(menu, b"\x1b[29~");
 
         let f13 = key_to_bytes(
             &Key::Named(NamedKey::F13),
@@ -1422,6 +1484,60 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bytes, b"\x1b[57414u");
+    }
+
+    #[test]
+    fn kitty_keypad_begin_uses_legacy_sequence() {
+        let bytes = key_to_bytes(
+            &Key::Named(NamedKey::Clear),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::Numpad5)),
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_DISAMBIGUATE,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"\x1b[E");
+
+        let modified = key_to_bytes(
+            &Key::Named(NamedKey::Clear),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::Numpad5)),
+            false,
+            ModifiersState::SHIFT | ModifiersState::CONTROL,
+            KITTY_KBD_REPORT_ALL | KITTY_KBD_REPORT_EVENTS,
+            KeyEventKind::Repeat,
+        )
+        .unwrap();
+        assert_eq!(modified, b"\x1b[1;6:2E");
+    }
+
+    #[test]
+    fn kitty_context_menu_uses_legacy_functional_sequence() {
+        let bytes = key_to_bytes(
+            &Key::Named(NamedKey::ContextMenu),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::ContextMenu)),
+            false,
+            ModifiersState::default(),
+            KITTY_KBD_DISAMBIGUATE,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"\x1b[29~");
+
+        let release = key_to_bytes(
+            &Key::Named(NamedKey::ContextMenu),
+            None,
+            Some(&PhysicalKey::Code(KeyCode::ContextMenu)),
+            false,
+            ModifiersState::SHIFT,
+            KITTY_KBD_REPORT_ALL | KITTY_KBD_REPORT_EVENTS,
+            KeyEventKind::Release,
+        )
+        .unwrap();
+        assert_eq!(release, b"\x1b[29;2:3~");
     }
 
     #[test]

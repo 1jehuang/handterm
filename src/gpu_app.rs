@@ -49,6 +49,7 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 const HOT_MODE_DURATION: Duration = Duration::from_millis(160);
 
 pub fn run(config: AppConfig, startup_command: Option<String>) -> Result<()> {
+    let shared_init_task = Some(GpuApp::spawn_shared_init_task());
     let event_loop = EventLoop::<GpuAppEvent>::with_user_event()
         .build()
         .context("failed to create event loop")?;
@@ -67,7 +68,7 @@ pub fn run(config: AppConfig, startup_command: Option<String>) -> Result<()> {
         eprintln!("handterm: failed to bind {}", socket_path.display());
     }
 
-    let mut app = GpuApp::new(config, startup_command, ipc, proxy);
+    let mut app = GpuApp::new(config, startup_command, ipc, proxy, shared_init_task);
     event_loop
         .run_app(&mut app)
         .context("failed while running app")
@@ -207,12 +208,15 @@ impl GpuApp {
         startup_command: Option<String>,
         ipc: Option<IpcServer>,
         proxy: EventLoopProxy<GpuAppEvent>,
+        shared_init_task: Option<
+            std::thread::JoinHandle<Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)>>,
+        >,
     ) -> Self {
         Self {
             config,
             startup_command,
             shared: None,
-            shared_init_task: Some(Self::spawn_shared_init_task()),
+            shared_init_task,
             windows: HashMap::new(),
             window_ids: HashMap::new(),
             next_window_id: 1,

@@ -168,6 +168,32 @@ pub struct GpuSurfaceCreateProfile {
     pub reused_surface_defaults: bool,
 }
 
+impl GpuSurfaceCreateProfile {
+    pub fn compositor_facing_total(self) -> Duration {
+        self.window_create
+            .saturating_add(self.surface_create)
+            .saturating_add(self.capabilities)
+            .saturating_add(self.configure)
+    }
+
+    pub fn handterm_setup_total(self) -> Duration {
+        self.ime_setup
+            .saturating_add(self.default_config)
+            .saturating_add(self.atlas_texture)
+            .saturating_add(self.uniform_buffer)
+            .saturating_add(self.instance_buffers)
+            .saturating_add(self.bind_group)
+            .saturating_add(self.pipeline_lookup)
+    }
+
+    pub fn unaccounted_total(self) -> Duration {
+        self.total.saturating_sub(
+            self.compositor_facing_total()
+                .saturating_add(self.handterm_setup_total()),
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct GpuRenderProfile {
     pub acquire_surface: Duration,
@@ -2126,9 +2152,10 @@ mod tests {
         per_step_assert: impl Fn(&Terminal, usize),
     ) {
         let config = AppConfig::default();
-        let mut atlas = GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, dpi)
-            .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, dpi))
-            .expect("should load font atlas for GPU framebuffer parity");
+        let mut atlas =
+            GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, dpi)
+                .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, dpi))
+                .expect("should load font atlas for GPU framebuffer parity");
         let mut terminal = Terminal::new(cols, rows);
         let mut cpu = OffscreenRenderer::new(cols, rows, &atlas);
 
@@ -2365,6 +2392,50 @@ mod tests {
     }
 
     #[test]
+    fn surface_profile_aggregates_compositor_and_handterm_work() {
+        let profile = GpuSurfaceCreateProfile {
+            window_create: Duration::from_millis(11),
+            ime_setup: Duration::from_millis(2),
+            surface_create: Duration::from_millis(13),
+            default_config: Duration::from_millis(3),
+            capabilities: Duration::from_millis(17),
+            configure: Duration::from_millis(19),
+            atlas_texture: Duration::from_millis(5),
+            uniform_buffer: Duration::from_millis(7),
+            instance_buffers: Duration::from_millis(23),
+            bind_group: Duration::from_millis(29),
+            pipeline_lookup: Duration::from_millis(31),
+            total: Duration::from_millis(160),
+            ..GpuSurfaceCreateProfile::default()
+        };
+
+        assert_eq!(profile.compositor_facing_total(), Duration::from_millis(60));
+        assert_eq!(profile.handterm_setup_total(), Duration::from_millis(100));
+        assert_eq!(profile.unaccounted_total(), Duration::ZERO);
+    }
+
+    #[test]
+    fn surface_profile_unaccounted_total_saturates_at_zero() {
+        let profile = GpuSurfaceCreateProfile {
+            window_create: Duration::from_millis(5),
+            surface_create: Duration::from_millis(5),
+            capabilities: Duration::from_millis(5),
+            configure: Duration::from_millis(5),
+            ime_setup: Duration::from_millis(5),
+            default_config: Duration::from_millis(5),
+            atlas_texture: Duration::from_millis(5),
+            uniform_buffer: Duration::from_millis(5),
+            instance_buffers: Duration::from_millis(5),
+            bind_group: Duration::from_millis(5),
+            pipeline_lookup: Duration::from_millis(5),
+            total: Duration::from_millis(10),
+            ..GpuSurfaceCreateProfile::default()
+        };
+
+        assert_eq!(profile.unaccounted_total(), Duration::ZERO);
+    }
+
+    #[test]
     fn prefers_premultiplied_alpha_when_transparency_is_requested() {
         let capabilities = wgpu::SurfaceCapabilities {
             formats: vec![wgpu::TextureFormat::Bgra8Unorm],
@@ -2553,13 +2624,10 @@ mod tests {
     #[test]
     fn gpu_fractional_scroll_framebuffer_shifts_rows_by_partial_cell_height() {
         let config = AppConfig::default();
-        let mut atlas = GlyphAtlas::with_family_dpi(
-            &config.style.font_family,
-            config.style.font_size,
-            96,
-        )
-        .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, 96))
-        .expect("should load font atlas for fractional scroll framebuffer test");
+        let mut atlas =
+            GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, 96)
+                .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, 96))
+                .expect("should load font atlas for fractional scroll framebuffer test");
         let mut terminal = Terminal::new_with_scrollback(2, 2, 8);
         terminal.process(
             b"\x1b[41m  \x1b[0m\r\n\
@@ -2582,8 +2650,14 @@ mod tests {
         let middle_color = sample_rgb(&integer_scroll, width, x, cell_h + cell_h / 2);
         let bottom_color = sample_rgb(&baseline, width, x, cell_h + cell_h / 2);
 
-        assert_ne!(top_color, middle_color, "expected distinct older/current row colors");
-        assert_ne!(middle_color, bottom_color, "expected distinct current/newer row colors");
+        assert_ne!(
+            top_color, middle_color,
+            "expected distinct older/current row colors"
+        );
+        assert_ne!(
+            middle_color, bottom_color,
+            "expected distinct current/newer row colors"
+        );
 
         let mut runs: Vec<(u32, usize, usize)> = Vec::new();
         for y in 0..(cell_h * 2) {
@@ -2602,11 +2676,21 @@ mod tests {
             3,
             "fractional scroll should produce exactly three visible color bands, got {runs:?}",
         );
-        assert_eq!(runs[0].0, top_color, "top band should come from the older row");
-        assert_eq!(runs[1].0, middle_color, "middle band should come from the current row");
-        assert_eq!(runs[2].0, bottom_color, "bottom band should come from the newer row");
+        assert_eq!(
+            runs[0].0, top_color,
+            "top band should come from the older row"
+        );
+        assert_eq!(
+            runs[1].0, middle_color,
+            "middle band should come from the current row"
+        );
+        assert_eq!(
+            runs[2].0, bottom_color,
+            "bottom band should come from the newer row"
+        );
         assert!(
-            runs.iter().all(|(_, start, end)| end.saturating_sub(*start) >= 2),
+            runs.iter()
+                .all(|(_, start, end)| end.saturating_sub(*start) >= 2),
             "each visible band should span at least two pixels: {runs:?}",
         );
     }

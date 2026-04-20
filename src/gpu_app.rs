@@ -390,11 +390,19 @@ impl GpuApp {
     ) -> Result<u64> {
         let start = Instant::now();
         let cpu_time_started = ProcessCpuTime::capture();
+        let existing_windows = self.windows.len();
+        let open_kind = if existing_windows == 0 {
+            "first-window"
+        } else {
+            "add-window"
+        };
         let cols = cols.unwrap_or(self.config.window.columns).max(1);
         let rows = rows.unwrap_or(self.config.window.rows).max(1);
         let before_dpi = Instant::now();
         let dpi = self.resolve_dpi(event_loop);
         let dpi_ms = before_dpi.elapsed();
+        let atlas_cached = self.atlas_cache.contains_key(&dpi);
+        let shared_warm = self.shared.is_some();
         let before_bootstrap = Instant::now();
         let bootstrap = bootstrap_font_metrics_with_family_dpi(
             &self.config.style.font_family,
@@ -474,6 +482,7 @@ impl GpuApp {
             .values()
             .next()
             .map(|state| state.renderer.preferred_surface_defaults());
+        let preferred_surface_defaults_available = preferred_surface_defaults.is_some();
         let (renderer, surface_profile) =
             create_surface_state_for_window_with_shared_profiled_with_defaults(
                 shared,
@@ -545,16 +554,43 @@ impl GpuApp {
             ProcessCpuTime::capture().map(|current| current.delta_since(started))
         });
         let sp = &surface_profile;
+        let host_setup_before_surface_ms = dpi_ms
+            .saturating_add(bootstrap_ms)
+            .saturating_add(window_ms)
+            .saturating_add(terminal_ms)
+            .saturating_add(pty_ms)
+            .saturating_add(atlas_ms)
+            .saturating_add(shared_ms)
+            .as_secs_f64()
+            * 1000.0;
+        let compositor_facing_ms = sp.compositor_facing_total().as_secs_f64() * 1000.0;
+        let handterm_surface_setup_ms = sp.handterm_setup_total().as_secs_f64() * 1000.0;
+        let surface_unaccounted_ms = sp.unaccounted_total().as_secs_f64() * 1000.0;
         eprintln!(
             "handterm gpu host: open-window id={id}\n\
-             \x20 total={:.2}ms dpi={:.2}ms bootstrap={:.2}ms window={:.2}ms atlas={:.2}ms shared={:.2}ms terminal={:.2}ms pty={:.2}ms watcher={:.2}ms\n\
+             \x20 kind={open_kind} existing_windows={} shared_warm={} atlas_cached={} preferred_surface_defaults_available={} defaults_reused={} pipeline_cache_hit={}\n\
+             \x20 total={:.2}ms host_setup_before_surface={:.2}ms watcher={:.2}ms\n\
+             \x20 surface_total={:.2}ms compositor_facing={:.2}ms handterm_surface_setup={:.2}ms surface_unaccounted={:.2}ms\n\
+             \x20 dpi={:.2}ms bootstrap={:.2}ms window={:.2}ms atlas={:.2}ms shared={:.2}ms terminal={:.2}ms pty={:.2}ms\n\
              \x20 surface_total={:.2}ms\n\
              \x20   window_create={:.2}ms ime={:.2}ms wgpu_surface={:.2}ms\n\
-             \x20   default_config={:.2}ms caps={:.2}ms configure={:.2}ms defaults_reused={}\n\
+             \x20   default_config={:.2}ms caps={:.2}ms configure={:.2}ms\n\
              \x20   atlas_tex={:.2}ms uniform_buf={:.2}ms inst_bufs={:.2}ms\n\
-             \x20   bind_group={:.2}ms pipeline={:.2}ms (cache_hit={})\n\
+             \x20   bind_group={:.2}ms pipeline={:.2}ms\n\
              \x20 host_cpu_user={:.2}ms host_cpu_system={:.2}ms host_cpu_total={:.2}ms",
+            existing_windows,
+            shared_warm,
+            atlas_cached,
+            preferred_surface_defaults_available,
+            sp.reused_surface_defaults,
+            sp.pipeline_cache_hit,
             start.elapsed().as_secs_f64() * 1000.0,
+            host_setup_before_surface_ms,
+            watcher_ms.as_secs_f64() * 1000.0,
+            surface_total_ms.as_secs_f64() * 1000.0,
+            compositor_facing_ms,
+            handterm_surface_setup_ms,
+            surface_unaccounted_ms,
             dpi_ms.as_secs_f64() * 1000.0,
             bootstrap_ms.as_secs_f64() * 1000.0,
             window_ms.as_secs_f64() * 1000.0,
@@ -562,7 +598,6 @@ impl GpuApp {
             shared_ms.as_secs_f64() * 1000.0,
             terminal_ms.as_secs_f64() * 1000.0,
             pty_ms.as_secs_f64() * 1000.0,
-            watcher_ms.as_secs_f64() * 1000.0,
             surface_total_ms.as_secs_f64() * 1000.0,
             sp.window_create.as_secs_f64() * 1000.0,
             sp.ime_setup.as_secs_f64() * 1000.0,
@@ -570,13 +605,11 @@ impl GpuApp {
             sp.default_config.as_secs_f64() * 1000.0,
             sp.capabilities.as_secs_f64() * 1000.0,
             sp.configure.as_secs_f64() * 1000.0,
-            sp.reused_surface_defaults,
             sp.atlas_texture.as_secs_f64() * 1000.0,
             sp.uniform_buffer.as_secs_f64() * 1000.0,
             sp.instance_buffers.as_secs_f64() * 1000.0,
             sp.bind_group.as_secs_f64() * 1000.0,
             sp.pipeline_lookup.as_secs_f64() * 1000.0,
-            sp.pipeline_cache_hit,
             open_cpu.map(ProcessCpuTime::user_ms).unwrap_or(0.0),
             open_cpu.map(ProcessCpuTime::system_ms).unwrap_or(0.0),
             open_cpu.map(ProcessCpuTime::total_ms).unwrap_or(0.0),

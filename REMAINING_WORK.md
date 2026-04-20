@@ -164,6 +164,7 @@ That should **not** be repeated in the same way.
 - replace compositor-heavy benchmarking with safer host-internal instrumentation
 - measure repeated `open-window` calls without opening excessive live windows unnecessarily
 - prefer the new `scripts/profile_gpu_host_json_series.sh` workflow for small machine-parsed GPU-host sample series, because it uses `HANDTERM_PROFILE_JSON=1` plus an isolated host socket instead of compositor-heavy scraping
+- a later broader safe JSON-series run with 3 added windows still showed the same answer: add-window time remained dominated by the compositor-facing bucket, especially `configure`, so the overall bottleneck interpretation did not materially change
 - collect:
   - total open-window time
   - window/surface creation time
@@ -259,6 +260,8 @@ That defaults/constants cut is now done. The small `build_info` / protocol-build
 README and OPTIMIZATION have been updated substantially, but any future changes should continue to reflect measured results, not intended architecture.
 
 For now, `HANDTERM_PROFILE_JSON=1` should stay as an **internal opt-in diagnostics aid** rather than a prominently documented README feature. It is useful for safe machine-parsed profiling, but it is not a primary product surface.
+
+Likewise, `HANDTERM_HOST_SOCKET` should stay as an **internal diagnostics/testing hook** for isolated host-control workflows such as profiling scripts. It is useful for tests and local instrumentation, but it should not be treated as a primary user-facing product feature unless there is a stronger advanced-workflow use case later.
 
 The remaining Kitty image `partial*` gaps are no longer the preferred next protocol slice. Handterm now covers the core inline raw/compressed RGB/RGBA/PNG upload-place-delete path, and the remaining gaps are lower-leverage features such as non-inline transports and richer placement/operation parameters.
 

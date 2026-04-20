@@ -117,6 +117,17 @@ The recent internal GPU profiling now shows this more precisely:
 - first GPU window is dominated by shared GPU bring-up plus compositor surface configure
 - added GPU windows are currently dominated by **surface configure** on the profiled compositor session
 - a recent measured added-window sample was ~56.9 ms internal, with ~43.6 ms in surface setup and ~42.4 ms specifically in configure
+- the refined host profiling now logs:
+  - `kind=first-window` vs `kind=add-window`
+  - warm-cache flags such as `shared_warm`, `atlas_cached`, `defaults_reused`, and `pipeline_cache_hit`
+  - aggregate buckets: `host_setup_before_surface`, `compositor_facing`, `handterm_surface_setup`, and `surface_unaccounted`
+- a new safe live add-window sample on this session measured:
+  - `total=30.68ms`
+  - `host_setup_before_surface=13.93ms`
+  - `compositor_facing=25.93ms`
+  - `handterm_surface_setup=2.62ms`
+  - `open_to_first_present=32.54ms`
+- interpretation: the add-window path is still primarily blocked by compositor-facing window/surface configure work, while handterm-side GPU surface setup is now a much smaller portion of the total
 
 ### CPU host limitation
 
@@ -138,6 +149,7 @@ That should **not** be repeated in the same way.
   - window/surface creation time
   - PTY spawn time
   - host CPU time deltas (**now emitted by the host open-window / startup profiling logs; keep using those instead of compositor-heavy external loops**)
+  - the new aggregate buckets (`host_setup_before_surface`, `compositor_facing`, `handterm_surface_setup`) so future investigations can quickly tell whether a regression is inside handterm or mostly compositor-facing
 
 #### Important safety note
 

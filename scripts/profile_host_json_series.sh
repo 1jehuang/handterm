@@ -13,6 +13,7 @@ TMP_BASE="${HANDTERM_PROFILE_TMP_BASE:-/var/tmp}"
 mkdir -p "$OUT_DIR"
 JSONL_FILE="$OUT_DIR/host_json_series_${BACKEND}_${STAMP}.jsonl"
 SUMMARY_FILE="$OUT_DIR/host_json_series_${BACKEND}_${STAMP}.txt"
+SUMMARY_JSON_FILE="$OUT_DIR/host_json_series_${BACKEND}_${STAMP}.summary.json"
 
 usage() {
   cat <<EOF
@@ -259,13 +260,13 @@ for session_index in $(seq 1 "$REPEATS"); do
   run_session "$session_index"
 done
 
-python - <<'PY' "$JSONL_FILE" "$SUMMARY_FILE" "$ADD_WINDOWS" "$BACKEND" "$REPEATS"
+python - <<'PY' "$JSONL_FILE" "$SUMMARY_FILE" "$SUMMARY_JSON_FILE" "$ADD_WINDOWS" "$BACKEND" "$REPEATS"
 import json
 import statistics
 import sys
 from pathlib import Path
 
-jsonl_path, summary_path, add_windows, backend, repeats = Path(sys.argv[1]), Path(sys.argv[2]), int(sys.argv[3]), sys.argv[4], int(sys.argv[5])
+jsonl_path, summary_path, summary_json_path, add_windows, backend, repeats = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]), sys.argv[5], int(sys.argv[6])
 records = [json.loads(line) for line in jsonl_path.read_text().splitlines() if line.strip()]
 open_event_name = f'{backend}_host_open_window'
 ready_event_name = 'gpu_host_first_frame' if backend == 'gpu' else 'cpu_host_startup'
@@ -344,23 +345,31 @@ fields = (
 def summarize(group_name, subset):
     lines = [f'[{group_name}] count={len(subset)}']
     if not subset:
-        return lines
+        return lines, {'count': 0, 'sessions': []}
+    stats = {}
     for field in fields:
         values = [row[field] for row in subset if isinstance(row.get(field), (int, float))]
         if not values:
             continue
         lines.append(f'  {field}: min={min(values):.2f} median={statistics.median(values):.2f} max={max(values):.2f}')
+        stats[field] = {
+            'min': min(values),
+            'median': statistics.median(values),
+            'max': max(values),
+        }
     session_ids = sorted({row['session'] for row in subset})
     lines.append('  sessions=' + ', '.join(str(session_id) for session_id in session_ids))
-    return lines
+    return lines, {'count': len(subset), 'sessions': session_ids, 'stats': stats}
 
 first_rows = [row for row in rows if row['kind'] == 'first-window']
 add_rows = [row for row in rows if row['kind'] == 'add-window']
 output = []
 output.append(f'backend={backend} add_windows={add_windows} repeats={repeats} total_windows={len(rows)}')
 output.append(f'jsonl={jsonl_path}')
-output.extend(summarize('first-window', first_rows))
-output.extend(summarize('add-window', add_rows))
+first_lines, first_summary = summarize('first-window', first_rows)
+add_lines, add_summary = summarize('add-window', add_rows)
+output.extend(first_lines)
+output.extend(add_lines)
 output.append('')
 output.append('[per-window]')
 for row in rows:
@@ -391,8 +400,21 @@ for row in rows:
         )
 summary_text = '\n'.join(output) + '\n'
 summary_path.write_text(summary_text)
+summary_json = {
+    'backend': backend,
+    'add_windows': add_windows,
+    'repeats': repeats,
+    'total_windows': len(rows),
+    'jsonl': str(jsonl_path),
+    'groups': {
+        'first-window': first_summary,
+        'add-window': add_summary,
+    },
+}
+summary_json_path.write_text(json.dumps(summary_json, indent=2, sort_keys=True) + '\n')
 print(summary_text, end='')
 PY
 
 printf '\nSaved JSONL to %s\n' "$JSONL_FILE"
 printf 'Saved summary to %s\n' "$SUMMARY_FILE"
+printf 'Saved aggregate JSON to %s\n' "$SUMMARY_JSON_FILE"

@@ -35,6 +35,7 @@ pub struct Terminal {
     pub rows: u16,
     pub cursor_visible: bool,
     pub title: Option<String>,
+    last_dcs: Option<Vec<u8>>,
     response_buf: Vec<u8>,
     saved_cursor: Option<(usize, usize)>,
     mode_bracketed_paste: bool,
@@ -211,6 +212,7 @@ impl Terminal {
             rows,
             cursor_visible: true,
             title: None,
+            last_dcs: None,
             response_buf: Vec::new(),
             saved_cursor: None,
             mode_bracketed_paste: false,
@@ -266,6 +268,10 @@ impl Terminal {
 
     pub fn take_title(&mut self) -> Option<String> {
         self.title.take()
+    }
+
+    pub fn take_dcs(&mut self) -> Option<Vec<u8>> {
+        self.last_dcs.take()
     }
 
     pub fn bracketed_paste_mode(&self) -> bool {
@@ -600,6 +606,7 @@ impl Terminal {
                 final_byte,
             } => self.esc_dispatch(intermediate, final_byte),
             Action::OscDispatch(data) => self.osc_dispatch(&data),
+            Action::DcsDispatch(data) => self.dcs_dispatch(&data),
             Action::ApcDispatch(data) => self.apc_dispatch(&data),
             Action::Print(_) | Action::Nop => {}
         }
@@ -998,6 +1005,10 @@ impl Terminal {
         if let Some((col, row)) = self.saved_cursor {
             self.grid.set_cursor(row, col);
         }
+    }
+
+    fn dcs_dispatch(&mut self, data: &[u8]) {
+        self.last_dcs = Some(data.to_vec());
     }
 
     fn apc_dispatch(&mut self, data: &[u8]) {
@@ -1874,9 +1885,10 @@ mod tests {
     }
 
     #[test]
-    fn dcs_string_silently_consumed() {
+    fn dcs_string_dispatches_without_leaking_text() {
         let mut t = Terminal::new(80, 24);
         t.process(b"\x1bP+q696e646e\x1b\\");
+        assert_eq!(t.take_dcs().as_deref(), Some(b"+q696e646e".as_slice()));
         for col in 0..80 {
             let ch = t.grid.cell_char(0, col);
             assert!(

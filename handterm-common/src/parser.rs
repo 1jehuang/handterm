@@ -8,7 +8,7 @@ pub enum State {
     CsiParam,
     CsiIntermediate,
     OscString,
-    DcsEntry,
+    DcsString,
     ApcString,
 }
 
@@ -21,6 +21,7 @@ pub struct Parser {
     current_param: u16,
     intermediate: u8,
     osc_buf: Vec<u8>,
+    dcs_buf: Vec<u8>,
 }
 
 impl Default for Parser {
@@ -43,6 +44,7 @@ pub enum Action {
         final_byte: u8,
     },
     OscDispatch(Vec<u8>),
+    DcsDispatch(Vec<u8>),
     ApcDispatch(Vec<u8>),
     Nop,
 }
@@ -56,6 +58,7 @@ impl Parser {
             current_param: 0,
             intermediate: 0,
             osc_buf: Vec::new(),
+            dcs_buf: Vec::new(),
         }
     }
 
@@ -101,7 +104,7 @@ impl Parser {
             State::CsiParam => self.csi_param(byte),
             State::CsiIntermediate => self.csi_intermediate(byte),
             State::OscString => self.osc_string(byte),
-            State::DcsEntry => self.dcs_entry(byte),
+            State::DcsString => self.dcs_string(byte),
             State::ApcString => self.apc_string(byte),
         }
     }
@@ -118,7 +121,8 @@ impl Parser {
                 Action::Nop
             }
             b'P' => {
-                self.state = State::DcsEntry;
+                self.dcs_buf.clear();
+                self.state = State::DcsString;
                 Action::Nop
             }
             b'_' => {
@@ -282,13 +286,24 @@ impl Parser {
         }
     }
 
-    fn dcs_entry(&mut self, byte: u8) -> Action {
+    fn dcs_string(&mut self, byte: u8) -> Action {
         match byte {
             0x1b => {
                 self.state = State::Escape;
+                let data = std::mem::take(&mut self.dcs_buf);
+                Action::DcsDispatch(data)
+            }
+            0x07 => {
+                self.state = State::Ground;
+                let data = std::mem::take(&mut self.dcs_buf);
+                Action::DcsDispatch(data)
+            }
+            _ => {
+                if self.dcs_buf.len() < 1024 * 1024 {
+                    self.dcs_buf.push(byte);
+                }
                 Action::Nop
             }
-            _ => Action::Nop,
         }
     }
 
@@ -408,6 +423,18 @@ mod tests {
         assert_eq!(p.advance(b'x'), Action::Nop);
         assert_eq!(p.advance(0x07), Action::OscDispatch(b"0;x".to_vec()));
         assert_eq!(p.advance(b'A'), Action::Print(b'A'));
+    }
+
+    #[test]
+    fn dcs_dispatches_payload() {
+        let mut p = Parser::new();
+        assert_eq!(p.advance(0x1b), Action::Nop);
+        assert_eq!(p.advance(b'P'), Action::Nop);
+        assert_eq!(p.advance(b'+'), Action::Nop);
+        assert_eq!(p.advance(b'q'), Action::Nop);
+        assert_eq!(p.advance(b'1'), Action::Nop);
+        assert_eq!(p.advance(b'2'), Action::Nop);
+        assert_eq!(p.advance(0x1b), Action::DcsDispatch(b"+q12".to_vec()));
     }
 
     #[test]

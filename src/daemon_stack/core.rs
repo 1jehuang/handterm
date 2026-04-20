@@ -11,6 +11,7 @@ pub struct ServerCore {
     scrollback_limit: usize,
     windows: BTreeMap<WindowId, ServerWindow>,
     atlases_by_dpi: BTreeMap<u32, GlyphAtlas>,
+    protocol_build_id: String,
     font_family: String,
     font_size: f64,
 }
@@ -61,12 +62,18 @@ pub enum ServerError {
 }
 
 impl ServerCore {
-    pub fn new_with_style(scrollback_limit: usize, font_family: String, font_size: f64) -> Self {
+    pub fn new_with_style(
+        scrollback_limit: usize,
+        font_family: String,
+        font_size: f64,
+        protocol_build_id: String,
+    ) -> Self {
         Self {
             next_window_id: 1,
             scrollback_limit,
             windows: BTreeMap::new(),
             atlases_by_dpi: BTreeMap::new(),
+            protocol_build_id,
             font_family,
             font_size,
         }
@@ -171,7 +178,7 @@ impl ServerCore {
         match message {
             ClientMessage::Ping { .. } => Ok(ServerHandleResult {
                 messages: vec![ServerMessage::Pong {
-                    build_id: crate::build_info::protocol_build_id(),
+                    build_id: self.protocol_build_id.clone(),
                 }],
                 io_actions: Vec::new(),
             }),
@@ -495,7 +502,12 @@ mod tests {
     use super::*;
 
     fn test_server() -> ServerCore {
-        ServerCore::new_with_style(10_000, "JetBrainsMono Nerd Font Light".to_string(), 11.0)
+        ServerCore::new_with_style(
+            10_000,
+            "JetBrainsMono Nerd Font Light".to_string(),
+            11.0,
+            "test-build".to_string(),
+        )
     }
 
     fn created_window_id(message: ServerMessage) -> WindowId {
@@ -523,8 +535,12 @@ mod tests {
 
     #[test]
     fn server_core_uses_configured_scrollback_limit_for_new_windows() {
-        let mut server =
-            ServerCore::new_with_style(0, "JetBrainsMono Nerd Font Light".to_string(), 11.0);
+        let mut server = ServerCore::new_with_style(
+            0,
+            "JetBrainsMono Nerd Font Light".to_string(),
+            11.0,
+            "test-build".to_string(),
+        );
         let window_id = created_window_id(server.create_window(4, 2, 96));
         let window = server.windows.get(&window_id).expect("window should exist");
 
@@ -785,7 +801,7 @@ mod tests {
         assert_eq!(
             result.messages,
             vec![ServerMessage::Pong {
-                build_id: crate::build_info::protocol_build_id(),
+                build_id: "test-build".to_string(),
             }]
         );
         assert!(result.io_actions.is_empty());

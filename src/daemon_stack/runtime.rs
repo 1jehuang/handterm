@@ -29,15 +29,23 @@ pub fn default_server_socket_path() -> PathBuf {
     PathBuf::from(runtime_dir).join("handterm-server.sock")
 }
 
-pub fn run_server_only(socket: Option<PathBuf>, config: &AppConfig) -> Result<()> {
+pub fn run_server_only_with_build_id(
+    socket: Option<PathBuf>,
+    config: &AppConfig,
+    protocol_build_id: String,
+) -> Result<()> {
     let socket_path = socket.unwrap_or_else(default_server_socket_path);
-    let mut daemon = ServerDaemon::bind(&socket_path, config.scrollback.lines)?;
+    let mut daemon = ServerDaemon::bind(&socket_path, config.scrollback.lines, protocol_build_id)?;
     eprintln!("handterm server listening on {}", socket_path.display());
     daemon.run()
 }
 
-pub fn ensure_server_running(socket_path: &Path, config_override: Option<&Path>) -> Result<()> {
-    if server_is_compatible(socket_path) {
+pub fn ensure_server_running_with_build_id(
+    socket_path: &Path,
+    config_override: Option<&Path>,
+    protocol_build_id: &str,
+) -> Result<()> {
+    if server_is_compatible(socket_path, protocol_build_id) {
         return Ok(());
     }
 
@@ -60,7 +68,7 @@ pub fn ensure_server_running(socket_path: &Path, config_override: Option<&Path>)
 
     let deadline = Instant::now() + SERVER_START_TIMEOUT;
     while Instant::now() < deadline {
-        if server_is_compatible(socket_path) {
+        if server_is_compatible(socket_path, protocol_build_id) {
             return Ok(());
         }
         if let Some(status) = child.try_wait().context("failed polling spawned server")? {
@@ -75,21 +83,21 @@ pub fn ensure_server_running(socket_path: &Path, config_override: Option<&Path>)
     );
 }
 
-fn server_is_compatible(socket_path: &Path) -> bool {
+fn server_is_compatible(socket_path: &Path, protocol_build_id: &str) -> bool {
     let Ok(mut stream) = UnixStream::connect(socket_path) else {
         return false;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
     let probe = ClientMessage::Ping {
-        build_id: crate::build_info::protocol_build_id().to_string(),
+        build_id: protocol_build_id.to_string(),
     };
     if write_client_message(&mut stream, &probe).is_err() {
         return false;
     }
     matches!(
         read_server_message(&mut stream),
-        Ok(ServerMessage::Pong { build_id }) if build_id == crate::build_info::protocol_build_id()
+        Ok(ServerMessage::Pong { build_id }) if build_id == protocol_build_id
     )
 }
 
@@ -110,7 +118,7 @@ pub struct ServerDaemon {
 }
 
 impl ServerDaemon {
-    pub fn bind(path: &Path, scrollback_limit: usize) -> Result<Self> {
+    pub fn bind(path: &Path, scrollback_limit: usize, protocol_build_id: String) -> Result<Self> {
         if path.exists() {
             std::fs::remove_file(path).ok();
         }
@@ -130,7 +138,12 @@ impl ServerDaemon {
             clients: Vec::new(),
             core: {
                 let (font_family, font_size) = daemon_style_defaults();
-                ServerCore::new_with_style(scrollback_limit, font_family, font_size)
+                ServerCore::new_with_style(
+                    scrollback_limit,
+                    font_family,
+                    font_size,
+                    protocol_build_id,
+                )
             },
             ptys: BTreeMap::new(),
             io_buf: vec![0; CLIENT_IO_BUF_SIZE],
@@ -531,7 +544,8 @@ mod tests {
     fn daemon_bind_uses_configured_scrollback_limit() {
         let temp = tempdir().expect("tempdir should exist");
         let socket_path = temp.path().join("handterm-server.sock");
-        let mut daemon = ServerDaemon::bind(&socket_path, 0).expect("daemon should bind");
+        let mut daemon = ServerDaemon::bind(&socket_path, 0, "test-build".to_string())
+            .expect("daemon should bind");
 
         let created = daemon.core.create_window(4, 2, 96);
         let window_id = match created {
@@ -555,8 +569,12 @@ mod tests {
         let stop_thread = stop.clone();
 
         let handle = thread::spawn(move || {
-            let mut daemon = ServerDaemon::bind(&socket_path, crate::grid::DEFAULT_SCROLLBACK_MAX)
-                .expect("daemon should bind");
+            let mut daemon = ServerDaemon::bind(
+                &socket_path,
+                crate::grid::DEFAULT_SCROLLBACK_MAX,
+                "test-build".to_string(),
+            )
+            .expect("daemon should bind");
             while !stop_thread.load(Ordering::Relaxed) {
                 daemon.poll_once().expect("daemon poll should succeed");
             }
@@ -628,16 +646,19 @@ mod tests {
         let socket_path_for_thread = socket_path.clone();
 
         let handle = thread::spawn(move || {
-            let mut daemon =
-                ServerDaemon::bind(&socket_path_for_thread, crate::grid::DEFAULT_SCROLLBACK_MAX)
-                    .expect("daemon should bind");
+            let mut daemon = ServerDaemon::bind(
+                &socket_path_for_thread,
+                crate::grid::DEFAULT_SCROLLBACK_MAX,
+                "test-build".to_string(),
+            )
+            .expect("daemon should bind");
             while !stop_thread.load(Ordering::Relaxed) {
                 daemon.poll_once().expect("daemon poll should succeed");
             }
         });
 
         for _ in 0..50 {
-            if server_is_compatible(&socket_path) {
+            if server_is_compatible(&socket_path, "test-build") {
                 stop.store(true, Ordering::Relaxed);
                 handle.join().expect("daemon thread should join");
                 return;
@@ -648,5 +669,40 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         handle.join().expect("daemon thread should join");
         panic!("live daemon should satisfy compatibility probe");
+    }
+
+    #[test]
+    fn compatible_server_probe_rejects_mismatched_build_id() {
+        let temp = tempdir().expect("tempdir should exist");
+        let socket_path = temp.path().join("handterm-server.sock");
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = stop.clone();
+        let socket_path_for_thread = socket_path.clone();
+
+        let handle = thread::spawn(move || {
+            let mut daemon = ServerDaemon::bind(
+                &socket_path_for_thread,
+                crate::grid::DEFAULT_SCROLLBACK_MAX,
+                "server-build".to_string(),
+            )
+            .expect("daemon should bind");
+            while !stop_thread.load(Ordering::Relaxed) {
+                daemon.poll_once().expect("daemon poll should succeed");
+            }
+        });
+
+        for _ in 0..50 {
+            if socket_path.exists() {
+                assert!(!server_is_compatible(&socket_path, "client-build"));
+                stop.store(true, Ordering::Relaxed);
+                handle.join().expect("daemon thread should join");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        handle.join().expect("daemon thread should join");
+        panic!("daemon socket should appear for mismatch probe test");
     }
 }

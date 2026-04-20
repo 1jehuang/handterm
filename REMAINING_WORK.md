@@ -244,13 +244,13 @@ For now, it is reasonable to pause the deeper daemon/server extraction here and 
 
 Concrete dependencies to plan for in that deeper `src/daemon.rs` + `src/server.rs` move:
 - PTY/process management (`crate::pty::PtyChild`)
-- config/build metadata inputs (`crate::config::AppConfig`, `crate::build_info::protocol_build_id`)
+- config inputs (`crate::config::AppConfig`)
 - font/protocol rendering support still owned by the root crate (`crate::font::{GlyphAtlas, GlyphFormat}`)
 - protocol/common terminal types, which are already much closer to the shared-core boundary
 
 After the new `src/daemon_stack/` boundary, the next smallest real coupling reduction is probably inside `daemon_stack::core`: stop depending on root-config defaults and root grid constants directly, and push those defaults in from a narrower boundary. `font` and `pty` remain larger follow-up moves.
 
-That defaults/constants cut is now done. The next cheapest follow-up would probably be `build_info` / protocol-metadata plumbing, but the payoff is relatively small compared with the larger remaining `font` and `pty` couplings. At this point, the current `daemon_stack` boundary is probably a sufficient maintainability win unless there is a strong reason to keep prioritizing the package split.
+That defaults/constants cut is now done. The small `build_info` / protocol-build-id plumbing cut is also done: the `daemon_stack` boundary now receives protocol build IDs from the outer `crate::daemon` wrapper instead of reaching back into root build metadata directly. At this point, the remaining higher-friction couplings are mostly `font` and `pty`, so the current `daemon_stack` boundary is probably a sufficient maintainability win unless there is a strong reason to keep prioritizing the package split.
 
 ### 5. Keep docs aligned with measured reality
 

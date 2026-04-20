@@ -26,6 +26,15 @@ fn dec_special_to_unicode(b: u8) -> u32 {
     }
 }
 
+const CONTROL_STRING_EVENT_LIMIT: usize = 256;
+
+fn push_bounded<T>(queue: &mut Vec<T>, value: T) {
+    if queue.len() >= CONTROL_STRING_EVENT_LIMIT {
+        queue.remove(0);
+    }
+    queue.push(value);
+}
+
 pub struct Terminal {
     pub grid: Grid,
     alt_grid: Option<Grid>,
@@ -1139,13 +1148,13 @@ impl Terminal {
             let event = ApcEvent::KittyGraphics(data[1..].to_vec());
             self.control_string_events
                 .push(ControlStringEvent::Apc(event.clone()));
-            self.apc_events.push(event);
+            push_bounded(&mut self.apc_events, event);
             self.handle_kitty_graphics(&data[1..]);
         } else {
             let event = ApcEvent::Generic(data.to_vec());
             self.control_string_events
                 .push(ControlStringEvent::Apc(event.clone()));
-            self.apc_events.push(event);
+            push_bounded(&mut self.apc_events, event);
         }
     }
 

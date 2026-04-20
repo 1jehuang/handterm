@@ -15,6 +15,17 @@ pub struct KittyPlacement {
     pub rows: usize,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct KittyUploadState {
+    pub payload_buf: Vec<u8>,
+    pub pending_id: u32,
+    pub pending_fmt: u32,
+    pub pending_width: u32,
+    pub pending_height: u32,
+    pub pending_compression: Option<u8>,
+    pub more_chunks: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct KittyImageFinalize {
     pub id: u32,

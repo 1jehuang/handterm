@@ -1,8 +1,8 @@
 use crate::control_strings::{
     ApcEvent, ControlStringEvent, ControlStringState, DcsEvent, OscEvent, SixelEvent,
 };
-use crate::graphics::decode_kitty_image_payload;
 pub use crate::graphics::{KittyGraphicsCommand, KittyImage, KittyImageFinalize, KittyPlacement};
+use crate::graphics::{KittyUploadState, decode_kitty_image_payload};
 use crate::grid::Grid;
 use crate::parser::{Action, Parser};
 use crate::protocol::{CursorState, DirtyCell, ServerMessage, WindowModes};
@@ -10,7 +10,6 @@ use crate::server_sync::{
     AppliedServerEffects, apply_cursor_state as apply_wire_cursor_state,
     apply_dirty_cell as apply_wire_dirty_cell, kitty_images_from_wire, kitty_placements_from_wire,
 };
-use std::io::{Cursor, Read};
 
 fn dec_special_to_unicode(b: u8) -> u32 {
     match b {
@@ -29,15 +28,6 @@ fn dec_special_to_unicode(b: u8) -> u32 {
         b'`' => 0x25C6, // ◆
         _ => b as u32,
     }
-}
-
-const CONTROL_STRING_EVENT_LIMIT: usize = 256;
-
-fn push_bounded<T>(queue: &mut Vec<T>, value: T) {
-    if queue.len() >= CONTROL_STRING_EVENT_LIMIT {
-        queue.remove(0);
-    }
-    queue.push(value);
 }
 
 pub struct Terminal {
@@ -67,13 +57,7 @@ pub struct Terminal {
     kitty_images: Vec<KittyImage>,
     pub kitty_placements: Vec<KittyPlacement>,
     saved_main_kitty_placements: Option<Vec<KittyPlacement>>,
-    kitty_payload_buf: Vec<u8>,
-    kitty_pending_id: u32,
-    kitty_pending_fmt: u32,
-    kitty_pending_width: u32,
-    kitty_pending_height: u32,
-    kitty_pending_compression: Option<u8>,
-    kitty_more_chunks: bool,
+    kitty_upload: KittyUploadState,
     kitty_generation: u64,
     kitty_keyboard_main_flags: u8,
     kitty_keyboard_alt_flags: u8,
@@ -208,13 +192,7 @@ impl Terminal {
             kitty_images: Vec::new(),
             kitty_placements: Vec::new(),
             saved_main_kitty_placements: None,
-            kitty_payload_buf: Vec::new(),
-            kitty_pending_id: 0,
-            kitty_pending_fmt: 0,
-            kitty_pending_width: 0,
-            kitty_pending_height: 0,
-            kitty_pending_compression: None,
-            kitty_more_chunks: false,
+            kitty_upload: KittyUploadState::default(),
             kitty_generation: 0,
             kitty_keyboard_main_flags: 0,
             kitty_keyboard_alt_flags: 0,
@@ -1117,38 +1095,38 @@ impl Terminal {
 
         match action {
             b't' | b'T' | 0 => {
-                if action == 0 && !self.kitty_more_chunks && !more {
+                if action == 0 && !self.kitty_upload.more_chunks && !more {
                     return;
                 }
-                if self.kitty_more_chunks || more {
-                    self.kitty_payload_buf.extend_from_slice(payload);
+                if self.kitty_upload.more_chunks || more {
+                    self.kitty_upload.payload_buf.extend_from_slice(payload);
                     if img_id > 0 {
-                        self.kitty_pending_id = img_id;
+                        self.kitty_upload.pending_id = img_id;
                     }
                     if fmt > 0 {
-                        self.kitty_pending_fmt = fmt;
+                        self.kitty_upload.pending_fmt = fmt;
                     }
                     if width > 0 {
-                        self.kitty_pending_width = width;
+                        self.kitty_upload.pending_width = width;
                     }
                     if height > 0 {
-                        self.kitty_pending_height = height;
+                        self.kitty_upload.pending_height = height;
                     }
                     if compression.is_some() {
-                        self.kitty_pending_compression = compression;
+                        self.kitty_upload.pending_compression = compression;
                     }
-                    self.kitty_more_chunks = more;
+                    self.kitty_upload.more_chunks = more;
                     if !more {
-                        let full_payload = std::mem::take(&mut self.kitty_payload_buf);
-                        let final_id = self.kitty_pending_id;
-                        let final_fmt = self.kitty_pending_fmt;
-                        let final_w = self.kitty_pending_width;
-                        let final_h = self.kitty_pending_height;
-                        let final_compression = self.kitty_pending_compression.take();
-                        self.kitty_pending_id = 0;
-                        self.kitty_pending_fmt = 0;
-                        self.kitty_pending_width = 0;
-                        self.kitty_pending_height = 0;
+                        let full_payload = std::mem::take(&mut self.kitty_upload.payload_buf);
+                        let final_id = self.kitty_upload.pending_id;
+                        let final_fmt = self.kitty_upload.pending_fmt;
+                        let final_w = self.kitty_upload.pending_width;
+                        let final_h = self.kitty_upload.pending_height;
+                        let final_compression = self.kitty_upload.pending_compression.take();
+                        self.kitty_upload.pending_id = 0;
+                        self.kitty_upload.pending_fmt = 0;
+                        self.kitty_upload.pending_width = 0;
+                        self.kitty_upload.pending_height = 0;
                         let request = KittyImageFinalize {
                             id: final_id,
                             compression: final_compression,
@@ -1302,12 +1280,13 @@ impl Terminal {
     }
 
     fn abort_partial_kitty_upload(&mut self) {
-        self.kitty_payload_buf.clear();
-        self.kitty_pending_id = 0;
-        self.kitty_pending_fmt = 0;
-        self.kitty_pending_width = 0;
-        self.kitty_pending_height = 0;
-        self.kitty_more_chunks = false;
+        self.kitty_upload.payload_buf.clear();
+        self.kitty_upload.pending_id = 0;
+        self.kitty_upload.pending_fmt = 0;
+        self.kitty_upload.pending_width = 0;
+        self.kitty_upload.pending_height = 0;
+        self.kitty_upload.pending_compression = None;
+        self.kitty_upload.more_chunks = false;
     }
 
     fn delete_all_kitty_placements(&mut self) -> bool {

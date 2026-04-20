@@ -226,6 +226,16 @@ The current split is good, but not final.
 
 Highest-value next cleanup slice: move daemon/client/server-specific runtime and entrypoint logic out of the root crate and into the already-created workspace packages, because those split packages currently remain thin wrappers while the root crate still owns most of the real implementation.
 
+Current map of root-owned daemon/client/server-specific surface area:
+- `src/daemon.rs`
+- `src/server.rs`
+- `src/client.rs`
+- `src/remote_app.rs`
+- `src/remote_gpu_app.rs`
+- daemon-specific branches in `src/runtime.rs` (`server-only` / `client-only`)
+
+Smallest safe refactor before a true package move: isolate the daemon/client/server launch and runtime glue behind clearer module boundaries first. A direct move into the existing split binary packages would otherwise create awkward dependency cycles, because those packages currently depend on the root crate.
+
 ### 5. Keep docs aligned with measured reality
 
 README and OPTIMIZATION have been updated substantially, but any future changes should continue to reflect measured results, not intended architecture.

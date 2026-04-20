@@ -50,41 +50,183 @@ pub fn parse_synthetic_key(spec: &str) -> Key {
     }
 }
 
+fn parse_synthetic_named_physical_key(spec: &str) -> Option<KeyCode> {
+    match spec {
+        "escape" | "esc" => Some(KeyCode::Escape),
+        "tab" => Some(KeyCode::Tab),
+        "enter" | "return" => Some(KeyCode::Enter),
+        "space" => Some(KeyCode::Space),
+        "backspace" => Some(KeyCode::Backspace),
+        "delete" => Some(KeyCode::Delete),
+        "insert" => Some(KeyCode::Insert),
+        "home" => Some(KeyCode::Home),
+        "end" => Some(KeyCode::End),
+        "page_up" | "pageup" => Some(KeyCode::PageUp),
+        "page_down" | "pagedown" => Some(KeyCode::PageDown),
+        "up" | "arrow_up" | "arrowup" => Some(KeyCode::ArrowUp),
+        "down" | "arrow_down" | "arrowdown" => Some(KeyCode::ArrowDown),
+        "left" | "arrow_left" | "arrowleft" => Some(KeyCode::ArrowLeft),
+        "right" | "arrow_right" | "arrowright" => Some(KeyCode::ArrowRight),
+        "caps_lock" | "capslock" => Some(KeyCode::CapsLock),
+        "num_lock" | "numlock" => Some(KeyCode::NumLock),
+        "scroll_lock" | "scrolllock" => Some(KeyCode::ScrollLock),
+        "print_screen" | "printscreen" => Some(KeyCode::PrintScreen),
+        "pause" => Some(KeyCode::Pause),
+        "context_menu" | "contextmenu" | "menu" => Some(KeyCode::ContextMenu),
+        "backquote" => Some(KeyCode::Backquote),
+        "minus" => Some(KeyCode::Minus),
+        "equal" => Some(KeyCode::Equal),
+        "bracket_left" | "bracketleft" => Some(KeyCode::BracketLeft),
+        "bracket_right" | "bracketright" => Some(KeyCode::BracketRight),
+        "backslash" => Some(KeyCode::Backslash),
+        "semicolon" => Some(KeyCode::Semicolon),
+        "quote" => Some(KeyCode::Quote),
+        "comma" => Some(KeyCode::Comma),
+        "period" => Some(KeyCode::Period),
+        "slash" => Some(KeyCode::Slash),
+        "shift_left" | "shiftleft" => Some(KeyCode::ShiftLeft),
+        "shift_right" | "shiftright" => Some(KeyCode::ShiftRight),
+        "control_left" | "controlleft" | "ctrl_left" | "ctrlleft" => Some(KeyCode::ControlLeft),
+        "control_right" | "controlright" | "ctrl_right" | "ctrlright" => {
+            Some(KeyCode::ControlRight)
+        }
+        "alt_left" | "altleft" => Some(KeyCode::AltLeft),
+        "alt_right" | "altright" => Some(KeyCode::AltRight),
+        "super_left" | "superleft" => Some(KeyCode::SuperLeft),
+        "super_right" | "superright" => Some(KeyCode::SuperRight),
+        "meta" => Some(KeyCode::Meta),
+        "hyper" => Some(KeyCode::Hyper),
+        "numpad0" => Some(KeyCode::Numpad0),
+        "numpad1" => Some(KeyCode::Numpad1),
+        "numpad2" => Some(KeyCode::Numpad2),
+        "numpad3" => Some(KeyCode::Numpad3),
+        "numpad4" => Some(KeyCode::Numpad4),
+        "numpad5" => Some(KeyCode::Numpad5),
+        "numpad6" => Some(KeyCode::Numpad6),
+        "numpad7" => Some(KeyCode::Numpad7),
+        "numpad8" => Some(KeyCode::Numpad8),
+        "numpad9" => Some(KeyCode::Numpad9),
+        "numpad_decimal" | "numpaddecimal" => Some(KeyCode::NumpadDecimal),
+        "numpad_divide" | "numpaddivide" => Some(KeyCode::NumpadDivide),
+        "numpad_multiply" | "numpadmultiply" => Some(KeyCode::NumpadMultiply),
+        "numpad_subtract" | "numpadsubtract" => Some(KeyCode::NumpadSubtract),
+        "numpad_add" | "numpadadd" => Some(KeyCode::NumpadAdd),
+        "numpad_enter" | "numpadenter" => Some(KeyCode::NumpadEnter),
+        "numpad_equal" | "numpadequal" => Some(KeyCode::NumpadEqual),
+        "numpad_comma" | "numpadcomma" => Some(KeyCode::NumpadComma),
+        _ => None,
+    }
+}
+
+fn parse_synthetic_letter_physical_key(spec: &str) -> Option<KeyCode> {
+    let suffix = spec
+        .strip_prefix("key_")
+        .or_else(|| spec.strip_prefix("key"))?;
+    if suffix.len() != 1 {
+        return None;
+    }
+    match suffix.chars().next()? {
+        'a' => Some(KeyCode::KeyA),
+        'b' => Some(KeyCode::KeyB),
+        'c' => Some(KeyCode::KeyC),
+        'd' => Some(KeyCode::KeyD),
+        'e' => Some(KeyCode::KeyE),
+        'f' => Some(KeyCode::KeyF),
+        'g' => Some(KeyCode::KeyG),
+        'h' => Some(KeyCode::KeyH),
+        'i' => Some(KeyCode::KeyI),
+        'j' => Some(KeyCode::KeyJ),
+        'k' => Some(KeyCode::KeyK),
+        'l' => Some(KeyCode::KeyL),
+        'm' => Some(KeyCode::KeyM),
+        'n' => Some(KeyCode::KeyN),
+        'o' => Some(KeyCode::KeyO),
+        'p' => Some(KeyCode::KeyP),
+        'q' => Some(KeyCode::KeyQ),
+        'r' => Some(KeyCode::KeyR),
+        's' => Some(KeyCode::KeyS),
+        't' => Some(KeyCode::KeyT),
+        'u' => Some(KeyCode::KeyU),
+        'v' => Some(KeyCode::KeyV),
+        'w' => Some(KeyCode::KeyW),
+        'x' => Some(KeyCode::KeyX),
+        'y' => Some(KeyCode::KeyY),
+        'z' => Some(KeyCode::KeyZ),
+        _ => None,
+    }
+}
+
+fn parse_synthetic_digit_physical_key(spec: &str) -> Option<KeyCode> {
+    let suffix = spec
+        .strip_prefix("digit_")
+        .or_else(|| spec.strip_prefix("digit"))?;
+    if suffix.len() != 1 {
+        return None;
+    }
+    match suffix.chars().next()? {
+        '0' => Some(KeyCode::Digit0),
+        '1' => Some(KeyCode::Digit1),
+        '2' => Some(KeyCode::Digit2),
+        '3' => Some(KeyCode::Digit3),
+        '4' => Some(KeyCode::Digit4),
+        '5' => Some(KeyCode::Digit5),
+        '6' => Some(KeyCode::Digit6),
+        '7' => Some(KeyCode::Digit7),
+        '8' => Some(KeyCode::Digit8),
+        '9' => Some(KeyCode::Digit9),
+        _ => None,
+    }
+}
+
+fn parse_synthetic_function_physical_key(spec: &str) -> Option<KeyCode> {
+    let value = spec.strip_prefix('f')?.parse::<u8>().ok()?;
+    match value {
+        1 => Some(KeyCode::F1),
+        2 => Some(KeyCode::F2),
+        3 => Some(KeyCode::F3),
+        4 => Some(KeyCode::F4),
+        5 => Some(KeyCode::F5),
+        6 => Some(KeyCode::F6),
+        7 => Some(KeyCode::F7),
+        8 => Some(KeyCode::F8),
+        9 => Some(KeyCode::F9),
+        10 => Some(KeyCode::F10),
+        11 => Some(KeyCode::F11),
+        12 => Some(KeyCode::F12),
+        13 => Some(KeyCode::F13),
+        14 => Some(KeyCode::F14),
+        15 => Some(KeyCode::F15),
+        16 => Some(KeyCode::F16),
+        17 => Some(KeyCode::F17),
+        18 => Some(KeyCode::F18),
+        19 => Some(KeyCode::F19),
+        20 => Some(KeyCode::F20),
+        21 => Some(KeyCode::F21),
+        22 => Some(KeyCode::F22),
+        23 => Some(KeyCode::F23),
+        24 => Some(KeyCode::F24),
+        25 => Some(KeyCode::F25),
+        26 => Some(KeyCode::F26),
+        27 => Some(KeyCode::F27),
+        28 => Some(KeyCode::F28),
+        29 => Some(KeyCode::F29),
+        30 => Some(KeyCode::F30),
+        31 => Some(KeyCode::F31),
+        32 => Some(KeyCode::F32),
+        33 => Some(KeyCode::F33),
+        34 => Some(KeyCode::F34),
+        35 => Some(KeyCode::F35),
+        _ => None,
+    }
+}
+
 pub fn parse_synthetic_physical_key(spec: Option<&str>) -> Option<PhysicalKey> {
     let spec = spec?;
     let lower = spec.to_ascii_lowercase();
-    let code = match lower.as_str() {
-        "context_menu" | "contextmenu" | "menu" => KeyCode::ContextMenu,
-        "shift_left" | "shiftleft" => KeyCode::ShiftLeft,
-        "shift_right" | "shiftright" => KeyCode::ShiftRight,
-        "control_left" | "controlleft" | "ctrl_left" | "ctrlleft" => KeyCode::ControlLeft,
-        "control_right" | "controlright" | "ctrl_right" | "ctrlright" => KeyCode::ControlRight,
-        "alt_left" | "altleft" => KeyCode::AltLeft,
-        "alt_right" | "altright" => KeyCode::AltRight,
-        "super_left" | "superleft" => KeyCode::SuperLeft,
-        "super_right" | "superright" => KeyCode::SuperRight,
-        "meta" => KeyCode::Meta,
-        "hyper" => KeyCode::Hyper,
-        "numpad0" => KeyCode::Numpad0,
-        "numpad1" => KeyCode::Numpad1,
-        "numpad2" => KeyCode::Numpad2,
-        "numpad3" => KeyCode::Numpad3,
-        "numpad4" => KeyCode::Numpad4,
-        "numpad5" => KeyCode::Numpad5,
-        "numpad6" => KeyCode::Numpad6,
-        "numpad7" => KeyCode::Numpad7,
-        "numpad8" => KeyCode::Numpad8,
-        "numpad9" => KeyCode::Numpad9,
-        "numpad_decimal" | "numpaddecimal" => KeyCode::NumpadDecimal,
-        "numpad_divide" | "numpaddivide" => KeyCode::NumpadDivide,
-        "numpad_multiply" | "numpadmultiply" => KeyCode::NumpadMultiply,
-        "numpad_subtract" | "numpadsubtract" => KeyCode::NumpadSubtract,
-        "numpad_add" | "numpadadd" => KeyCode::NumpadAdd,
-        "numpad_enter" | "numpadenter" => KeyCode::NumpadEnter,
-        "numpad_equal" | "numpadequal" => KeyCode::NumpadEqual,
-        "numpad_comma" | "numpadcomma" => KeyCode::NumpadComma,
-        _ => return None,
-    };
+    let code = parse_synthetic_named_physical_key(&lower)
+        .or_else(|| parse_synthetic_letter_physical_key(&lower))
+        .or_else(|| parse_synthetic_digit_physical_key(&lower))
+        .or_else(|| parse_synthetic_function_physical_key(&lower))?;
     Some(PhysicalKey::Code(code))
 }
 
@@ -1336,6 +1478,26 @@ mod tests {
         assert_eq!(
             parse_synthetic_physical_key(Some("shift_right")),
             Some(PhysicalKey::Code(KeyCode::ShiftRight))
+        );
+        assert_eq!(
+            parse_synthetic_physical_key(Some("key_c")),
+            Some(PhysicalKey::Code(KeyCode::KeyC))
+        );
+        assert_eq!(
+            parse_synthetic_physical_key(Some("digit7")),
+            Some(PhysicalKey::Code(KeyCode::Digit7))
+        );
+        assert_eq!(
+            parse_synthetic_physical_key(Some("f12")),
+            Some(PhysicalKey::Code(KeyCode::F12))
+        );
+        assert_eq!(
+            parse_synthetic_physical_key(Some("page_down")),
+            Some(PhysicalKey::Code(KeyCode::PageDown))
+        );
+        assert_eq!(
+            parse_synthetic_physical_key(Some("backquote")),
+            Some(PhysicalKey::Code(KeyCode::Backquote))
         );
         assert_eq!(parse_synthetic_physical_key(Some("unknown")), None);
         assert_eq!(parse_synthetic_physical_key(None), None);

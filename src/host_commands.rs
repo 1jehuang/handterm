@@ -85,7 +85,28 @@ pub fn host_ls_response(include_host_commands: bool) -> Response {
     if include_host_commands {
         commands.extend(["open-window", "focus-window", "list-windows"]);
     }
-    Response::ok(serde_json::json!({ "commands": commands }))
+    Response::ok(serde_json::json!({
+        "commands": commands,
+        "command_details": {
+            "send-key-event": {
+                "optional_args": [
+                    "window_id",
+                    "kind",
+                    "text",
+                    "ctrl",
+                    "alt",
+                    "shift",
+                    "super",
+                    "super_key",
+                    "hyper",
+                    "meta",
+                    "physical_key"
+                ],
+                "physical_key_examples": ["context_menu", "numpad5", "shift_right"],
+                "physical_key_note": "Accepted names follow the synthetic physical-key parser and cover common named keys, keypad keys, side-specific Shift/Ctrl/Alt/Super variants, key_* letters, digit* keys, and f1-f35."
+            }
+        }
+    }))
 }
 
 pub fn into_ipc_action(request: HostControlRequest) -> (Response, IpcAction) {
@@ -263,6 +284,31 @@ mod tests {
             commands
                 .iter()
                 .any(|value| value.as_str() == Some("list-windows"))
+        );
+
+        let send_key_event = response
+            .data
+            .as_ref()
+            .and_then(|data| data.get("command_details"))
+            .and_then(|details| details.get("send-key-event"))
+            .expect("send-key-event details should exist");
+        let optional_args = send_key_event
+            .get("optional_args")
+            .and_then(|value| value.as_array())
+            .expect("optional args should be present");
+        assert!(
+            optional_args
+                .iter()
+                .any(|value| value.as_str() == Some("physical_key"))
+        );
+        let examples = send_key_event
+            .get("physical_key_examples")
+            .and_then(|value| value.as_array())
+            .expect("physical_key examples should be present");
+        assert!(
+            examples
+                .iter()
+                .any(|value| value.as_str() == Some("context_menu"))
         );
     }
 }

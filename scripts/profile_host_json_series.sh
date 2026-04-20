@@ -10,6 +10,10 @@ REPEATS="${2:-${HANDTERM_PROFILE_REPEATS:-1}}"
 BACKEND="${HANDTERM_SPAWN_BACKEND:-gpu}"
 SAFE_MAX_ADD_WINDOWS="${HANDTERM_PROFILE_SAFE_MAX_ADD_WINDOWS:-4}"
 TMP_BASE="${HANDTERM_PROFILE_TMP_BASE:-/var/tmp}"
+RAW_EVENT_SCHEMA="handterm.profile_event"
+RAW_EVENT_SCHEMA_VERSION=1
+SUMMARY_SCHEMA="handterm.profile_series"
+SUMMARY_SCHEMA_VERSION=1
 mkdir -p "$OUT_DIR"
 JSONL_FILE="$OUT_DIR/host_json_series_${BACKEND}_${STAMP}.jsonl"
 SUMMARY_FILE="$OUT_DIR/host_json_series_${BACKEND}_${STAMP}.txt"
@@ -197,12 +201,12 @@ PY
 
 append_session_records() {
   local session_index="$1"
-  python - <<'PY' "$HOST_LOG" "$JSONL_FILE" "$BACKEND" "$session_index"
+  python - <<'PY' "$HOST_LOG" "$JSONL_FILE" "$BACKEND" "$session_index" "$RAW_EVENT_SCHEMA" "$RAW_EVENT_SCHEMA_VERSION"
 import json
 import sys
 from pathlib import Path
 
-log_path, jsonl_path, backend, session_index = sys.argv[1], Path(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+log_path, jsonl_path, backend, session_index, expected_schema, expected_schema_version = sys.argv[1], Path(sys.argv[2]), sys.argv[3], int(sys.argv[4]), sys.argv[5], int(sys.argv[6])
 open_event_name = f'{backend}_host_open_window'
 ready_event_name = 'gpu_host_first_frame' if backend == 'gpu' else 'cpu_host_startup'
 records = []
@@ -217,6 +221,8 @@ with open(log_path, errors='replace') as fh:
             continue
         if obj.get('type') != 'handterm_profile':
             continue
+        if obj.get('schema') != expected_schema or obj.get('schema_version') != expected_schema_version:
+            raise SystemExit(f'unexpected raw event schema in {log_path}: {obj.get("schema")} v{obj.get("schema_version")}')
         if obj.get('event') not in {open_event_name, ready_event_name}:
             continue
         obj['session'] = session_index
@@ -260,13 +266,13 @@ for session_index in $(seq 1 "$REPEATS"); do
   run_session "$session_index"
 done
 
-python - <<'PY' "$JSONL_FILE" "$SUMMARY_FILE" "$SUMMARY_JSON_FILE" "$ADD_WINDOWS" "$BACKEND" "$REPEATS"
+python - <<'PY' "$JSONL_FILE" "$SUMMARY_FILE" "$SUMMARY_JSON_FILE" "$ADD_WINDOWS" "$BACKEND" "$REPEATS" "$SUMMARY_SCHEMA" "$SUMMARY_SCHEMA_VERSION"
 import json
 import statistics
 import sys
 from pathlib import Path
 
-jsonl_path, summary_path, summary_json_path, add_windows, backend, repeats = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]), sys.argv[5], int(sys.argv[6])
+jsonl_path, summary_path, summary_json_path, add_windows, backend, repeats, summary_schema, summary_schema_version = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]), sys.argv[5], int(sys.argv[6]), sys.argv[7], int(sys.argv[8])
 records = [json.loads(line) for line in jsonl_path.read_text().splitlines() if line.strip()]
 open_event_name = f'{backend}_host_open_window'
 ready_event_name = 'gpu_host_first_frame' if backend == 'gpu' else 'cpu_host_startup'
@@ -414,8 +420,8 @@ for row in rows:
 summary_text = '\n'.join(output) + '\n'
 summary_path.write_text(summary_text)
 summary_json = {
-    'schema': 'handterm.profile_series',
-    'schema_version': 1,
+    'schema': summary_schema,
+    'schema_version': summary_schema_version,
     'backend': backend,
     'add_windows': add_windows,
     'repeats': repeats,

@@ -167,6 +167,7 @@ That should **not** be repeated in the same way.
 - when medians across separate host launches matter, prefer the same script's repeat support instead of stuffing more live windows into one compositor session
 - the same script now emits raw JSONL, a human text summary, and a machine-parsable aggregate summary JSON file for downstream analysis, including grouped rollups plus per-session and per-window machine-readable detail, with a stable schema/version marker for downstream tooling
 - the raw structured profiling event lines now also carry their own stable schema/version marker, so JSONL consumers do not have to rely on the aggregate summary file alone for compatibility signaling
+- the aggregation script now also validates the expected raw-event schema/version while harvesting JSONL, so schema drift is surfaced immediately instead of silently mixing incompatible samples
 - a later broader safe JSON-series run with 3 added windows still showed the same answer: add-window time remained dominated by the compositor-facing bucket, especially `configure`, so the overall bottleneck interpretation did not materially change
 - collect:
   - total open-window time

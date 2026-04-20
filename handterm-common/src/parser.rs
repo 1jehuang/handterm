@@ -9,6 +9,7 @@ pub enum State {
     CsiIntermediate,
     OscString,
     DcsString,
+    DcsEscape,
     ApcString,
 }
 
@@ -105,6 +106,7 @@ impl Parser {
             State::CsiIntermediate => self.csi_intermediate(byte),
             State::OscString => self.osc_string(byte),
             State::DcsString => self.dcs_string(byte),
+            State::DcsEscape => self.dcs_escape(byte),
             State::ApcString => self.apc_string(byte),
         }
     }
@@ -289,9 +291,8 @@ impl Parser {
     fn dcs_string(&mut self, byte: u8) -> Action {
         match byte {
             0x1b => {
-                self.state = State::Escape;
-                let data = std::mem::take(&mut self.dcs_buf);
-                Action::DcsDispatch(data)
+                self.state = State::DcsEscape;
+                Action::Nop
             }
             0x07 => {
                 self.state = State::Ground;
@@ -301,6 +302,24 @@ impl Parser {
             _ => {
                 if self.dcs_buf.len() < 1024 * 1024 {
                     self.dcs_buf.push(byte);
+                }
+                Action::Nop
+            }
+        }
+    }
+
+    fn dcs_escape(&mut self, byte: u8) -> Action {
+        match byte {
+            b'\\' => {
+                self.state = State::Ground;
+                let data = std::mem::take(&mut self.dcs_buf);
+                Action::DcsDispatch(data)
+            }
+            other => {
+                self.state = State::DcsString;
+                if self.dcs_buf.len() + 2 <= 1024 * 1024 {
+                    self.dcs_buf.push(0x1b);
+                    self.dcs_buf.push(other);
                 }
                 Action::Nop
             }
@@ -434,7 +453,8 @@ mod tests {
         assert_eq!(p.advance(b'q'), Action::Nop);
         assert_eq!(p.advance(b'1'), Action::Nop);
         assert_eq!(p.advance(b'2'), Action::Nop);
-        assert_eq!(p.advance(0x1b), Action::DcsDispatch(b"+q12".to_vec()));
+        assert_eq!(p.advance(0x1b), Action::Nop);
+        assert_eq!(p.advance(b'\\'), Action::DcsDispatch(b"+q12".to_vec()));
     }
 
     #[test]

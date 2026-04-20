@@ -289,8 +289,10 @@ However, compositor reload behavior should be handled safely and carefully.
 
 If work resumes, the best next task is:
 
-## **continue codebase structure cleanup**
+## **deliberately choose one major roadmap track**
 
-The GPU host startup investigation has reached the point where the dominant remaining wait looks mostly compositor/protocol-bound unless handterm adopts more invasive lifecycle tradeoffs.
+Do not reopen another small protocol or architecture side quest by default.
 
-The latest validated samples suggest handterm-side GPU setup is already relatively small, so future work should not prioritize micro-optimizing local setup unless new measurements show that balance changing.
+If architecture cleanup resumes, only keep pushing the daemon/package split if there is a strong reason to tackle the larger remaining `font` and `pty` couplings.
+
+Otherwise, shift to a different clearly scoped roadmap item. The GPU host startup investigation has already reached the point where the dominant remaining wait looks mostly compositor/protocol-bound unless handterm adopts more invasive lifecycle tradeoffs, and the latest validated samples suggest handterm-side GPU setup is already relatively small.

@@ -199,6 +199,7 @@ This is the biggest remaining optimization target.
 - additional instrumentation in `src/gpu_runtime.rs`
 - identify whether the remaining cost is mostly compositor-side or handterm-side
 - latest safe add-window sample suggests handterm-side GPU setup is already relatively small, so any further local wins are likely lower leverage items such as buffer reuse/pooling or minor setup deferral rather than the main bottleneck
+- spare/precreated-window strategies are not the preferred next move right now, because they would mostly shift configure cost earlier while adding memory, lifecycle, focus, and semantics tradeoffs
 
 ### 3. Decide future of daemon mode
 
@@ -252,8 +253,8 @@ However, compositor reload behavior should be handled safely and carefully.
 
 If work resumes, the best next task is:
 
-## **focus on compositor-facing measurement and constraints in shared-GPU host add-window startup**
+## **continue codebase structure cleanup**
 
-That is the most meaningful remaining path toward the practical theoretical limit.
+The GPU host startup investigation has reached the point where the dominant remaining wait looks mostly compositor/protocol-bound unless handterm adopts more invasive lifecycle tradeoffs.
 
 The latest validated samples suggest handterm-side GPU setup is already relatively small, so future work should not prioritize micro-optimizing local setup unless new measurements show that balance changing.

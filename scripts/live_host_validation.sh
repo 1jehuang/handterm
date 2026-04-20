@@ -3,18 +3,24 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${HANDTERM_BIN:-$ROOT/target/debug/handterm}"
+BACKEND="${HANDTERM_SPAWN_BACKEND:-gpu}"
 OUT_DIR="${HANDTERM_PROFILE_OUT:-$ROOT/profile_out}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 TMP_BASE="${HANDTERM_PROFILE_TMP_BASE:-/var/tmp}"
-TOKEN="HANDTERM_GPU_LIVE_OK_${STAMP}"
+TOKEN="HANDTERM_${BACKEND^^}_LIVE_OK_${STAMP}"
 mkdir -p "$OUT_DIR" "$TMP_BASE"
-OUT_FILE="$OUT_DIR/gpu_live_validation_${STAMP}.txt"
+OUT_FILE="$OUT_DIR/${BACKEND}_live_validation_${STAMP}.txt"
+
+if [[ "$BACKEND" != "gpu" && "$BACKEND" != "cpu" ]]; then
+  echo "error: backend must be gpu or cpu" >&2
+  exit 1
+fi
 
 WAYLAND_DISPLAY="${WAYLAND_DISPLAY:?WAYLAND_DISPLAY must be set}"
 XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR must be set}"
 
-TMPDIR="$(mktemp -d "$TMP_BASE/handterm-gpu-live.XXXXXX")"
-SOCKET_PATH="$TMPDIR/handterm-gpu.sock"
+TMPDIR="$(mktemp -d "$TMP_BASE/handterm-${BACKEND}-live.XXXXXX")"
+SOCKET_PATH="$TMPDIR/handterm-${BACKEND}.sock"
 HOST_LOG="$TMPDIR/host.log"
 PID_FILE="$TMPDIR/host.pid"
 HOST_PID=""
@@ -67,10 +73,10 @@ wait_for_count() {
   local expected="$1"
   for _ in $(seq 1 500); do
     if [[ -n "$HOST_PID" ]] && ! kill -0 "$HOST_PID" 2>/dev/null; then
-      fail_with_log "gpu host exited before reaching window count ${expected}"
+      fail_with_log "${BACKEND} host exited before reaching window count ${expected}"
     fi
     local count_now
-    count_now=$(host_env "$BIN" --backend gpu @ list-windows 2>/dev/null | json_extract 'data.count' 2>/dev/null || echo '')
+    count_now=$(host_env "$BIN" --backend "$BACKEND" @ list-windows 2>/dev/null | json_extract 'data.count' 2>/dev/null || echo '')
     if [[ "$count_now" == "$expected" ]]; then
       return 0
     fi
@@ -83,7 +89,7 @@ wait_for_text() {
   local token="$1"
   for _ in $(seq 1 500); do
     local text
-    text=$(host_env "$BIN" --backend gpu @ get-text '{"window_id":1}' 2>/dev/null | json_extract 'data.text' 2>/dev/null || echo '')
+    text=$(host_env "$BIN" --backend "$BACKEND" @ get-text '{"window_id":1}' 2>/dev/null | json_extract 'data.text' 2>/dev/null || echo '')
     if [[ "$text" == *"$token"* ]]; then
       return 0
     fi
@@ -92,11 +98,11 @@ wait_for_text() {
   fail_with_log "timed out waiting for startup token text"
 }
 
-host_env BIN="$BIN" HOST_LOG="$HOST_LOG" PID_FILE="$PID_FILE" TOKEN="$TOKEN" python - <<'PY'
+host_env BIN="$BIN" BACKEND="$BACKEND" HOST_LOG="$HOST_LOG" PID_FILE="$PID_FILE" python - <<'PY'
 import os, subprocess
 with open(os.environ['HOST_LOG'], 'wb') as log:
     proc = subprocess.Popen(
-        [os.environ['BIN'], '--backend', 'gpu'],
+        [os.environ['BIN'], '--backend', os.environ['BACKEND']],
         env=os.environ.copy(),
         stdout=log,
         stderr=subprocess.STDOUT,
@@ -108,29 +114,31 @@ PY
 HOST_PID="$(cat "$PID_FILE")"
 
 wait_for_count 1
-host_env "$BIN" --backend gpu @ send-text "{\"window_id\":1,\"text\":\"printf '$TOKEN\\r\\n'\\r\"}" >/dev/null
+host_env "$BIN" --backend "$BACKEND" @ send-text "{\"window_id\":1,\"text\":\"printf '$TOKEN\\r\\n'\\r\"}" >/dev/null
 wait_for_text "$TOKEN"
 
-SIZE_JSON=$(host_env "$BIN" --backend gpu @ get-size '{"window_id":1}')
-SCROLL_JSON=$(host_env "$BIN" --backend gpu @ get-scroll-state '{"window_id":1}')
-SET_TITLE_JSON=$(host_env "$BIN" --backend gpu @ set-title '{"window_id":1,"title":"gpu-live-validation"}')
-OPEN_JSON=$(host_env "$BIN" --backend gpu open-window 2>/dev/null || true)
+SIZE_JSON=$(host_env "$BIN" --backend "$BACKEND" @ get-size '{"window_id":1}')
+SCROLL_JSON=$(host_env "$BIN" --backend "$BACKEND" @ get-scroll-state '{"window_id":1}')
+SET_TITLE_JSON=$(host_env "$BIN" --backend "$BACKEND" @ set-title "{\"window_id\":1,\"title\":\"${BACKEND}-live-validation\"}")
+host_env "$BIN" --backend "$BACKEND" open-window >/dev/null
 wait_for_count 2
-FOCUS_JSON=$(host_env "$BIN" --backend gpu @ focus-window '{"window_id":2}')
-CLOSE_JSON=$(host_env "$BIN" --backend gpu @ close '{"window_id":2}')
+FOCUS_JSON=$(host_env "$BIN" --backend "$BACKEND" @ focus-window '{"window_id":2}')
+CLOSE_JSON=$(host_env "$BIN" --backend "$BACKEND" @ close '{"window_id":2}')
 wait_for_count 1
 
-python - <<'PY' "$OUT_FILE" "$TOKEN" "$SIZE_JSON" "$SCROLL_JSON" "$SET_TITLE_JSON" "$FOCUS_JSON" "$CLOSE_JSON" "$HOST_LOG"
+python - <<'PY' "$OUT_FILE" "$BACKEND" "$TOKEN" "$SIZE_JSON" "$SCROLL_JSON" "$SET_TITLE_JSON" "$FOCUS_JSON" "$CLOSE_JSON" "$HOST_LOG"
 import json, pathlib, sys
 out_path = pathlib.Path(sys.argv[1])
-token = sys.argv[2]
-size = json.loads(sys.argv[3])
-scroll = json.loads(sys.argv[4])
-set_title = json.loads(sys.argv[5])
-focus = json.loads(sys.argv[6])
-close = json.loads(sys.argv[7])
-host_log = pathlib.Path(sys.argv[8])
+backend = sys.argv[2]
+token = sys.argv[3]
+size = json.loads(sys.argv[4])
+scroll = json.loads(sys.argv[5])
+set_title = json.loads(sys.argv[6])
+focus = json.loads(sys.argv[7])
+close = json.loads(sys.argv[8])
+host_log = pathlib.Path(sys.argv[9])
 text = []
+text.append(f'backend={backend}')
 text.append(f'token={token}')
 text.append(f'size_ok={size.get("ok")} cols={(size.get("data") or {}).get("cols")} rows={(size.get("data") or {}).get("rows")}')
 scroll_data = scroll.get('data') or {}

@@ -13,6 +13,8 @@ pub mod config;
 #[cfg(feature = "daemon-server")]
 pub mod daemon;
 pub mod daemon_mode;
+#[cfg(feature = "daemon-server")]
+mod daemon_stack;
 pub mod fd_watcher;
 #[allow(dead_code)]
 pub mod font;

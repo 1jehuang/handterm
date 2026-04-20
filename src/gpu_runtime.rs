@@ -2622,6 +2622,34 @@ mod tests {
     }
 
     #[test]
+    fn gpu_framebuffer_matches_cpu_for_selection_highlight() {
+        let config = AppConfig::default();
+        let mut atlas =
+            GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, 96)
+                .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, 96))
+                .expect("should load font atlas for GPU framebuffer selection parity");
+        let mut terminal = Terminal::new(12, 2);
+        let mut cpu = OffscreenRenderer::new(12, 2, &atlas);
+
+        terminal.process(b"select me\r\nsecond row");
+        terminal.grid.selection = Some(crate::grid::Selection {
+            start_col: 0,
+            start_row: 0,
+            end_col: 5,
+            end_row: 0,
+        });
+
+        cpu.reset();
+        cpu.render(&mut terminal, &mut atlas, &config);
+        let gpu = render_like_gpu(&mut terminal, &mut atlas, &config);
+
+        assert_eq!(
+            gpu, cpu.pixels,
+            "GPU framebuffer should match CPU output for a visible selection highlight"
+        );
+    }
+
+    #[test]
     fn gpu_fractional_scroll_framebuffer_shifts_rows_by_partial_cell_height() {
         let config = AppConfig::default();
         let mut atlas =

@@ -164,3 +164,204 @@ pub fn apply_synthetic_key_event<T: SyntheticInputTarget>(
 
     changed
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frontend::{KeyEventKind, apply_modifier_key_transition};
+    use crate::terminal::{KITTY_KBD_REPORT_ALL, KITTY_KBD_REPORT_EVENTS};
+    use std::time::{Duration, Instant};
+    use winit::keyboard::Key;
+
+    const READY_MARKER: &[u8] = b"__handterm-host-input-ready__";
+
+    struct TestSyntheticTarget {
+        terminal: Terminal,
+        pty: PtyChild,
+        pending_ime_commit: Option<String>,
+        recent_text_key_event: Option<RecentTextKeyEvent>,
+        hyper: bool,
+        meta: bool,
+        caps_lock: bool,
+        num_lock: bool,
+        captured_output: Vec<u8>,
+        scrollback_reset_count: usize,
+    }
+
+    impl TestSyntheticTarget {
+        fn new() -> Self {
+            let pty = PtyChild::spawn_shell_command(
+                "/bin/sh",
+                "stty raw -echo; printf '__handterm-host-input-ready__'; cat",
+                80,
+                24,
+            )
+            .expect("pty should spawn raw cat shell");
+
+            let mut ready = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                let n = pty
+                    .try_read(&mut buffer)
+                    .expect("ready read should succeed");
+                if n == 0 {
+                    continue;
+                }
+                ready.extend_from_slice(&buffer[..n]);
+                if ready
+                    .windows(READY_MARKER.len())
+                    .any(|window| window == READY_MARKER)
+                {
+                    break;
+                }
+            }
+            assert!(
+                ready
+                    .windows(READY_MARKER.len())
+                    .any(|window| window == READY_MARKER),
+                "timed out waiting for raw cat readiness: {ready:?}"
+            );
+
+            Self {
+                terminal: Terminal::new(80, 24),
+                pty,
+                pending_ime_commit: None,
+                recent_text_key_event: None,
+                hyper: false,
+                meta: false,
+                caps_lock: false,
+                num_lock: false,
+                captured_output: Vec::new(),
+                scrollback_reset_count: 0,
+            }
+        }
+
+        fn take_captured_output(&mut self) -> Vec<u8> {
+            std::mem::take(&mut self.captured_output)
+        }
+    }
+
+    impl SyntheticInputTarget for TestSyntheticTarget {
+        fn label(&self) -> &'static str {
+            "test"
+        }
+
+        fn terminal(&mut self) -> &mut Terminal {
+            &mut self.terminal
+        }
+
+        fn pty(&mut self) -> &mut PtyChild {
+            &mut self.pty
+        }
+
+        fn pending_ime_commit(&mut self) -> &mut Option<String> {
+            &mut self.pending_ime_commit
+        }
+
+        fn recent_text_key_event(&mut self) -> &mut Option<RecentTextKeyEvent> {
+            &mut self.recent_text_key_event
+        }
+
+        fn hyper_modifier_mut(&mut self) -> &mut bool {
+            &mut self.hyper
+        }
+
+        fn meta_modifier_mut(&mut self) -> &mut bool {
+            &mut self.meta
+        }
+
+        fn caps_lock_modifier_mut(&mut self) -> &mut bool {
+            &mut self.caps_lock
+        }
+
+        fn num_lock_modifier_mut(&mut self) -> &mut bool {
+            &mut self.num_lock
+        }
+
+        fn caps_lock_modifier(&self) -> bool {
+            self.caps_lock
+        }
+
+        fn num_lock_modifier(&self) -> bool {
+            self.num_lock
+        }
+
+        fn apply_modifier_transition(&mut self, logical_key: &Key, event_kind: KeyEventKind) {
+            apply_modifier_key_transition(
+                &mut self.hyper,
+                &mut self.meta,
+                &mut self.caps_lock,
+                &mut self.num_lock,
+                logical_key,
+                event_kind,
+            );
+        }
+
+        fn reset_scrollback(&mut self) {
+            self.scrollback_reset_count += 1;
+        }
+
+        fn drain_pty(&mut self) -> bool {
+            let mut changed = false;
+            let mut buffer = [0_u8; 1024];
+            let deadline = Instant::now() + Duration::from_millis(250);
+            while Instant::now() < deadline {
+                let n = self
+                    .pty
+                    .try_read(&mut buffer)
+                    .expect("pty drain should succeed");
+                if n == 0 {
+                    if changed {
+                        break;
+                    }
+                    continue;
+                }
+                self.captured_output.extend_from_slice(&buffer[..n]);
+                changed = true;
+            }
+            changed
+        }
+    }
+
+    #[test]
+    fn synthetic_key_event_uses_negotiated_kitty_keyboard_mode() {
+        let mut state = TestSyntheticTarget::new();
+        state.terminal.process(
+            &format!("\x1b[={}u", KITTY_KBD_REPORT_ALL | KITTY_KBD_REPORT_EVENTS).into_bytes(),
+        );
+
+        let press = SyntheticKeyEvent {
+            kind: KeyEventKind::Press,
+            key: "ctrl".to_string(),
+            text: None,
+            ctrl: true,
+            alt: false,
+            shift: false,
+            super_key: false,
+            hyper: false,
+            meta: false,
+        };
+        assert!(apply_synthetic_key_event(&mut state, &press));
+        assert_eq!(state.take_captured_output(), b"\x1b[57442;5:1u");
+
+        let release = SyntheticKeyEvent {
+            kind: KeyEventKind::Release,
+            key: "ctrl".to_string(),
+            text: None,
+            ctrl: true,
+            alt: false,
+            shift: false,
+            super_key: false,
+            hyper: false,
+            meta: false,
+        };
+        assert!(apply_synthetic_key_event(&mut state, &release));
+        assert_eq!(state.take_captured_output(), b"\x1b[57442;1:3u");
+        assert_eq!(
+            state.terminal.kitty_keyboard_flags(),
+            KITTY_KBD_REPORT_ALL | KITTY_KBD_REPORT_EVENTS
+        );
+        assert_eq!(state.scrollback_reset_count, 0);
+    }
+}

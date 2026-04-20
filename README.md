@@ -171,13 +171,15 @@ That puts the incremental cost in roughly the **1-2 MB/window** range after the 
 | Bracketed paste | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Mouse reporting | ✅ | ✅ | ✅ | ✅ | ✅ |
 | OSC 52 clipboard | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Kitty keyboard protocol | partial | ✅ | - | ✅ | ✅ |
+| Kitty keyboard protocol | partial* | ✅ | - | ✅ | ✅ |
 | IPC / remote control | ✅ | - | - | ✅ | - |
 | X11 support | - | - | ✅ | ✅ | ✅ |
 | macOS support | - | - | ✅ | ✅ | ✅ |
 | Font shaping engine | rustybuzz | harfbuzz | built-in | harfbuzz | harfbuzz |
 | Config format | TOML | INI | TOML | conf | custom |
 | Scrollback (default) | 10,000 | 10,000 | 10,000 | 2,000 | 10,000 |
+
+\* Remaining known Kitty keyboard gaps are limited to keys not currently exposed through `winit`, such as `MEDIA_REVERSE`, `ISO_LEVEL5_SHIFT`, and right-side `Meta`/`Hyper` distinction.
 
 ### Pipeline throughput
 
@@ -265,7 +267,7 @@ handterm bench
 - Fontconfig font discovery with caching
 
 **Shell integration**
-- Kitty keyboard protocol set/query/push/pop + expanded CSI-u key encoding
+- Kitty keyboard protocol set/query/push/pop + expanded CSI-u key encoding, with remaining known gaps limited to keys not exposed through current `winit` input APIs
 - XTVERSION response
 - OSC 10/11 color queries
 - OSC 52 clipboard

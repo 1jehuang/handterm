@@ -236,6 +236,10 @@ Current map of root-owned daemon/client/server-specific surface area:
 
 Smallest safe refactor before a true package move: isolate the daemon/client/server launch and runtime glue behind clearer module boundaries first. A direct move into the existing split binary packages would otherwise create awkward dependency cycles, because those packages currently depend on the root crate.
 
+That launch-glue isolation is now done, and it is a reasonable stopping point unless there is a strong reason to keep pushing the package split immediately.
+
+If the split continues later, the next smallest safer slice is likely `src/daemon.rs` + `src/server.rs` before tackling `src/client.rs` and the remote frontends, because the remote CPU/GPU frontends still pull in much more windowing/rendering/UI surface area.
+
 ### 5. Keep docs aligned with measured reality
 
 README and OPTIMIZATION have been updated substantially, but any future changes should continue to reflect measured results, not intended architecture.

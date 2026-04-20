@@ -37,6 +37,7 @@ pub struct Terminal {
     pub title: Option<String>,
     dcs_events: Vec<DcsEvent>,
     sixel_events: Vec<Vec<u8>>,
+    apc_events: Vec<ApcEvent>,
     response_buf: Vec<u8>,
     saved_cursor: Option<(usize, usize)>,
     mode_bracketed_paste: bool,
@@ -118,6 +119,12 @@ pub struct KittyPlacement {
 pub enum DcsEvent {
     Generic(Vec<u8>),
     Sixel(Vec<u8>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApcEvent {
+    Generic(Vec<u8>),
+    KittyGraphics(Vec<u8>),
 }
 
 pub trait TerminalView {
@@ -221,6 +228,7 @@ impl Terminal {
             title: None,
             dcs_events: Vec::new(),
             sixel_events: Vec::new(),
+            apc_events: Vec::new(),
             response_buf: Vec::new(),
             saved_cursor: None,
             mode_bracketed_paste: false,
@@ -300,6 +308,18 @@ impl Terminal {
 
     pub fn drain_sixel(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.sixel_events)
+    }
+
+    pub fn take_apc(&mut self) -> Option<ApcEvent> {
+        if self.apc_events.is_empty() {
+            None
+        } else {
+            Some(self.apc_events.remove(0))
+        }
+    }
+
+    pub fn drain_apc(&mut self) -> Vec<ApcEvent> {
+        std::mem::take(&mut self.apc_events)
     }
 
     pub fn bracketed_paste_mode(&self) -> bool {
@@ -1050,7 +1070,11 @@ impl Terminal {
             return;
         }
         if data[0] == b'G' {
+            self.apc_events
+                .push(ApcEvent::KittyGraphics(data[1..].to_vec()));
             self.handle_kitty_graphics(&data[1..]);
+        } else {
+            self.apc_events.push(ApcEvent::Generic(data.to_vec()));
         }
     }
 
@@ -1956,6 +1980,23 @@ mod tests {
         t.process(b"\x1bPqABC\x1b\\");
         assert_eq!(t.take_dcs(), Some(DcsEvent::Sixel(b"ABC".to_vec())));
         assert_eq!(t.take_sixel().as_deref(), Some(b"ABC".as_slice()));
+    }
+
+    #[test]
+    fn generic_apc_payloads_are_queued() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b_hello\x1b\\");
+        assert_eq!(t.take_apc(), Some(ApcEvent::Generic(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn kitty_graphics_apc_payloads_are_classified() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b_Gi=7,a=d\x1b\\");
+        assert_eq!(
+            t.take_apc(),
+            Some(ApcEvent::KittyGraphics(b"i=7,a=d".to_vec()))
+        );
     }
 
     #[test]

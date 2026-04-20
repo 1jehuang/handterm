@@ -8,9 +8,11 @@ pub enum State {
     CsiParam,
     CsiIntermediate,
     OscString,
+    OscEscape,
     DcsString,
     DcsEscape,
     ApcString,
+    ApcEscape,
 }
 
 pub const MAX_PARAMS: usize = 16;
@@ -105,9 +107,11 @@ impl Parser {
             State::CsiParam => self.csi_param(byte),
             State::CsiIntermediate => self.csi_intermediate(byte),
             State::OscString => self.osc_string(byte),
+            State::OscEscape => self.osc_escape(byte),
             State::DcsString => self.dcs_string(byte),
             State::DcsEscape => self.dcs_escape(byte),
             State::ApcString => self.apc_string(byte),
+            State::ApcEscape => self.apc_escape(byte),
         }
     }
 
@@ -275,13 +279,30 @@ impl Parser {
                 Action::OscDispatch(data)
             }
             0x1b => {
-                self.state = State::Escape;
-                let data = std::mem::take(&mut self.osc_buf);
-                Action::OscDispatch(data)
+                self.state = State::OscEscape;
+                Action::Nop
             }
             _ => {
                 if self.osc_buf.len() < 4096 {
                     self.osc_buf.push(byte);
+                }
+                Action::Nop
+            }
+        }
+    }
+
+    fn osc_escape(&mut self, byte: u8) -> Action {
+        match byte {
+            b'\\' => {
+                self.state = State::Ground;
+                let data = std::mem::take(&mut self.osc_buf);
+                Action::OscDispatch(data)
+            }
+            other => {
+                self.state = State::OscString;
+                if self.osc_buf.len() + 2 <= 4096 {
+                    self.osc_buf.push(0x1b);
+                    self.osc_buf.push(other);
                 }
                 Action::Nop
             }
@@ -329,9 +350,8 @@ impl Parser {
     fn apc_string(&mut self, byte: u8) -> Action {
         match byte {
             0x1b => {
-                self.state = State::Escape;
-                let data = std::mem::take(&mut self.osc_buf);
-                Action::ApcDispatch(data)
+                self.state = State::ApcEscape;
+                Action::Nop
             }
             0x07 => {
                 self.state = State::Ground;
@@ -341,6 +361,24 @@ impl Parser {
             _ => {
                 if self.osc_buf.len() < 1024 * 1024 {
                     self.osc_buf.push(byte);
+                }
+                Action::Nop
+            }
+        }
+    }
+
+    fn apc_escape(&mut self, byte: u8) -> Action {
+        match byte {
+            b'\\' => {
+                self.state = State::Ground;
+                let data = std::mem::take(&mut self.osc_buf);
+                Action::ApcDispatch(data)
+            }
+            other => {
+                self.state = State::ApcString;
+                if self.osc_buf.len() + 2 <= 1024 * 1024 {
+                    self.osc_buf.push(0x1b);
+                    self.osc_buf.push(other);
                 }
                 Action::Nop
             }

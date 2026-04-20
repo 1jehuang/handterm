@@ -77,6 +77,8 @@ struct GpuApp {
     config: AppConfig,
     startup_command: Option<String>,
     shared: Option<Arc<SharedGpuContext>>,
+    shared_init_task:
+        Option<std::thread::JoinHandle<Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)>>>,
     windows: HashMap<WinitWindowId, GpuWindowState>,
     window_ids: HashMap<u64, WinitWindowId>,
     next_window_id: u64,
@@ -191,6 +193,15 @@ impl SyntheticInputTarget for GpuWindowState {
 }
 
 impl GpuApp {
+    fn spawn_shared_init_task()
+    -> std::thread::JoinHandle<Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)>> {
+        std::thread::spawn(
+            || -> Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)> {
+                create_shared_gpu_context_profiled()
+            },
+        )
+    }
+
     fn new(
         config: AppConfig,
         startup_command: Option<String>,
@@ -201,6 +212,7 @@ impl GpuApp {
             config,
             startup_command,
             shared: None,
+            shared_init_task: Some(Self::spawn_shared_init_task()),
             windows: HashMap::new(),
             window_ids: HashMap::new(),
             next_window_id: 1,
@@ -394,11 +406,9 @@ impl GpuApp {
         let shared_init_task = if shared_warm {
             None
         } else {
-            Some(std::thread::spawn(
-                || -> Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)> {
-                    create_shared_gpu_context_profiled()
-                },
-            ))
+            self.shared_init_task
+                .take()
+                .or_else(|| Some(Self::spawn_shared_init_task()))
         };
         let before_dpi = Instant::now();
         let dpi = self.resolve_dpi(event_loop);

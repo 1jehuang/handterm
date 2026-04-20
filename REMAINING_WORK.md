@@ -127,6 +127,13 @@ The recent internal GPU profiling now shows this more precisely:
   - `compositor_facing=25.93ms`
   - `handterm_surface_setup=2.62ms`
   - `open_to_first_present=32.54ms`
+- a later safe 3-run sample series with the same refined profiling path showed:
+  - first-window `total`: `107.85-317.82ms`, median `165.80ms`
+  - first-window `open_to_first_present`: `110.21-322.54ms`, median `169.35ms`
+  - add-window `total`: `16.30-28.00ms`, median `20.12ms`
+  - add-window `open_to_first_present`: `17.98-31.22ms`, median `21.90ms`
+  - add-window `compositor_facing`: `14.28-25.22ms`, median `16.80ms`
+  - add-window `handterm_surface_setup`: `1.06-1.68ms`, median `1.31ms`
 - interpretation: the add-window path is still primarily blocked by compositor-facing window/surface configure work, while handterm-side GPU surface setup is now a much smaller portion of the total
 
 ### CPU host limitation
@@ -179,6 +186,7 @@ This is the biggest remaining optimization target.
 - additional instrumentation in `src/gpu_app.rs`
 - additional instrumentation in `src/gpu_runtime.rs`
 - identify whether the remaining cost is mostly compositor-side or handterm-side
+- latest safe add-window sample suggests handterm-side GPU setup is already relatively small, so any further local wins are likely lower leverage items such as buffer reuse/pooling or minor setup deferral rather than the main bottleneck
 
 ### 3. Decide future of daemon mode
 

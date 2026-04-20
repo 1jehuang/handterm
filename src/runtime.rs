@@ -1,11 +1,11 @@
-#[cfg(all(feature = "cpu", feature = "cli"))]
-use crate::backend::background_opacity_warning;
 #[cfg(feature = "cli")]
 use crate::backend::{Backend, resolve_backend};
 #[cfg(feature = "cli")]
 use crate::cli::{Cli, Command};
 #[cfg(feature = "cli")]
 use crate::config::AppConfig;
+#[cfg(feature = "cli")]
+use crate::daemon_mode::{run_client_only_command, run_server_only_command};
 #[cfg(feature = "standalone")]
 use crate::metrics::{format_bench_results, run_quick_bench};
 #[cfg(feature = "cli")]
@@ -61,12 +61,6 @@ pub fn run_cli() -> Result<()> {
     run_with_cli(cli)
 }
 
-pub fn print_daemon_mode_deprecation(mode: &str) {
-    eprintln!(
-        "handterm: warning: {mode} uses the deprecated daemon/thin-client path.\nhandterm: the recommended local architecture is the default single-process host path."
-    );
-}
-
 #[cfg(feature = "cli")]
 pub fn should_reuse_existing_host(cli: &Cli) -> bool {
     !cli.standalone
@@ -76,14 +70,6 @@ pub fn should_reuse_existing_host(cli: &Cli) -> bool {
 pub fn run_with_cli(cli: Cli) -> Result<()> {
     let backend = resolve_backend(cli.backend)?;
     let config = AppConfig::load(cli.config.as_deref())?;
-
-    #[cfg(feature = "cpu")]
-    let warn_if_cpu_opacity = || {
-        if let Some(warning) = background_opacity_warning(backend, config.style.background_opacity)
-        {
-            eprintln!("{warning}");
-        }
-    };
 
     match cli.command {
         Some(Command::PrintConfig) => {
@@ -104,37 +90,8 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
         Some(Command::OpenWindow { to, cols, rows }) => {
             open_window_in_existing_host(backend, to, cols, rows)
         }
-        Some(Command::ServerOnly { socket }) => {
-            print_daemon_mode_deprecation("`server-only`");
-            crate::daemon::run_server_only(socket, &config)
-        }
-        Some(Command::ClientOnly { socket }) => {
-            print_daemon_mode_deprecation("`client-only`");
-            let socket_path = socket.unwrap_or_else(crate::daemon::default_server_socket_path);
-            match backend {
-                Backend::Cpu => {
-                    #[cfg(feature = "cpu")]
-                    {
-                        warn_if_cpu_opacity();
-                        crate::remote_app::run(config, socket_path)
-                    }
-                    #[cfg(not(feature = "cpu"))]
-                    {
-                        unreachable!("client-only mode requires the CPU frontend");
-                    }
-                }
-                Backend::Gpu => {
-                    #[cfg(feature = "gpu")]
-                    {
-                        crate::remote_gpu_app::run(config, socket_path)
-                    }
-                    #[cfg(not(feature = "gpu"))]
-                    {
-                        unreachable!("client-only mode requires the GPU frontend");
-                    }
-                }
-            }
-        }
+        Some(Command::ServerOnly { socket }) => run_server_only_command(socket, &config),
+        Some(Command::ClientOnly { socket }) => run_client_only_command(backend, socket, config),
         Some(Command::Remote { to, cmd, args }) => {
             let socket_path = match to {
                 Some(path) => path,
@@ -159,7 +116,12 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             Backend::Cpu => {
                 #[cfg(feature = "cpu")]
                 {
-                    warn_if_cpu_opacity();
+                    if let Some(warning) = crate::backend::background_opacity_warning(
+                        backend,
+                        config.style.background_opacity,
+                    ) {
+                        eprintln!("{warning}");
+                    }
                     if should_reuse_existing_host(&cli)
                         && let Some(socket_path) = crate::ipc::find_socket_for_backend(Backend::Cpu)
                         && crate::ipc::send_command(

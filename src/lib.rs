@@ -12,6 +12,7 @@ pub mod color;
 pub mod config;
 #[cfg(feature = "daemon-server")]
 pub mod daemon;
+pub mod daemon_mode;
 pub mod fd_watcher;
 #[allow(dead_code)]
 pub mod font;
@@ -22,7 +23,9 @@ pub mod gpu_app;
 pub mod gpu_frame;
 #[cfg(feature = "gpu")]
 pub mod gpu_runtime;
+#[cfg(feature = "standalone")]
 pub mod host_commands;
+#[cfg(feature = "standalone")]
 pub mod host_input;
 pub mod input;
 #[cfg(feature = "standalone")]
@@ -51,11 +54,11 @@ pub mod visual;
 #[cfg(feature = "standalone")]
 pub mod workloads;
 
+pub use daemon_mode::print_daemon_mode_deprecation;
 pub use handterm_common::grid;
 pub use handterm_common::parser;
 pub use handterm_common::protocol;
 pub use handterm_common::server_sync;
 pub use handterm_common::terminal;
-pub use runtime::print_daemon_mode_deprecation;
 #[cfg(feature = "cli")]
 pub use runtime::{run_cli, run_with_cli, should_reuse_existing_host};

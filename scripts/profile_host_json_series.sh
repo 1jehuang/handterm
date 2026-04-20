@@ -361,6 +361,19 @@ def summarize(group_name, subset):
     lines.append('  sessions=' + ', '.join(str(session_id) for session_id in session_ids))
     return lines, {'count': len(subset), 'sessions': session_ids, 'stats': stats}
 
+def session_summary(session_rows):
+    first = [row for row in session_rows if row['kind'] == 'first-window']
+    add = [row for row in session_rows if row['kind'] == 'add-window']
+    _, first_summary = summarize('first-window', first)
+    _, add_summary = summarize('add-window', add)
+    return {
+        'total_windows': len(session_rows),
+        'groups': {
+            'first-window': first_summary,
+            'add-window': add_summary,
+        },
+    }
+
 first_rows = [row for row in rows if row['kind'] == 'first-window']
 add_rows = [row for row in rows if row['kind'] == 'add-window']
 output = []
@@ -410,6 +423,11 @@ summary_json = {
         'first-window': first_summary,
         'add-window': add_summary,
     },
+    'per_session': {
+        str(session_id): session_summary([row for row in rows if row['session'] == session_id])
+        for session_id in sorted({row['session'] for row in rows})
+    },
+    'per_window': rows,
 }
 summary_json_path.write_text(json.dumps(summary_json, indent=2, sort_keys=True) + '\n')
 print(summary_text, end='')

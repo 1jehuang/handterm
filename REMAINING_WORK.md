@@ -208,6 +208,7 @@ This is the biggest remaining optimization target.
 - first-window shared GPU bring-up can now overlap with other window-prep work, and the profiling logs now distinguish `shared_ms` (total init work) from `shared_wait_ms` (blocking wait left on the critical path)
 - one safe post-overlap first-window sample still showed shared bring-up dominating the critical path (`shared_ms≈357ms`, `shared_wait_ms≈331ms`), although overlap saved about `26ms` of wait time in that run
 - one safe shared-init subphase sample showed `atlas_texture≈55ms` and `device_request≈23ms` as the largest measured explicit subphases, while shader/layout setup stayed relatively small; if more first-window reduction is still worth pursuing, the next concrete candidates are atlas texture setup and adapter/device work rather than the shader/layout pieces
+- simple atlas-texture deferral does not currently look like the best next slice, because the first real text render path still needs a valid atlas view/bind group; a meaningful reduction there likely needs a more invasive placeholder-or-growable atlas design
 - latest safe add-window sample suggests handterm-side GPU setup is already relatively small, so any further local wins are likely lower leverage items such as buffer reuse/pooling or minor setup deferral rather than the main bottleneck
 - spare/precreated-window strategies are not the preferred next move right now, because they would mostly shift configure cost earlier while adding memory, lifecycle, focus, and semantics tradeoffs
 

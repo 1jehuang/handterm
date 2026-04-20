@@ -132,6 +132,8 @@ pub enum ApcEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OscEvent {
     Raw(Vec<u8>),
+    Title { raw: Vec<u8>, title: String },
+    Clipboard { raw: Vec<u8>, data: Vec<u8> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1036,17 +1038,19 @@ impl Terminal {
     }
 
     fn osc_dispatch(&mut self, data: &[u8]) {
-        let event = OscEvent::Raw(data.to_vec());
-        self.control_string_events
-            .push(ControlStringEvent::Osc(event.clone()));
-        self.osc_events.push(event);
+        let mut event = OscEvent::Raw(data.to_vec());
         if let Some(semi) = data.iter().position(|&b| b == b';') {
             let cmd = &data[..semi];
             let payload = &data[semi + 1..];
             match cmd {
                 b"0" | b"2" => {
                     if let Ok(title) = std::str::from_utf8(payload) {
-                        self.title = Some(title.to_string());
+                        let title = title.to_string();
+                        self.title = Some(title.clone());
+                        event = OscEvent::Title {
+                            raw: data.to_vec(),
+                            title,
+                        };
                     }
                 }
                 b"1" => {}
@@ -1066,7 +1070,12 @@ impl Terminal {
                     if let Some(semi2) = payload.iter().position(|&b| b == b';') {
                         let b64_data = &payload[semi2 + 1..];
                         if b64_data != b"?" {
-                            self.osc52_clipboard = Some(b64_data.to_vec());
+                            let data = b64_data.to_vec();
+                            self.osc52_clipboard = Some(data.clone());
+                            event = OscEvent::Clipboard {
+                                raw: data.to_vec(),
+                                data,
+                            };
                         }
                     }
                 }
@@ -1087,6 +1096,9 @@ impl Terminal {
                 _ => {}
             }
         }
+        self.control_string_events
+            .push(ControlStringEvent::Osc(event.clone()));
+        self.osc_events.push(event);
     }
 
     fn save_cursor(&mut self) {
@@ -2068,10 +2080,33 @@ mod tests {
     fn osc_st_terminator() {
         let mut t = Terminal::new(80, 24);
         t.process(b"\x1b]0;My Title\x1b\\visible");
-        assert_eq!(t.take_osc(), Some(OscEvent::Raw(b"0;My Title".to_vec())));
+        assert_eq!(
+            t.take_osc(),
+            Some(OscEvent::Title {
+                raw: b"0;My Title".to_vec(),
+                title: "My Title".to_string(),
+            })
+        );
         assert_eq!(t.take_title().unwrap(), "My Title");
         assert_eq!(t.grid.cell_char(0, 0), 'v');
         assert_eq!(t.grid.cell_char(0, 6), 'e');
+    }
+
+    #[test]
+    fn osc_clipboard_events_are_typed() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b]52;c;Zm9v\x1b\\");
+        assert_eq!(
+            t.take_osc(),
+            Some(OscEvent::Clipboard {
+                raw: b"52;c;Zm9v".to_vec(),
+                data: b"Zm9v".to_vec(),
+            })
+        );
+        assert_eq!(
+            t.take_osc52_clipboard().as_deref(),
+            Some(b"Zm9v".as_slice())
+        );
     }
 
     #[test]

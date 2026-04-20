@@ -132,7 +132,8 @@ pub fn render_terminal_to_buffer(
         let mut run_attrs: u8 = 0;
 
         for row in 0..grid.rows {
-            let any_dirty = full_redraw || grid.row_has_dirty_cells(row) || (show_cursor && row == cursor_row);
+            let any_dirty =
+                full_redraw || grid.row_has_dirty_cells(row) || (show_cursor && row == cursor_row);
             if !any_dirty {
                 continue;
             }
@@ -1042,7 +1043,8 @@ mod tests {
             let mut seq_terminal = Terminal::new(sequence.len() as u16, 1);
             seq_terminal.cursor_visible = false;
             seq_terminal.process(sequence.as_bytes());
-            let mut seq_renderer = OffscreenRenderer::new(seq_terminal.cols, seq_terminal.rows, &atlas);
+            let mut seq_renderer =
+                OffscreenRenderer::new(seq_terminal.cols, seq_terminal.rows, &atlas);
             seq_renderer.render(&mut seq_terminal, &mut atlas, &config);
 
             for (idx, ch) in sequence.chars().enumerate() {
@@ -1050,11 +1052,8 @@ mod tests {
                 let mut isolated_terminal = Terminal::new(3, 1);
                 isolated_terminal.cursor_visible = false;
                 isolated_terminal.process(isolated.as_bytes());
-                let mut isolated_renderer = OffscreenRenderer::new(
-                    isolated_terminal.cols,
-                    isolated_terminal.rows,
-                    &atlas,
-                );
+                let mut isolated_renderer =
+                    OffscreenRenderer::new(isolated_terminal.cols, isolated_terminal.rows, &atlas);
                 isolated_renderer.render(&mut isolated_terminal, &mut atlas, &config);
 
                 assert_eq!(
@@ -1065,13 +1064,7 @@ mod tests {
                         atlas.cell_width,
                         atlas.cell_height,
                     ),
-                    extract_cell_pixels(
-                        &seq_renderer,
-                        idx,
-                        0,
-                        atlas.cell_width,
-                        atlas.cell_height,
-                    ),
+                    extract_cell_pixels(&seq_renderer, idx, 0, atlas.cell_width, atlas.cell_height,),
                     "digit {:?} changed appearance in sequence context at dpi {}",
                     ch,
                     dpi,

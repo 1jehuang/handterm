@@ -526,9 +526,11 @@ impl HandtermApp {
             let steps = delta_rows.abs().ceil() as usize;
             let max = state.terminal.grid.scrollback_len();
             if delta_rows > 0.0 {
-                state.terminal.grid.scroll_offset = (state.terminal.grid.scroll_offset + steps).min(max);
+                state.terminal.grid.scroll_offset =
+                    (state.terminal.grid.scroll_offset + steps).min(max);
             } else {
-                state.terminal.grid.scroll_offset = state.terminal.grid.scroll_offset.saturating_sub(steps);
+                state.terminal.grid.scroll_offset =
+                    state.terminal.grid.scroll_offset.saturating_sub(steps);
             }
             state.scheduler.mark_redraw_needed();
             state.window.request_redraw();

@@ -240,6 +240,8 @@ That launch-glue isolation is now done, and it is a reasonable stopping point un
 
 If the split continues later, the next smallest safer slice is likely `src/daemon.rs` + `src/server.rs` before tackling `src/client.rs` and the remote frontends, because the remote CPU/GPU frontends still pull in much more windowing/rendering/UI surface area.
 
+For now, it is reasonable to pause the deeper daemon/server extraction here and avoid forcing another architecture pass immediately.
+
 Concrete dependencies to plan for in that deeper `src/daemon.rs` + `src/server.rs` move:
 - PTY/process management (`crate::pty::PtyChild`)
 - config/build metadata inputs (`crate::config::AppConfig`, `crate::build_info::protocol_build_id`)
@@ -253,6 +255,8 @@ README and OPTIMIZATION have been updated substantially, but any future changes 
 For now, `HANDTERM_PROFILE_JSON=1` should stay as an **internal opt-in diagnostics aid** rather than a prominently documented README feature. It is useful for safe machine-parsed profiling, but it is not a primary product surface.
 
 The remaining Kitty image `partial*` gaps are no longer the preferred next protocol slice. Handterm now covers the core inline raw/compressed RGB/RGBA/PNG upload-place-delete path, and the remaining gaps are lower-leverage features such as non-inline transports and richer placement/operation parameters.
+
+If work shifts away from daemon/package cleanup and away from Kitty protocol follow-through, the next notable non-Kitty feature gap to evaluate is Sixel support, since it remains one of the clearest missing graphics/protocol capabilities in the feature table.
 
 ## Current Known Risks / Notes
 

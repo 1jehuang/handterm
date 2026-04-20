@@ -8,7 +8,7 @@ use crate::frontend::{
     should_skip_ime_commit_after_key_event,
 };
 use crate::gpu_runtime::{
-    GpuSurfaceState, SharedGpuContext, create_shared_gpu_context,
+    GpuSurfaceState, SharedGpuContext, SharedGpuInitProfile, create_shared_gpu_context_profiled,
     create_surface_state_for_window_with_shared_profiled_with_defaults,
     create_window_attributes_for_metrics, render_surface_state_profiled_with_scroll,
     render_surface_state_with_scroll, resize_surface_state,
@@ -433,10 +433,8 @@ impl GpuApp {
         let window_ms = before_window.elapsed();
         let shared_init_task = if self.shared.is_none() {
             Some(std::thread::spawn(
-                || -> Result<(Arc<SharedGpuContext>, Duration)> {
-                    let start = Instant::now();
-                    let shared = create_shared_gpu_context()?;
-                    Ok((shared, start.elapsed()))
+                || -> Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)> {
+                    create_shared_gpu_context_profiled()
                 },
             ))
         } else {
@@ -472,15 +470,19 @@ impl GpuApp {
         self.ensure_atlas_with_hint(dpi, font_path_hint)?;
         let atlas_ms = before_atlas.elapsed();
         let before_shared_wait = Instant::now();
-        let (shared, shared_ms, shared_wait_ms) = if let Some(shared) = &self.shared {
-            (shared.clone(), Duration::ZERO, Duration::ZERO)
+        let (shared, shared_profile, shared_wait_ms) = if let Some(shared) = &self.shared {
+            (
+                shared.clone(),
+                SharedGpuInitProfile::default(),
+                Duration::ZERO,
+            )
         } else if let Some(task) = shared_init_task {
-            let (shared, total) = task
+            let (shared, profile) = task
                 .join()
                 .map_err(|_| anyhow::anyhow!("shared gpu init thread panicked"))??;
             let wait = before_shared_wait.elapsed();
             self.shared = Some(shared.clone());
-            (shared, total, wait)
+            (shared, profile, wait)
         } else {
             unreachable!("cold shared gpu init should either already exist or have a task")
         };
@@ -585,6 +587,7 @@ impl GpuApp {
              \x20 total={:.2}ms host_setup_before_surface={:.2}ms watcher={:.2}ms\n\
              \x20 surface_total={:.2}ms compositor_facing={:.2}ms handterm_surface_setup={:.2}ms surface_unaccounted={:.2}ms\n\
              \x20 dpi={:.2}ms bootstrap={:.2}ms window={:.2}ms atlas={:.2}ms shared_total={:.2}ms shared_wait={:.2}ms terminal={:.2}ms pty={:.2}ms\n\
+             \x20   shared_adapter={:.2}ms shared_device={:.2}ms shared_layout={:.2}ms shared_shaders={:.2}ms shared_sampler={:.2}ms shared_atlas={:.2}ms\n\
              \x20 surface_total={:.2}ms\n\
              \x20   window_create={:.2}ms ime={:.2}ms wgpu_surface={:.2}ms\n\
              \x20   default_config={:.2}ms caps={:.2}ms configure={:.2}ms\n\
@@ -608,10 +611,20 @@ impl GpuApp {
             bootstrap_ms.as_secs_f64() * 1000.0,
             window_ms.as_secs_f64() * 1000.0,
             atlas_ms.as_secs_f64() * 1000.0,
-            shared_ms.as_secs_f64() * 1000.0,
+            shared_profile.total.as_secs_f64() * 1000.0,
             shared_wait_ms.as_secs_f64() * 1000.0,
             terminal_ms.as_secs_f64() * 1000.0,
             pty_ms.as_secs_f64() * 1000.0,
+            shared_profile.adapter_request.as_secs_f64() * 1000.0,
+            shared_profile.device_request.as_secs_f64() * 1000.0,
+            shared_profile
+                .bind_group_layout
+                .saturating_add(shared_profile.pipeline_layout)
+                .as_secs_f64()
+                * 1000.0,
+            shared_profile.shader_modules.as_secs_f64() * 1000.0,
+            shared_profile.sampler.as_secs_f64() * 1000.0,
+            shared_profile.atlas_texture.as_secs_f64() * 1000.0,
             surface_total_ms.as_secs_f64() * 1000.0,
             sp.window_create.as_secs_f64() * 1000.0,
             sp.ime_setup.as_secs_f64() * 1000.0,
@@ -650,8 +663,18 @@ impl GpuApp {
                 "bootstrap_ms": bootstrap_ms.as_secs_f64() * 1000.0,
                 "window_ms": window_ms.as_secs_f64() * 1000.0,
                 "atlas_ms": atlas_ms.as_secs_f64() * 1000.0,
-                "shared_ms": shared_ms.as_secs_f64() * 1000.0,
+                "shared_ms": shared_profile.total.as_secs_f64() * 1000.0,
                 "shared_wait_ms": shared_wait_ms.as_secs_f64() * 1000.0,
+                "shared_profile": {
+                    "adapter_request_ms": shared_profile.adapter_request.as_secs_f64() * 1000.0,
+                    "device_request_ms": shared_profile.device_request.as_secs_f64() * 1000.0,
+                    "bind_group_layout_ms": shared_profile.bind_group_layout.as_secs_f64() * 1000.0,
+                    "shader_modules_ms": shared_profile.shader_modules.as_secs_f64() * 1000.0,
+                    "pipeline_layout_ms": shared_profile.pipeline_layout.as_secs_f64() * 1000.0,
+                    "sampler_ms": shared_profile.sampler.as_secs_f64() * 1000.0,
+                    "atlas_texture_ms": shared_profile.atlas_texture.as_secs_f64() * 1000.0,
+                    "total_ms": shared_profile.total.as_secs_f64() * 1000.0,
+                },
                 "terminal_ms": terminal_ms.as_secs_f64() * 1000.0,
                 "pty_ms": pty_ms.as_secs_f64() * 1000.0,
                 "surface": {

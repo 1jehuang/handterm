@@ -74,6 +74,18 @@ pub struct SharedGpuContext {
     pub atlas: Mutex<SharedAtlasState>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SharedGpuInitProfile {
+    pub adapter_request: Duration,
+    pub device_request: Duration,
+    pub bind_group_layout: Duration,
+    pub shader_modules: Duration,
+    pub pipeline_layout: Duration,
+    pub sampler: Duration,
+    pub atlas_texture: Duration,
+    pub total: Duration,
+}
+
 struct SharedPipelines {
     text: wgpu::RenderPipeline,
     image: wgpu::RenderPipeline,
@@ -607,18 +619,28 @@ pub fn create_window_attributes_for_metrics(
 }
 
 pub fn create_shared_gpu_context() -> Result<Arc<SharedGpuContext>> {
+    let (shared, _) = create_shared_gpu_context_profiled()?;
+    Ok(shared)
+}
+
+pub fn create_shared_gpu_context_profiled() -> Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)>
+{
+    let total_start = Instant::now();
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         ..Default::default()
     });
 
+    let step_start = Instant::now();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::LowPower,
         compatible_surface: None,
         force_fallback_adapter: false,
     }))
     .context("no suitable GPU adapter found")?;
+    let adapter_request = step_start.elapsed();
 
+    let step_start = Instant::now();
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("handterm"),
         required_features: wgpu::Features::empty(),
@@ -626,7 +648,9 @@ pub fn create_shared_gpu_context() -> Result<Arc<SharedGpuContext>> {
         ..Default::default()
     }))
     .context("device creation should succeed")?;
+    let device_request = step_start.elapsed();
 
+    let step_start = Instant::now();
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("bind_group_layout"),
         entries: &[
@@ -658,7 +682,9 @@ pub fn create_shared_gpu_context() -> Result<Arc<SharedGpuContext>> {
             },
         ],
     });
+    let bind_group_layout_create = step_start.elapsed();
 
+    let step_start = Instant::now();
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("shader"),
         source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -667,18 +693,26 @@ pub fn create_shared_gpu_context() -> Result<Arc<SharedGpuContext>> {
         label: Some("image_shader"),
         source: wgpu::ShaderSource::Wgsl(IMAGE_SHADER.into()),
     });
+    let shader_modules = step_start.elapsed();
+
+    let step_start = Instant::now();
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("pipeline_layout"),
         bind_group_layouts: &[&bind_group_layout],
         immediate_size: 0,
     });
+    let pipeline_layout_create = step_start.elapsed();
+
+    let step_start = Instant::now();
     let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         mag_filter: wgpu::FilterMode::Nearest,
         min_filter: wgpu::FilterMode::Nearest,
         mipmap_filter: wgpu::MipmapFilterMode::Nearest,
         ..Default::default()
     });
+    let atlas_sampler_create = step_start.elapsed();
 
+    let step_start = Instant::now();
     let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("glyph_atlas"),
         size: wgpu::Extent3d {
@@ -694,8 +728,9 @@ pub fn create_shared_gpu_context() -> Result<Arc<SharedGpuContext>> {
         view_formats: &[],
     });
     let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let atlas_texture_create = step_start.elapsed();
 
-    Ok(Arc::new(SharedGpuContext {
+    let shared = Arc::new(SharedGpuContext {
         instance,
         adapter,
         device,
@@ -717,7 +752,21 @@ pub fn create_shared_gpu_context() -> Result<Arc<SharedGpuContext>> {
             atlas_row_height: 0,
             last_kitty_generation: 0,
         }),
-    }))
+    });
+
+    Ok((
+        shared,
+        SharedGpuInitProfile {
+            adapter_request,
+            device_request,
+            bind_group_layout: bind_group_layout_create,
+            shader_modules,
+            pipeline_layout: pipeline_layout_create,
+            sampler: atlas_sampler_create,
+            atlas_texture: atlas_texture_create,
+            total: total_start.elapsed(),
+        },
+    ))
 }
 
 pub fn create_surface_state(

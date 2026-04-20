@@ -299,6 +299,19 @@ pub struct StartupTiming {
     logged: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StartupTimingSnapshot {
+    pub open_to_pty_spawn_ms: Option<f64>,
+    pub open_to_first_pty_event_ms: Option<f64>,
+    pub open_to_first_pty_read_ms: Option<f64>,
+    pub open_to_first_visible_output_ms: Option<f64>,
+    pub bytes_before_visible: Option<usize>,
+    pub open_to_first_present_ms: Option<f64>,
+    pub open_to_first_visible_present_ms: Option<f64>,
+    pub first_read_to_visible_present_ms: Option<f64>,
+    pub first_visible_to_present_ms: Option<f64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecentTextKeyEvent {
     text: String,
@@ -594,32 +607,25 @@ impl StartupTiming {
         }
     }
 
-    pub fn emit_if_ready(&mut self, label: &str, id: u64) -> bool {
-        if self.logged
-            || self.first_present_at.is_none()
+    pub fn snapshot_if_ready(&self) -> Option<StartupTimingSnapshot> {
+        if self.first_present_at.is_none()
             || self.first_visible_output_at.is_none()
             || self.first_present_after_visible_at.is_none()
         {
-            return false;
+            return None;
         }
 
-        fn fmt_ms(started_at: Instant, at: Option<Instant>) -> String {
-            at.map(|instant| {
-                format!(
-                    "{:.2}ms",
-                    instant.duration_since(started_at).as_secs_f64() * 1000.0
-                )
-            })
-            .unwrap_or_else(|| "n/a".to_string())
-        }
-
-        let read_to_present = match (self.first_pty_read_at, self.first_present_after_visible_at) {
-            (Some(read), Some(present)) => {
-                Some(present.duration_since(read).as_secs_f64() * 1000.0)
-            }
-            _ => None,
+        let since_start = |at: Option<Instant>| {
+            at.map(|instant| instant.duration_since(self.started_at).as_secs_f64() * 1000.0)
         };
-        let visible_to_present = match (
+        let first_read_to_visible_present_ms =
+            match (self.first_pty_read_at, self.first_present_after_visible_at) {
+                (Some(read), Some(present)) => {
+                    Some(present.duration_since(read).as_secs_f64() * 1000.0)
+                }
+                _ => None,
+            };
+        let first_visible_to_present_ms = match (
             self.first_visible_output_at,
             self.first_present_after_visible_at,
         ) {
@@ -629,26 +635,51 @@ impl StartupTiming {
             _ => None,
         };
 
+        Some(StartupTimingSnapshot {
+            open_to_pty_spawn_ms: since_start(self.pty_spawned_at),
+            open_to_first_pty_event_ms: since_start(self.first_pty_event_at),
+            open_to_first_pty_read_ms: since_start(self.first_pty_read_at),
+            open_to_first_visible_output_ms: since_start(self.first_visible_output_at),
+            bytes_before_visible: self.bytes_before_visible,
+            open_to_first_present_ms: since_start(self.first_present_at),
+            open_to_first_visible_present_ms: since_start(self.first_present_after_visible_at),
+            first_read_to_visible_present_ms,
+            first_visible_to_present_ms,
+        })
+    }
+
+    pub fn emit_if_ready(&mut self, label: &str, id: u64) -> bool {
+        if self.logged {
+            return false;
+        }
+
+        let Some(snapshot) = self.snapshot_if_ready() else {
+            return false;
+        };
+
+        fn fmt_ms(value: Option<f64>) -> String {
+            value
+                .map(|ms| format!("{ms:.2}ms"))
+                .unwrap_or_else(|| "n/a".to_string())
+        }
+
         eprintln!(
             "handterm {label}: startup id={id}\n\
              \x20 open_to_pty_spawn={} open_to_first_pty_event={} open_to_first_pty_read={}\n\
              \x20 open_to_first_visible_output={} bytes_before_visible={} open_to_first_present={}\n\
              \x20 open_to_first_visible_present={} first_read_to_visible_present={} first_visible_to_present={}",
-            fmt_ms(self.started_at, self.pty_spawned_at),
-            fmt_ms(self.started_at, self.first_pty_event_at),
-            fmt_ms(self.started_at, self.first_pty_read_at),
-            fmt_ms(self.started_at, self.first_visible_output_at),
-            self.bytes_before_visible
+            fmt_ms(snapshot.open_to_pty_spawn_ms),
+            fmt_ms(snapshot.open_to_first_pty_event_ms),
+            fmt_ms(snapshot.open_to_first_pty_read_ms),
+            fmt_ms(snapshot.open_to_first_visible_output_ms),
+            snapshot
+                .bytes_before_visible
                 .map(|bytes| bytes.to_string())
                 .unwrap_or_else(|| "n/a".to_string()),
-            fmt_ms(self.started_at, self.first_present_at),
-            fmt_ms(self.started_at, self.first_present_after_visible_at),
-            read_to_present
-                .map(|ms| format!("{ms:.2}ms"))
-                .unwrap_or_else(|| "n/a".to_string()),
-            visible_to_present
-                .map(|ms| format!("{ms:.2}ms"))
-                .unwrap_or_else(|| "n/a".to_string()),
+            fmt_ms(snapshot.open_to_first_present_ms),
+            fmt_ms(snapshot.open_to_first_visible_present_ms),
+            fmt_ms(snapshot.first_read_to_visible_present_ms),
+            fmt_ms(snapshot.first_visible_to_present_ms),
         );
         self.logged = true;
         true
@@ -1520,5 +1551,31 @@ mod tests {
         assert!(modifiers.shift_key());
         assert!(modifiers.super_key());
         assert_ne!(modifiers.bits(), 0);
+    }
+
+    #[test]
+    fn startup_timing_snapshot_reports_ready_milestones() {
+        let started = Instant::now();
+        let mut timing = StartupTiming::new(started);
+        timing.mark_pty_spawned(started + Duration::from_millis(2));
+        timing.mark_pty_event(started + Duration::from_millis(4));
+        timing.mark_pty_read(started + Duration::from_millis(6), 12);
+        timing.first_visible_output_at = Some(started + Duration::from_millis(9));
+        timing.bytes_before_visible = Some(12);
+        timing.mark_present(started + Duration::from_millis(11));
+        timing.mark_present(started + Duration::from_millis(13));
+
+        let snapshot = timing
+            .snapshot_if_ready()
+            .expect("startup snapshot should be available once ready");
+        assert_eq!(snapshot.bytes_before_visible, Some(12));
+        assert_eq!(snapshot.open_to_pty_spawn_ms, Some(2.0));
+        assert_eq!(snapshot.open_to_first_pty_event_ms, Some(4.0));
+        assert_eq!(snapshot.open_to_first_pty_read_ms, Some(6.0));
+        assert_eq!(snapshot.open_to_first_visible_output_ms, Some(9.0));
+        assert_eq!(snapshot.open_to_first_present_ms, Some(11.0));
+        assert_eq!(snapshot.open_to_first_visible_present_ms, Some(11.0));
+        assert_eq!(snapshot.first_read_to_visible_present_ms, Some(5.0));
+        assert_eq!(snapshot.first_visible_to_present_ms, Some(2.0));
     }
 }

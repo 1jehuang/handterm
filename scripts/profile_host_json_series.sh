@@ -17,14 +17,13 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [add_windows]
 
-Collect a small safe machine-parsed GPU host open-window sample series using
+Collect a small safe machine-parsed host open-window sample series using
 HANDTERM_PROFILE_JSON=1.
 
 Defaults:
   add_windows: 3
 
 Safety:
-  - runs only against the GPU host path
   - defaults to a low live-window count
   - refuses add_windows > ${SAFE_MAX_ADD_WINDOWS} unless HANDTERM_UNSAFE_MANY_WINDOWS=1
 
@@ -43,8 +42,8 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
-if [[ "$BACKEND" != "gpu" ]]; then
-  echo "error: this script currently supports only the gpu backend" >&2
+if [[ "$BACKEND" != "gpu" && "$BACKEND" != "cpu" ]]; then
+  echo "error: backend must be either gpu or cpu" >&2
   exit 1
 fi
 
@@ -176,24 +175,34 @@ with open(os.environ['PID_FILE'], 'w') as fh:
 PY
 HOST_PID="$(cat "$PID_FILE")"
 
+if [[ "$BACKEND" == "gpu" ]]; then
+  OPEN_EVENT_NAME="gpu_host_open_window"
+  READY_EVENT_NAME="gpu_host_first_frame"
+else
+  OPEN_EVENT_NAME="cpu_host_open_window"
+  READY_EVENT_NAME="cpu_host_startup"
+fi
+
 wait_for_window_count 1
-wait_for_profile_event gpu_host_open_window 1
-wait_for_profile_event gpu_host_first_frame 1
+wait_for_profile_event "$OPEN_EVENT_NAME" 1
+wait_for_profile_event "$READY_EVENT_NAME" 1
 
 for window_id in $(seq 2 $((ADD_WINDOWS + 1))); do
   host_env "$BIN" --backend "$BACKEND" open-window >/dev/null 2>&1
   wait_for_window_count "$window_id"
-  wait_for_profile_event gpu_host_open_window "$window_id"
-  wait_for_profile_event gpu_host_first_frame "$window_id"
+  wait_for_profile_event "$OPEN_EVENT_NAME" "$window_id"
+  wait_for_profile_event "$READY_EVENT_NAME" "$window_id"
 done
 
-python - <<'PY' "$HOST_LOG" "$JSONL_FILE" "$SUMMARY_FILE" "$ADD_WINDOWS"
+python - <<'PY' "$HOST_LOG" "$JSONL_FILE" "$SUMMARY_FILE" "$ADD_WINDOWS" "$BACKEND"
 import json
 import statistics
 import sys
 from pathlib import Path
 
-log_path, jsonl_path, summary_path, add_windows = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4])
+log_path, jsonl_path, summary_path, add_windows, backend = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+open_event_name = f'{backend}_host_open_window'
+ready_event_name = 'gpu_host_first_frame' if backend == 'gpu' else 'cpu_host_startup'
 records = []
 with open(log_path, errors='replace') as fh:
     for line in fh:
@@ -206,7 +215,7 @@ with open(log_path, errors='replace') as fh:
             continue
         if obj.get('type') != 'handterm_profile':
             continue
-        if obj.get('event') not in {'gpu_host_open_window', 'gpu_host_first_frame'}:
+        if obj.get('event') not in {open_event_name, ready_event_name}:
             continue
         records.append(obj)
 
@@ -219,35 +228,64 @@ for obj in records:
     window_id = data.get('id')
     if not isinstance(window_id, int):
         continue
-    if obj['event'] == 'gpu_host_open_window':
+    if obj['event'] == open_event_name:
         open_events[window_id] = data
-    elif obj['event'] == 'gpu_host_first_frame':
+    elif obj['event'] == ready_event_name:
         first_frame_events[window_id] = data
 
 rows = []
 for window_id in sorted(open_events):
     open_data = open_events[window_id]
     first_data = first_frame_events.get(window_id, {})
-    surface = open_data.get('surface') or {}
-    rows.append({
-        'id': window_id,
-        'kind': open_data.get('kind', 'unknown'),
-        'total_ms': open_data.get('total_ms'),
-        'host_setup_before_surface_ms': open_data.get('host_setup_before_surface_ms'),
-        'compositor_facing_ms': open_data.get('compositor_facing_ms'),
-        'handterm_surface_setup_ms': open_data.get('handterm_surface_setup_ms'),
-        'configure_ms': surface.get('configure_ms'),
-        'open_to_first_present_ms': first_data.get('open_to_first_present_ms'),
-    })
+    if backend == 'gpu':
+        surface = open_data.get('surface') or {}
+        rows.append({
+            'id': window_id,
+            'kind': open_data.get('kind', 'unknown'),
+            'total_ms': open_data.get('total_ms'),
+            'host_setup_before_surface_ms': open_data.get('host_setup_before_surface_ms'),
+            'compositor_facing_ms': open_data.get('compositor_facing_ms'),
+            'handterm_surface_setup_ms': open_data.get('handterm_surface_setup_ms'),
+            'configure_ms': surface.get('configure_ms'),
+            'open_to_first_present_ms': first_data.get('open_to_first_present_ms'),
+        })
+    else:
+        rows.append({
+            'id': window_id,
+            'kind': open_data.get('kind', 'unknown'),
+            'total_ms': open_data.get('total_ms'),
+            'dpi_ms': open_data.get('dpi_ms'),
+            'bootstrap_ms': open_data.get('bootstrap_ms'),
+            'window_ms': open_data.get('window_ms'),
+            'atlas_ms': open_data.get('atlas_ms'),
+            'pty_ms': open_data.get('pty_ms'),
+            'open_to_first_present_ms': first_data.get('open_to_first_present_ms'),
+            'open_to_first_visible_output_ms': first_data.get('open_to_first_visible_output_ms'),
+            'open_to_first_visible_present_ms': first_data.get('open_to_first_visible_present_ms'),
+        })
 
-fields = [
-    'total_ms',
-    'host_setup_before_surface_ms',
-    'compositor_facing_ms',
-    'handterm_surface_setup_ms',
-    'configure_ms',
-    'open_to_first_present_ms',
-]
+fields = (
+    [
+        'total_ms',
+        'host_setup_before_surface_ms',
+        'compositor_facing_ms',
+        'handterm_surface_setup_ms',
+        'configure_ms',
+        'open_to_first_present_ms',
+    ]
+    if backend == 'gpu'
+    else [
+        'total_ms',
+        'dpi_ms',
+        'bootstrap_ms',
+        'window_ms',
+        'atlas_ms',
+        'pty_ms',
+        'open_to_first_present_ms',
+        'open_to_first_visible_output_ms',
+        'open_to_first_visible_present_ms',
+    ]
+)
 
 def summarize(group_name, subset):
     lines = [f'[{group_name}] count={len(subset)}']
@@ -267,7 +305,7 @@ first_rows = [row for row in rows if row['kind'] == 'first-window']
 add_rows = [row for row in rows if row['kind'] == 'add-window']
 
 output = []
-output.append(f'backend=gpu add_windows={add_windows} total_windows={len(rows)}')
+output.append(f'backend={backend} add_windows={add_windows} total_windows={len(rows)}')
 output.append(f'jsonl={jsonl_path}')
 output.append(f'log_source={log_path}')
 output.extend(summarize('first-window', first_rows))
@@ -275,17 +313,29 @@ output.extend(summarize('add-window', add_rows))
 output.append('')
 output.append('[per-window]')
 for row in rows:
-    output.append(
-        '  id={id} kind={kind} total_ms={total_ms:.2f} compositor_facing_ms={compositor_facing_ms:.2f} '
-        'configure_ms={configure_ms:.2f} open_to_first_present_ms={open_to_first_present_ms:.2f}'.format(
-            id=row['id'],
-            kind=row['kind'],
-            total_ms=row['total_ms'] or 0.0,
-            compositor_facing_ms=row['compositor_facing_ms'] or 0.0,
-            configure_ms=row['configure_ms'] or 0.0,
-            open_to_first_present_ms=row['open_to_first_present_ms'] or 0.0,
+    if backend == 'gpu':
+        output.append(
+            '  id={id} kind={kind} total_ms={total_ms:.2f} compositor_facing_ms={compositor_facing_ms:.2f} '
+            'configure_ms={configure_ms:.2f} open_to_first_present_ms={open_to_first_present_ms:.2f}'.format(
+                id=row['id'],
+                kind=row['kind'],
+                total_ms=row['total_ms'] or 0.0,
+                compositor_facing_ms=row['compositor_facing_ms'] or 0.0,
+                configure_ms=row['configure_ms'] or 0.0,
+                open_to_first_present_ms=row['open_to_first_present_ms'] or 0.0,
+            )
         )
-    )
+    else:
+        output.append(
+            '  id={id} kind={kind} total_ms={total_ms:.2f} pty_ms={pty_ms:.2f} '
+            'open_to_first_visible_present_ms={open_to_first_visible_present_ms:.2f}'.format(
+                id=row['id'],
+                kind=row['kind'],
+                total_ms=row['total_ms'] or 0.0,
+                pty_ms=row['pty_ms'] or 0.0,
+                open_to_first_visible_present_ms=row['open_to_first_visible_present_ms'] or 0.0,
+            )
+        )
 summary_text = '\n'.join(output) + '\n'
 summary_path.write_text(summary_text)
 print(summary_text, end='')

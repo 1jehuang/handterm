@@ -163,7 +163,7 @@ That should **not** be repeated in the same way.
 
 - replace compositor-heavy benchmarking with safer host-internal instrumentation
 - measure repeated `open-window` calls without opening excessive live windows unnecessarily
-- prefer the new `scripts/profile_gpu_host_json_series.sh` workflow for small machine-parsed GPU-host sample series, because it uses `HANDTERM_PROFILE_JSON=1` plus an isolated host socket instead of compositor-heavy scraping
+- prefer the new `scripts/profile_host_json_series.sh` workflow for small machine-parsed host sample series, because it uses `HANDTERM_PROFILE_JSON=1` plus an isolated host socket instead of compositor-heavy scraping
 - a later broader safe JSON-series run with 3 added windows still showed the same answer: add-window time remained dominated by the compositor-facing bucket, especially `configure`, so the overall bottleneck interpretation did not materially change
 - collect:
   - total open-window time

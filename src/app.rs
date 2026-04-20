@@ -17,12 +17,13 @@ use crate::host_input::{
 use crate::ipc::{IpcAction, IpcServer, Request, Response};
 use crate::native_scroll::NativeScrollBridge;
 use crate::platform::{copy_to_clipboard, open_url, paste_from_clipboard};
-use crate::profiling::ProcessCpuTime;
+use crate::profiling::{ProcessCpuTime, emit_structured_profile_event};
 use crate::pty::PtyChild;
 use crate::render::render_terminal_to_buffer;
 use crate::standalone_support::handle_ipc_request;
 use crate::terminal::Terminal;
 use anyhow::{Context, Result};
+use serde_json::json;
 use softbuffer::{Context as SoftContext, Surface};
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -307,6 +308,12 @@ impl HandtermApp {
     ) -> Result<u64> {
         let start = Instant::now();
         let cpu_time_started = ProcessCpuTime::capture();
+        let existing_windows = self.windows.len();
+        let open_kind = if existing_windows == 0 {
+            "first-window"
+        } else {
+            "add-window"
+        };
         let cols = cols.unwrap_or(self.config.window.columns).max(1);
         let rows = rows.unwrap_or(self.config.window.rows).max(1);
         let before_dpi = Instant::now();
@@ -440,6 +447,25 @@ impl HandtermApp {
             open_cpu.map(ProcessCpuTime::user_ms).unwrap_or(0.0),
             open_cpu.map(ProcessCpuTime::system_ms).unwrap_or(0.0),
             open_cpu.map(ProcessCpuTime::total_ms).unwrap_or(0.0),
+        );
+        emit_structured_profile_event(
+            "cpu_host_open_window",
+            json!({
+                "id": id,
+                "kind": open_kind,
+                "existing_windows": existing_windows,
+                "total_ms": start.elapsed().as_secs_f64() * 1000.0,
+                "dpi_ms": dpi_ms.as_secs_f64() * 1000.0,
+                "bootstrap_ms": bootstrap_ms.as_secs_f64() * 1000.0,
+                "window_ms": window_ms.as_secs_f64() * 1000.0,
+                "atlas_ms": atlas_ms.as_secs_f64() * 1000.0,
+                "pty_ms": Instant::now().duration_since(before_pty).as_secs_f64() * 1000.0,
+                "host_cpu": {
+                    "user_ms": open_cpu.map(ProcessCpuTime::user_ms).unwrap_or(0.0),
+                    "system_ms": open_cpu.map(ProcessCpuTime::system_ms).unwrap_or(0.0),
+                    "total_ms": open_cpu.map(ProcessCpuTime::total_ms).unwrap_or(0.0),
+                }
+            }),
         );
         Ok(id)
     }
@@ -1068,6 +1094,28 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                                 delta.system_ms(),
                                 delta.total_ms(),
                             );
+                            if let Some(snapshot) = state.startup_timing.snapshot_if_ready() {
+                                emit_structured_profile_event(
+                                    "cpu_host_startup",
+                                    json!({
+                                        "id": state.id,
+                                        "open_to_pty_spawn_ms": snapshot.open_to_pty_spawn_ms,
+                                        "open_to_first_pty_event_ms": snapshot.open_to_first_pty_event_ms,
+                                        "open_to_first_pty_read_ms": snapshot.open_to_first_pty_read_ms,
+                                        "open_to_first_visible_output_ms": snapshot.open_to_first_visible_output_ms,
+                                        "bytes_before_visible": snapshot.bytes_before_visible,
+                                        "open_to_first_present_ms": snapshot.open_to_first_present_ms,
+                                        "open_to_first_visible_present_ms": snapshot.open_to_first_visible_present_ms,
+                                        "first_read_to_visible_present_ms": snapshot.first_read_to_visible_present_ms,
+                                        "first_visible_to_present_ms": snapshot.first_visible_to_present_ms,
+                                        "host_cpu": {
+                                            "user_ms": delta.user_ms(),
+                                            "system_ms": delta.system_ms(),
+                                            "total_ms": delta.total_ms(),
+                                        }
+                                    }),
+                                );
+                            }
                         }
                     }
                     _ => {}

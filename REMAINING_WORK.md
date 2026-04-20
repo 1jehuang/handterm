@@ -165,7 +165,7 @@ That should **not** be repeated in the same way.
 - measure repeated `open-window` calls without opening excessive live windows unnecessarily
 - prefer the new `scripts/profile_host_json_series.sh` workflow for small machine-parsed host sample series, because it uses `HANDTERM_PROFILE_JSON=1` plus an isolated host socket instead of compositor-heavy scraping
 - when medians across separate host launches matter, prefer the same script's repeat support instead of stuffing more live windows into one compositor session
-- the same script now emits raw JSONL, a human text summary, and a machine-parsable aggregate summary JSON file for downstream analysis, including grouped rollups plus per-session and per-window machine-readable detail
+- the same script now emits raw JSONL, a human text summary, and a machine-parsable aggregate summary JSON file for downstream analysis, including grouped rollups plus per-session and per-window machine-readable detail, with a stable schema/version marker for downstream tooling
 - a later broader safe JSON-series run with 3 added windows still showed the same answer: add-window time remained dominated by the compositor-facing bucket, especially `configure`, so the overall bottleneck interpretation did not materially change
 - collect:
   - total open-window time

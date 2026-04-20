@@ -414,6 +414,8 @@ for row in rows:
 summary_text = '\n'.join(output) + '\n'
 summary_path.write_text(summary_text)
 summary_json = {
+    'schema': 'handterm.profile_series',
+    'schema_version': 1,
     'backend': backend,
     'add_windows': add_windows,
     'repeats': repeats,

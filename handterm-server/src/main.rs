@@ -5,6 +5,10 @@ use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(name = "handterm-server")]
+#[command(about = "Deprecated server-only reference binary for daemon mode")]
+#[command(
+    after_help = "This binary uses the deprecated daemon/thin-client path and is best treated as a reference or experimental architecture.\nRecommended local path: use the default single-process host via `handterm`."
+)]
 struct Args {
     #[arg(long)]
     config: Option<PathBuf>,

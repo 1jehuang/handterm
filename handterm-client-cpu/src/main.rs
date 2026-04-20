@@ -12,6 +12,10 @@ fn default_server_socket_path() -> PathBuf {
 
 #[derive(Debug, Parser)]
 #[command(name = "handterm-client-cpu")]
+#[command(about = "Deprecated CPU thin client for the daemon/reference path")]
+#[command(
+    after_help = "This binary uses the deprecated daemon/thin-client path and is best treated as a reference or experimental architecture.\nRecommended local path: use the default single-process host via `handterm`."
+)]
 struct Args {
     #[arg(long)]
     config: Option<PathBuf>,

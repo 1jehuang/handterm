@@ -205,6 +205,7 @@ This is the biggest remaining optimization target.
 - additional instrumentation in `src/gpu_app.rs`
 - additional instrumentation in `src/gpu_runtime.rs`
 - identify whether the remaining cost is mostly compositor-side or handterm-side
+- first-window shared GPU bring-up can now overlap with other window-prep work, and the profiling logs now distinguish `shared_ms` (total init work) from `shared_wait_ms` (blocking wait left on the critical path)
 - latest safe add-window sample suggests handterm-side GPU setup is already relatively small, so any further local wins are likely lower leverage items such as buffer reuse/pooling or minor setup deferral rather than the main bottleneck
 - spare/precreated-window strategies are not the preferred next move right now, because they would mostly shift configure cost earlier while adding memory, lifecycle, focus, and semantics tradeoffs
 

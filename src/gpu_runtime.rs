@@ -2814,7 +2814,10 @@ mod tests {
                 .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, 96))
                 .expect("should load font atlas for GPU cursor-style parity");
 
-        for cursor_style in [crate::terminal::CursorStyle::Bar, crate::terminal::CursorStyle::Underline] {
+        for cursor_style in [
+            crate::terminal::CursorStyle::Bar,
+            crate::terminal::CursorStyle::Underline,
+        ] {
             let mut terminal = Terminal::new(8, 2);
             let mut cpu = OffscreenRenderer::new(8, 2, &atlas);
             terminal.process(b"cursor");

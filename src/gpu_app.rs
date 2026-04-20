@@ -374,15 +374,6 @@ impl GpuApp {
         Ok(())
     }
 
-    fn ensure_shared(&mut self) -> Result<Arc<SharedGpuContext>> {
-        if let Some(shared) = &self.shared {
-            return Ok(shared.clone());
-        }
-        let shared = create_shared_gpu_context()?;
-        self.shared = Some(shared.clone());
-        Ok(shared)
-    }
-
     fn open_window(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -440,6 +431,17 @@ impl GpuApp {
                 .context("window creation should succeed")?,
         );
         let window_ms = before_window.elapsed();
+        let shared_init_task = if self.shared.is_none() {
+            Some(std::thread::spawn(
+                || -> Result<(Arc<SharedGpuContext>, Duration)> {
+                    let start = Instant::now();
+                    let shared = create_shared_gpu_context()?;
+                    Ok((shared, start.elapsed()))
+                },
+            ))
+        } else {
+            None
+        };
         let before_terminal = Instant::now();
         let terminal = Terminal::new_with_scrollback(cols, rows, self.config.scrollback.lines);
         let terminal_ms = before_terminal.elapsed();
@@ -469,9 +471,19 @@ impl GpuApp {
         let before_atlas = Instant::now();
         self.ensure_atlas_with_hint(dpi, font_path_hint)?;
         let atlas_ms = before_atlas.elapsed();
-        let before_shared = Instant::now();
-        let shared = self.ensure_shared()?;
-        let shared_ms = before_shared.elapsed();
+        let before_shared_wait = Instant::now();
+        let (shared, shared_ms, shared_wait_ms) = if let Some(shared) = &self.shared {
+            (shared.clone(), Duration::ZERO, Duration::ZERO)
+        } else if let Some(task) = shared_init_task {
+            let (shared, total) = task
+                .join()
+                .map_err(|_| anyhow::anyhow!("shared gpu init thread panicked"))??;
+            let wait = before_shared_wait.elapsed();
+            self.shared = Some(shared.clone());
+            (shared, total, wait)
+        } else {
+            unreachable!("cold shared gpu init should either already exist or have a task")
+        };
         let atlas = self
             .atlas_cache
             .get(&dpi)
@@ -561,7 +573,7 @@ impl GpuApp {
             .saturating_add(terminal_ms)
             .saturating_add(pty_ms)
             .saturating_add(atlas_ms)
-            .saturating_add(shared_ms)
+            .saturating_add(shared_wait_ms)
             .as_secs_f64()
             * 1000.0;
         let compositor_facing_ms = sp.compositor_facing_total().as_secs_f64() * 1000.0;
@@ -572,7 +584,7 @@ impl GpuApp {
              \x20 kind={open_kind} existing_windows={} shared_warm={} atlas_cached={} preferred_surface_defaults_available={} defaults_reused={} pipeline_cache_hit={}\n\
              \x20 total={:.2}ms host_setup_before_surface={:.2}ms watcher={:.2}ms\n\
              \x20 surface_total={:.2}ms compositor_facing={:.2}ms handterm_surface_setup={:.2}ms surface_unaccounted={:.2}ms\n\
-             \x20 dpi={:.2}ms bootstrap={:.2}ms window={:.2}ms atlas={:.2}ms shared={:.2}ms terminal={:.2}ms pty={:.2}ms\n\
+             \x20 dpi={:.2}ms bootstrap={:.2}ms window={:.2}ms atlas={:.2}ms shared_total={:.2}ms shared_wait={:.2}ms terminal={:.2}ms pty={:.2}ms\n\
              \x20 surface_total={:.2}ms\n\
              \x20   window_create={:.2}ms ime={:.2}ms wgpu_surface={:.2}ms\n\
              \x20   default_config={:.2}ms caps={:.2}ms configure={:.2}ms\n\
@@ -597,6 +609,7 @@ impl GpuApp {
             window_ms.as_secs_f64() * 1000.0,
             atlas_ms.as_secs_f64() * 1000.0,
             shared_ms.as_secs_f64() * 1000.0,
+            shared_wait_ms.as_secs_f64() * 1000.0,
             terminal_ms.as_secs_f64() * 1000.0,
             pty_ms.as_secs_f64() * 1000.0,
             surface_total_ms.as_secs_f64() * 1000.0,
@@ -638,6 +651,7 @@ impl GpuApp {
                 "window_ms": window_ms.as_secs_f64() * 1000.0,
                 "atlas_ms": atlas_ms.as_secs_f64() * 1000.0,
                 "shared_ms": shared_ms.as_secs_f64() * 1000.0,
+                "shared_wait_ms": shared_wait_ms.as_secs_f64() * 1000.0,
                 "terminal_ms": terminal_ms.as_secs_f64() * 1000.0,
                 "pty_ms": pty_ms.as_secs_f64() * 1000.0,
                 "surface": {

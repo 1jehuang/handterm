@@ -36,6 +36,7 @@ pub struct Terminal {
     pub cursor_visible: bool,
     pub title: Option<String>,
     dcs_events: Vec<Vec<u8>>,
+    sixel_events: Vec<Vec<u8>>,
     response_buf: Vec<u8>,
     saved_cursor: Option<(usize, usize)>,
     mode_bracketed_paste: bool,
@@ -213,6 +214,7 @@ impl Terminal {
             cursor_visible: true,
             title: None,
             dcs_events: Vec::new(),
+            sixel_events: Vec::new(),
             response_buf: Vec::new(),
             saved_cursor: None,
             mode_bracketed_paste: false,
@@ -280,6 +282,18 @@ impl Terminal {
 
     pub fn drain_dcs(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.dcs_events)
+    }
+
+    pub fn take_sixel(&mut self) -> Option<Vec<u8>> {
+        if self.sixel_events.is_empty() {
+            None
+        } else {
+            Some(self.sixel_events.remove(0))
+        }
+    }
+
+    pub fn drain_sixel(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.sixel_events)
     }
 
     pub fn bracketed_paste_mode(&self) -> bool {
@@ -1017,6 +1031,9 @@ impl Terminal {
 
     fn dcs_dispatch(&mut self, data: &[u8]) {
         self.dcs_events.push(data.to_vec());
+        if let Some(payload) = data.strip_prefix(b"q") {
+            self.sixel_events.push(payload.to_vec());
+        }
     }
 
     fn apc_dispatch(&mut self, data: &[u8]) {
@@ -1913,6 +1930,14 @@ mod tests {
         let mut t = Terminal::new(80, 24);
         t.process(b"\x1bP+q1111\x1b\\\x1bP+q2222\x1b\\");
         assert_eq!(t.drain_dcs(), vec![b"+q1111".to_vec(), b"+q2222".to_vec()]);
+    }
+
+    #[test]
+    fn sixel_dcs_payloads_are_queued_separately() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1bPqABC\x1b\\");
+        assert_eq!(t.take_dcs().as_deref(), Some(b"qABC".as_slice()));
+        assert_eq!(t.take_sixel().as_deref(), Some(b"ABC".as_slice()));
     }
 
     #[test]

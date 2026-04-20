@@ -390,11 +390,20 @@ impl GpuApp {
         };
         let cols = cols.unwrap_or(self.config.window.columns).max(1);
         let rows = rows.unwrap_or(self.config.window.rows).max(1);
+        let shared_warm = self.shared.is_some();
+        let shared_init_task = if shared_warm {
+            None
+        } else {
+            Some(std::thread::spawn(
+                || -> Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)> {
+                    create_shared_gpu_context_profiled()
+                },
+            ))
+        };
         let before_dpi = Instant::now();
         let dpi = self.resolve_dpi(event_loop);
         let dpi_ms = before_dpi.elapsed();
         let atlas_cached = self.atlas_cache.contains_key(&dpi);
-        let shared_warm = self.shared.is_some();
         let before_bootstrap = Instant::now();
         let bootstrap = bootstrap_font_metrics_with_family_dpi(
             &self.config.style.font_family,
@@ -431,15 +440,6 @@ impl GpuApp {
                 .context("window creation should succeed")?,
         );
         let window_ms = before_window.elapsed();
-        let shared_init_task = if self.shared.is_none() {
-            Some(std::thread::spawn(
-                || -> Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)> {
-                    create_shared_gpu_context_profiled()
-                },
-            ))
-        } else {
-            None
-        };
         let before_terminal = Instant::now();
         let terminal = Terminal::new_with_scrollback(cols, rows, self.config.scrollback.lines);
         let terminal_ms = before_terminal.elapsed();

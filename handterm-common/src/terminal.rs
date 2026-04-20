@@ -39,6 +39,7 @@ pub struct Terminal {
     sixel_events: Vec<Vec<u8>>,
     apc_events: Vec<ApcEvent>,
     osc_events: Vec<OscEvent>,
+    control_string_events: Vec<ControlStringEvent>,
     response_buf: Vec<u8>,
     saved_cursor: Option<(usize, usize)>,
     mode_bracketed_paste: bool,
@@ -131,6 +132,13 @@ pub enum ApcEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OscEvent {
     Raw(Vec<u8>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlStringEvent {
+    Osc(OscEvent),
+    Dcs(DcsEvent),
+    Apc(ApcEvent),
 }
 
 pub trait TerminalView {
@@ -236,6 +244,7 @@ impl Terminal {
             sixel_events: Vec::new(),
             apc_events: Vec::new(),
             osc_events: Vec::new(),
+            control_string_events: Vec::new(),
             response_buf: Vec::new(),
             saved_cursor: None,
             mode_bracketed_paste: false,
@@ -303,6 +312,18 @@ impl Terminal {
 
     pub fn drain_osc(&mut self) -> Vec<OscEvent> {
         std::mem::take(&mut self.osc_events)
+    }
+
+    pub fn take_control_string(&mut self) -> Option<ControlStringEvent> {
+        if self.control_string_events.is_empty() {
+            None
+        } else {
+            Some(self.control_string_events.remove(0))
+        }
+    }
+
+    pub fn drain_control_strings(&mut self) -> Vec<ControlStringEvent> {
+        std::mem::take(&mut self.control_string_events)
     }
 
     pub fn take_dcs(&mut self) -> Option<DcsEvent> {
@@ -1015,7 +1036,10 @@ impl Terminal {
     }
 
     fn osc_dispatch(&mut self, data: &[u8]) {
-        self.osc_events.push(OscEvent::Raw(data.to_vec()));
+        let event = OscEvent::Raw(data.to_vec());
+        self.control_string_events
+            .push(ControlStringEvent::Osc(event.clone()));
+        self.osc_events.push(event);
         if let Some(semi) = data.iter().position(|&b| b == b';') {
             let cmd = &data[..semi];
             let payload = &data[semi + 1..];
@@ -1082,6 +1106,8 @@ impl Terminal {
         } else {
             DcsEvent::Generic(data.to_vec())
         };
+        self.control_string_events
+            .push(ControlStringEvent::Dcs(event.clone()));
         self.dcs_events.push(event);
     }
 
@@ -1090,11 +1116,16 @@ impl Terminal {
             return;
         }
         if data[0] == b'G' {
-            self.apc_events
-                .push(ApcEvent::KittyGraphics(data[1..].to_vec()));
+            let event = ApcEvent::KittyGraphics(data[1..].to_vec());
+            self.control_string_events
+                .push(ControlStringEvent::Apc(event.clone()));
+            self.apc_events.push(event);
             self.handle_kitty_graphics(&data[1..]);
         } else {
-            self.apc_events.push(ApcEvent::Generic(data.to_vec()));
+            let event = ApcEvent::Generic(data.to_vec());
+            self.control_string_events
+                .push(ControlStringEvent::Apc(event.clone()));
+            self.apc_events.push(event);
         }
     }
 
@@ -2016,6 +2047,20 @@ mod tests {
         assert_eq!(
             t.take_apc(),
             Some(ApcEvent::KittyGraphics(b"i=7,a=d".to_vec()))
+        );
+    }
+
+    #[test]
+    fn control_string_events_preserve_cross_family_order() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b]0;Title\x1b\\\x1bP+q12\x1b\\\x1b_Gi=7,a=d\x1b\\");
+        assert_eq!(
+            t.drain_control_strings(),
+            vec![
+                ControlStringEvent::Osc(OscEvent::Raw(b"0;Title".to_vec())),
+                ControlStringEvent::Dcs(DcsEvent::Generic(b"+q12".to_vec())),
+                ControlStringEvent::Apc(ApcEvent::KittyGraphics(b"i=7,a=d".to_vec())),
+            ]
         );
     }
 

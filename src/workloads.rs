@@ -33,7 +33,7 @@ pub(crate) const TUI_HELP_OVERLAY_TRANSCRIPT: &[&[u8]] = &[
 pub(crate) const TUI_HELP_WITH_IMAGE_TRANSCRIPT: &[&[u8]] = &[
     b"\x1b[?1049h",
     b"jcode boot\r\nloading modules\r\nready\r\n",
-    b"\x1b_Ga=T,i=5,f=32,s=1,v=1,c=2,r=1;+////wAAAP8=\x1b\\",
+    b"\x1b_Ga=T,i=5,f=32,s=1,v=1,c=2,r=1;/wAA/w==\x1b\\",
     b"\x1b[2J\x1b[H",
     b"/help\r\n",
     b"\x1b[38;5;39mcommands\x1b[0m\r\nopen close save\r\n",

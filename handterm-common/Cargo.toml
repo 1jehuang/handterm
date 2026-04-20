@@ -10,3 +10,4 @@ serde = { version = "1.0.217", features = ["derive"] }
 bincode = "1.3.3"
 unicode-width = "0.2"
 unicode-segmentation = "1.12.0"
+png = "0.17"

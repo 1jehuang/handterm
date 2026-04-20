@@ -5,6 +5,7 @@ use crate::server_sync::{
     AppliedServerEffects, apply_cursor_state as apply_wire_cursor_state,
     apply_dirty_cell as apply_wire_dirty_cell, kitty_images_from_wire, kitty_placements_from_wire,
 };
+use std::io::Cursor;
 
 fn dec_special_to_unicode(b: u8) -> u32 {
     match b {
@@ -128,6 +129,7 @@ pub trait TerminalView {
 #[derive(Debug, Clone, Copy)]
 struct KittyImageFinalize {
     id: u32,
+    format: u32,
     width: u32,
     height: u32,
     action: u8,
@@ -1090,6 +1092,7 @@ impl Terminal {
                         self.kitty_pending_height = 0;
                         let request = KittyImageFinalize {
                             id: final_id,
+                            format: final_fmt,
                             width: final_w,
                             height: final_h,
                             action,
@@ -1103,6 +1106,7 @@ impl Terminal {
                 }
                 let request = KittyImageFinalize {
                     id: img_id,
+                    format: fmt,
                     width,
                     height,
                     action,
@@ -1163,7 +1167,9 @@ impl Terminal {
     }
 
     fn finalize_kitty_image(&mut self, request: KittyImageFinalize, payload: &[u8], quiet: u8) {
-        let decoded = if let Ok(d) = self.base64_decode_kitty(payload) {
+        let (actual_width, actual_height, decoded) = if let Ok(d) =
+            self.decode_kitty_image_payload(request.format, payload, request.width, request.height)
+        {
             d
         } else {
             return;
@@ -1177,8 +1183,8 @@ impl Terminal {
 
         let image = KittyImage {
             id: actual_id,
-            width: request.width,
-            height: request.height,
+            width: actual_width,
+            height: actual_height,
             data: decoded,
         };
 
@@ -1195,12 +1201,12 @@ impl Terminal {
                 cols: if request.cols > 0 {
                     request.cols as usize
                 } else {
-                    (request.width / self.grid.cols.max(1) as u32).max(1) as usize
+                    (actual_width / self.grid.cols.max(1) as u32).max(1) as usize
                 },
                 rows: if request.rows_param > 0 {
                     request.rows_param as usize
                 } else {
-                    (request.height / self.grid.rows.max(1) as u32).max(1) as usize
+                    (actual_height / self.grid.rows.max(1) as u32).max(1) as usize
                 },
             });
         }
@@ -1291,6 +1297,88 @@ impl Terminal {
             }
         }
         Ok(out)
+    }
+
+    fn decode_kitty_image_payload(
+        &self,
+        format: u32,
+        payload: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<(u32, u32, Vec<u8>), ()> {
+        let decoded = self.base64_decode_kitty(payload)?;
+        match format {
+            24 => {
+                if width == 0 || height == 0 {
+                    return Err(());
+                }
+                let expected = (width as usize)
+                    .saturating_mul(height as usize)
+                    .saturating_mul(3);
+                if decoded.len() != expected {
+                    return Err(());
+                }
+                let mut rgba = Vec::with_capacity((width as usize) * (height as usize) * 4);
+                for chunk in decoded.chunks_exact(3) {
+                    rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 0xff]);
+                }
+                Ok((width, height, rgba))
+            }
+            32 => {
+                if width == 0 || height == 0 {
+                    return Err(());
+                }
+                let expected = (width as usize)
+                    .saturating_mul(height as usize)
+                    .saturating_mul(4);
+                if decoded.len() != expected {
+                    return Err(());
+                }
+                Ok((width, height, decoded))
+            }
+            100 => self.decode_png_kitty(&decoded),
+            _ => Err(()),
+        }
+    }
+
+    fn decode_png_kitty(&self, encoded_png: &[u8]) -> Result<(u32, u32, Vec<u8>), ()> {
+        let mut decoder = png::Decoder::new(Cursor::new(encoded_png));
+        decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+        let mut reader = decoder.read_info().map_err(|_| ())?;
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).map_err(|_| ())?;
+        let bytes = &buf[..info.buffer_size()];
+
+        let rgba = match info.color_type {
+            png::ColorType::Rgba => bytes.to_vec(),
+            png::ColorType::Rgb => {
+                let mut rgba =
+                    Vec::with_capacity((info.width as usize) * (info.height as usize) * 4);
+                for chunk in bytes.chunks_exact(3) {
+                    rgba.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 0xff]);
+                }
+                rgba
+            }
+            png::ColorType::Grayscale => {
+                let mut rgba =
+                    Vec::with_capacity((info.width as usize) * (info.height as usize) * 4);
+                for &value in bytes {
+                    rgba.extend_from_slice(&[value, value, value, 0xff]);
+                }
+                rgba
+            }
+            png::ColorType::GrayscaleAlpha => {
+                let mut rgba =
+                    Vec::with_capacity((info.width as usize) * (info.height as usize) * 4);
+                for chunk in bytes.chunks_exact(2) {
+                    rgba.extend_from_slice(&[chunk[0], chunk[0], chunk[0], chunk[1]]);
+                }
+                rgba
+            }
+            _ => return Err(()),
+        };
+
+        Ok((info.width, info.height, rgba))
     }
 
     #[allow(dead_code)]
@@ -2122,6 +2210,68 @@ mod tests {
             t.drain_responses().as_deref(),
             Some(&b"\x1b_Gi=9;OK\x1b\\"[..])
         );
+    }
+
+    #[test]
+    fn kitty_graphics_rgb24_upload_converts_to_rgba() {
+        let mut t = Terminal::new(8, 4);
+        t.process(b"\x1b_Ga=T,i=13,f=24,s=1,v=1,c=1,r=1;/wAA\x1b\\");
+
+        let image = t.kitty_image(13).expect("rgb24 kitty image should exist");
+        assert_eq!(image.width, 1);
+        assert_eq!(image.height, 1);
+        assert_eq!(image.data, vec![0xff, 0x00, 0x00, 0xff]);
+    }
+
+    #[test]
+    fn kitty_graphics_png_upload_decodes_to_rgba() {
+        fn base64_encode(input: &[u8]) -> String {
+            const TABLE: &[u8; 64] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+            for chunk in input.chunks(3) {
+                let b0 = chunk[0];
+                let b1 = *chunk.get(1).unwrap_or(&0);
+                let b2 = *chunk.get(2).unwrap_or(&0);
+                let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
+                out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+                out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+                out.push(if chunk.len() > 1 {
+                    TABLE[((n >> 6) & 0x3f) as usize] as char
+                } else {
+                    '='
+                });
+                out.push(if chunk.len() > 2 {
+                    TABLE[(n & 0x3f) as usize] as char
+                } else {
+                    '='
+                });
+            }
+            out
+        }
+
+        let mut png_bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png_bytes, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("png header should encode");
+            writer
+                .write_image_data(&[0xff, 0x00, 0x00, 0xff])
+                .expect("png image should encode");
+        }
+
+        let payload = base64_encode(&png_bytes);
+        let seq = format!("\x1b_Ga=T,i=14,f=100,c=1,r=1;{payload}\x1b\\");
+        let mut t = Terminal::new(8, 4);
+        t.process(seq.as_bytes());
+
+        let image = t.kitty_image(14).expect("png kitty image should exist");
+        assert_eq!(image.width, 1);
+        assert_eq!(image.height, 1);
+        assert_eq!(image.data, vec![0xff, 0x00, 0x00, 0xff]);
+        assert_eq!(t.kitty_placements.len(), 1);
+        assert_eq!(t.kitty_placements[0].image_id, 14);
     }
 
     #[test]

@@ -179,7 +179,7 @@ That puts the incremental cost in roughly the **1-2 MB/window** range after the 
 | Config format | TOML | INI | TOML | conf | custom |
 | Scrollback (default) | 10,000 | 10,000 | 10,000 | 2,000 | 10,000 |
 
-\* Remaining known Kitty image gaps: handterm supports the core raw-image upload/place/delete path, but not the full Kitty graphics protocol surface such as alternate encodings (for example PNG/compressed payloads) and richer placement/operation parameters.
+\* Remaining known Kitty image gaps: handterm now supports the core raw RGB/RGBA/PNG upload-place-delete path, but not the full Kitty graphics protocol surface such as compressed payload handling and richer placement/operation parameters.
 
 \* Remaining known Kitty keyboard gaps are limited to keys not currently exposed through `winit`, such as `MEDIA_REVERSE`, `ISO_LEVEL5_SHIFT`, and right-side `Meta`/`Hyper` distinction.
 

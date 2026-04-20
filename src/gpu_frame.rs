@@ -1051,7 +1051,7 @@ mod tests {
     fn frame_plan_carries_tui_help_overlay_and_kitty_images() {
         let mut terminal = Terminal::new(6, 3);
         terminal.process(b"\x1b[?1049hstart\r\nready\r\n");
-        terminal.process(b"\x1b_Ga=T,i=5,f=32,s=1,v=1,c=2,r=1;+////wAAAP8=\x1b\\");
+        terminal.process(b"\x1b_Ga=T,i=5,f=32,s=1,v=1,c=2,r=1;/wAA/w==\x1b\\");
         terminal.process(b"\x1b[H/help\r\nhelp text\r\n");
 
         let plan = build_frame_plan(&terminal);

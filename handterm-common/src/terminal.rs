@@ -1,4 +1,6 @@
-use crate::control_strings::{ApcEvent, ControlStringEvent, DcsEvent, OscEvent, SixelEvent};
+use crate::control_strings::{
+    ApcEvent, ControlStringEvent, ControlStringState, DcsEvent, OscEvent, SixelEvent,
+};
 use crate::grid::Grid;
 use crate::parser::{Action, Parser};
 use crate::protocol::{CursorState, DirtyCell, ServerMessage, WindowModes};
@@ -45,11 +47,7 @@ pub struct Terminal {
     pub rows: u16,
     pub cursor_visible: bool,
     pub title: Option<String>,
-    dcs_events: Vec<DcsEvent>,
-    sixel_events: Vec<SixelEvent>,
-    apc_events: Vec<ApcEvent>,
-    osc_events: Vec<OscEvent>,
-    control_string_events: Vec<ControlStringEvent>,
+    control_strings: ControlStringState,
     response_buf: Vec<u8>,
     saved_cursor: Option<(usize, usize)>,
     mode_bracketed_paste: bool,
@@ -226,11 +224,7 @@ impl Terminal {
             rows,
             cursor_visible: true,
             title: None,
-            dcs_events: Vec::new(),
-            sixel_events: Vec::new(),
-            apc_events: Vec::new(),
-            osc_events: Vec::new(),
-            control_string_events: Vec::new(),
+            control_strings: ControlStringState::default(),
             response_buf: Vec::new(),
             saved_cursor: None,
             mode_bracketed_paste: false,
@@ -289,63 +283,43 @@ impl Terminal {
     }
 
     pub fn take_osc(&mut self) -> Option<OscEvent> {
-        if self.osc_events.is_empty() {
-            None
-        } else {
-            Some(self.osc_events.remove(0))
-        }
+        self.control_strings.take_osc()
     }
 
     pub fn drain_osc(&mut self) -> Vec<OscEvent> {
-        std::mem::take(&mut self.osc_events)
+        self.control_strings.drain_osc()
     }
 
     pub fn take_control_string(&mut self) -> Option<ControlStringEvent> {
-        if self.control_string_events.is_empty() {
-            None
-        } else {
-            Some(self.control_string_events.remove(0))
-        }
+        self.control_strings.take_control_string()
     }
 
     pub fn drain_control_strings(&mut self) -> Vec<ControlStringEvent> {
-        std::mem::take(&mut self.control_string_events)
+        self.control_strings.drain_control_strings()
     }
 
     pub fn take_dcs(&mut self) -> Option<DcsEvent> {
-        if self.dcs_events.is_empty() {
-            None
-        } else {
-            Some(self.dcs_events.remove(0))
-        }
+        self.control_strings.take_dcs()
     }
 
     pub fn drain_dcs(&mut self) -> Vec<DcsEvent> {
-        std::mem::take(&mut self.dcs_events)
+        self.control_strings.drain_dcs()
     }
 
     pub fn take_sixel(&mut self) -> Option<SixelEvent> {
-        if self.sixel_events.is_empty() {
-            None
-        } else {
-            Some(self.sixel_events.remove(0))
-        }
+        self.control_strings.take_sixel()
     }
 
     pub fn drain_sixel(&mut self) -> Vec<SixelEvent> {
-        std::mem::take(&mut self.sixel_events)
+        self.control_strings.drain_sixel()
     }
 
     pub fn take_apc(&mut self) -> Option<ApcEvent> {
-        if self.apc_events.is_empty() {
-            None
-        } else {
-            Some(self.apc_events.remove(0))
-        }
+        self.control_strings.take_apc()
     }
 
     pub fn drain_apc(&mut self) -> Vec<ApcEvent> {
-        std::mem::take(&mut self.apc_events)
+        self.control_strings.drain_apc()
     }
 
     pub fn bracketed_paste_mode(&self) -> bool {
@@ -1080,9 +1054,7 @@ impl Terminal {
                 _ => {}
             }
         }
-        self.control_string_events
-            .push(ControlStringEvent::Osc(event.clone()));
-        self.osc_events.push(event);
+        self.control_strings.push_osc(event);
     }
 
     fn save_cursor(&mut self) {
@@ -1100,14 +1072,11 @@ impl Terminal {
             let sixel = SixelEvent {
                 payload: payload.to_vec(),
             };
-            self.sixel_events.push(sixel.clone());
             DcsEvent::Sixel(sixel)
         } else {
             DcsEvent::Generic(data.to_vec())
         };
-        self.control_string_events
-            .push(ControlStringEvent::Dcs(event.clone()));
-        self.dcs_events.push(event);
+        self.control_strings.push_dcs(event);
     }
 
     fn apc_dispatch(&mut self, data: &[u8]) {
@@ -1116,15 +1085,11 @@ impl Terminal {
         }
         if data[0] == b'G' {
             let event = ApcEvent::KittyGraphics(data[1..].to_vec());
-            self.control_string_events
-                .push(ControlStringEvent::Apc(event.clone()));
-            push_bounded(&mut self.apc_events, event);
+            self.control_strings.push_apc(event);
             self.handle_kitty_graphics(&data[1..]);
         } else {
             let event = ApcEvent::Generic(data.to_vec());
-            self.control_string_events
-                .push(ControlStringEvent::Apc(event.clone()));
-            push_bounded(&mut self.apc_events, event);
+            self.control_strings.push_apc(event);
         }
     }
 

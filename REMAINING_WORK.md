@@ -143,6 +143,10 @@ The recent internal GPU profiling now shows this more precisely:
 - interpretation: the add-window path is still primarily blocked by compositor-facing window/surface configure work, while handterm-side GPU surface setup is now a much smaller portion of the total
 - more specifically, the validated add-window JSON samples show `configure` dominating the compositor-facing bucket, while `window_create` and `surface_create` are comparatively small contributors
 - because the current JSON mode already exposes `window_create`, `surface_create`, `configure`, and first-present timing cleanly, more profiling tooling is not the immediate bottleneck; the main remaining question is what can realistically change around compositor-facing behavior
+- relevant protocol/runtime notes line up with that conclusion:
+  - Winit’s Wayland docs note that windows do not appear until you draw/present to them
+  - XDG surface lifecycle requires the compositor `configure` / client `ack_configure` / render-and-commit handshake
+- that means handterm can measure this path well and avoid adding extra work to it, but it may not be able to meaningfully eliminate the dominant configure wait without changing the broader window-lifecycle strategy or accepting different semantics
 
 ### CPU host limitation
 

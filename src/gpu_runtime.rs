@@ -1959,7 +1959,8 @@ mod tests {
         let base_fg = config.style.foreground.as_u32_rgb();
         let mut buffer = vec![base_bg; width * height];
 
-        let viewport_scroll = ViewportScroll::from_scroll_rows(scroll_rows);
+        let effective_scroll_rows = terminal.grid().scroll_offset as f32 + scroll_rows.max(0.0);
+        let viewport_scroll = ViewportScroll::from_scroll_rows(effective_scroll_rows);
 
         let mut cell_infos = Vec::new();
         if viewport_scroll == ViewportScroll::ZERO {
@@ -2035,7 +2036,7 @@ mod tests {
                 height as f32,
                 terminal.grid().scrollback_len(),
                 terminal.grid().rows,
-                scroll_rows,
+                effective_scroll_rows,
             );
         }
 
@@ -2772,6 +2773,36 @@ mod tests {
         assert_eq!(
             gpu, cpu.pixels,
             "GPU framebuffer should match CPU output after a full-screen repaint"
+        );
+    }
+
+    #[test]
+    fn gpu_framebuffer_matches_cpu_for_scrollback_selection_interaction() {
+        let config = AppConfig::default();
+        let mut atlas =
+            GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, 96)
+                .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, 96))
+                .expect("should load font atlas for GPU scrollback selection parity");
+        let mut terminal = Terminal::new_with_scrollback(8, 2, 8);
+        let mut cpu = OffscreenRenderer::new(8, 2, &atlas);
+
+        terminal.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        terminal.grid.scroll_offset = 1;
+        terminal.grid.selection = Some(crate::grid::Selection {
+            start_col: 0,
+            start_row: 0,
+            end_col: 2,
+            end_row: 1,
+        });
+        terminal.cursor_visible = false;
+
+        cpu.reset();
+        cpu.render(&mut terminal, &mut atlas, &config);
+        let gpu = render_like_gpu(&mut terminal, &mut atlas, &config);
+
+        assert_eq!(
+            gpu, cpu.pixels,
+            "GPU framebuffer should match CPU output for scrollback + selection interaction"
         );
     }
 

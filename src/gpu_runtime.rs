@@ -2650,6 +2650,55 @@ mod tests {
     }
 
     #[test]
+    fn gpu_framebuffer_matches_cpu_for_incremental_typing() {
+        let config = AppConfig::default();
+        let mut atlas =
+            GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, 96)
+                .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, 96))
+                .expect("should load font atlas for GPU incremental typing parity");
+        let mut terminal = Terminal::new(32, 2);
+        let mut cpu = OffscreenRenderer::new(32, 2, &atlas);
+
+        terminal.process(b"\x1b[38;5;10m>\x1b[0m ");
+        cpu.render(&mut terminal, &mut atlas, &config);
+
+        for &byte in b"echo hello world" {
+            terminal.process(&[byte]);
+            cpu.reset();
+            cpu.render(&mut terminal, &mut atlas, &config);
+            let gpu = render_like_gpu(&mut terminal, &mut atlas, &config);
+            assert_eq!(
+                gpu, cpu.pixels,
+                "GPU framebuffer should match CPU output after typing byte {byte:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_framebuffer_matches_cpu_for_line_repaint() {
+        let config = AppConfig::default();
+        let mut atlas =
+            GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, 96)
+                .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, 96))
+                .expect("should load font atlas for GPU line repaint parity");
+        let mut terminal = Terminal::new(32, 2);
+        let mut cpu = OffscreenRenderer::new(32, 2, &atlas);
+
+        terminal.process(b"\x1b[38;5;10m>\x1b[0m build");
+        cpu.render(&mut terminal, &mut atlas, &config);
+
+        terminal.process(b"\r\x1b[2K\x1b[38;5;196merror:\x1b[0m failed");
+        cpu.reset();
+        cpu.render(&mut terminal, &mut atlas, &config);
+        let gpu = render_like_gpu(&mut terminal, &mut atlas, &config);
+
+        assert_eq!(
+            gpu, cpu.pixels,
+            "GPU framebuffer should match CPU output after a line repaint"
+        );
+    }
+
+    #[test]
     fn gpu_fractional_scroll_framebuffer_shifts_rows_by_partial_cell_height() {
         let config = AppConfig::default();
         let mut atlas =

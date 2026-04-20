@@ -141,6 +141,8 @@ The recent internal GPU profiling now shows this more precisely:
   - add-window `compositor_facing`: `12.21-25.78ms`, median `16.31ms`
   - add-window `handterm_surface_setup`: `0.96-1.43ms`, median `1.00ms`
 - interpretation: the add-window path is still primarily blocked by compositor-facing window/surface configure work, while handterm-side GPU surface setup is now a much smaller portion of the total
+- more specifically, the validated add-window JSON samples show `configure` dominating the compositor-facing bucket, while `window_create` and `surface_create` are comparatively small contributors
+- because the current JSON mode already exposes `window_create`, `surface_create`, `configure`, and first-present timing cleanly, more profiling tooling is not the immediate bottleneck; the main remaining question is what can realistically change around compositor-facing behavior
 
 ### CPU host limitation
 

@@ -212,6 +212,8 @@ Daemon mode still works, but it is no longer the most promising local low-RAM pa
   - experimental mode
   - or long-term maintained alongside the host path
 
+Current recommendation: treat daemon mode as a **secondary/reference architecture** rather than the primary local path. It remains useful for comparison, compatibility, and thinner client/server experiments, but the shared-GPU host is the stronger default local architecture.
+
 ### 4. Continue codebase structure cleanup
 
 The current split is good, but not final.
@@ -221,6 +223,8 @@ The current split is good, but not final.
 - continue moving package-specific logic out of the root crate
 - further reduce cross-linking between client/server/standalone code
 - keep the shared core clean and minimal
+
+Highest-value next cleanup slice: move daemon/client/server-specific runtime and entrypoint logic out of the root crate and into the already-created workspace packages, because those split packages currently remain thin wrappers while the root crate still owns most of the real implementation.
 
 ### 5. Keep docs aligned with measured reality
 

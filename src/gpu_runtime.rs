@@ -2738,6 +2738,44 @@ mod tests {
     }
 
     #[test]
+    fn gpu_framebuffer_matches_cpu_for_full_screen_repaint() {
+        let config = AppConfig::default();
+        let mut atlas =
+            GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, 96)
+                .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, 96))
+                .expect("should load font atlas for GPU full-screen repaint parity");
+        let mut terminal = Terminal::new(32, 6);
+        let mut cpu = OffscreenRenderer::new(32, 6, &atlas);
+
+        terminal.process(
+            b"\x1b[?1049h\
+              one\r\n\
+              two\r\n\
+              three\r\n\
+              four\r\n\
+              five\r\n",
+        );
+        cpu.render(&mut terminal, &mut atlas, &config);
+
+        terminal.process(
+            b"\x1b[2J\x1b[H\
+              \x1b[38;5;39mstatus\x1b[0m\r\n\
+              alpha beta gamma\r\n\
+              delta epsilon\r\n\
+              zeta eta theta\r\n\
+              iota kappa\r\n",
+        );
+        cpu.reset();
+        cpu.render(&mut terminal, &mut atlas, &config);
+        let gpu = render_like_gpu(&mut terminal, &mut atlas, &config);
+
+        assert_eq!(
+            gpu, cpu.pixels,
+            "GPU framebuffer should match CPU output after a full-screen repaint"
+        );
+    }
+
+    #[test]
     fn gpu_fractional_scroll_framebuffer_shifts_rows_by_partial_cell_height() {
         let config = AppConfig::default();
         let mut atlas =

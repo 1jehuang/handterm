@@ -248,6 +248,8 @@ Concrete dependencies to plan for in that deeper `src/daemon.rs` + `src/server.r
 - font/protocol rendering support still owned by the root crate (`crate::font::{GlyphAtlas, GlyphFormat}`)
 - protocol/common terminal types, which are already much closer to the shared-core boundary
 
+After the new `src/daemon_stack/` boundary, the next smallest real coupling reduction is probably inside `daemon_stack::core`: stop depending on root-config defaults and root grid constants directly, and push those defaults in from a narrower boundary. `font` and `pty` remain larger follow-up moves.
+
 ### 5. Keep docs aligned with measured reality
 
 README and OPTIMIZATION have been updated substantially, but any future changes should continue to reflect measured results, not intended architecture.

@@ -258,6 +258,8 @@ The remaining Kitty image `partial*` gaps are no longer the preferred next proto
 
 If work shifts away from daemon/package cleanup and away from Kitty protocol follow-through, the next notable non-Kitty feature gap to evaluate is Sixel support, since it remains one of the clearest missing graphics/protocol capabilities in the feature table.
 
+After a quick feasibility audit, Sixel does not currently look like the right next slice. Unlike the recent Kitty graphics work, Sixel would require a broader parser/terminal/image-model expansion because the current parser does not expose a real DCS payload dispatch path and DCS strings are currently silently consumed.
+
 ## Current Known Risks / Notes
 
 ### Niri interaction warning

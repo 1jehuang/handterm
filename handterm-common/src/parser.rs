@@ -483,6 +483,18 @@ mod tests {
     }
 
     #[test]
+    fn osc_dispatches_payload_on_st() {
+        let mut p = Parser::new();
+        assert_eq!(p.advance(0x1b), Action::Nop);
+        assert_eq!(p.advance(b']'), Action::Nop);
+        assert_eq!(p.advance(b'0'), Action::Nop);
+        assert_eq!(p.advance(b';'), Action::Nop);
+        assert_eq!(p.advance(b'x'), Action::Nop);
+        assert_eq!(p.advance(0x1b), Action::Nop);
+        assert_eq!(p.advance(b'\\'), Action::OscDispatch(b"0;x".to_vec()));
+    }
+
+    #[test]
     fn dcs_dispatches_payload() {
         let mut p = Parser::new();
         assert_eq!(p.advance(0x1b), Action::Nop);

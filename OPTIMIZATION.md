@@ -93,7 +93,7 @@ With a shared-GPU host model, each additional window can plausibly approach **~1
 
 1. Reach rendering parity with CPU for shell prompts, typing, resize, selection, and TUI repaint behavior.
 2. Add stronger automated GPU parity tests against CPU/offscreen reference output and shared visual expectations.
-   Status: partially done. Transcript-driven shared-visual tests now exist for the GPU batch builder, and end-to-end GPU framebuffer parity now covers several transcript/probe cases plus visible interaction cases like selection highlight, incremental typing, and line repaint, but broader interaction/live parity still remains. In particular, resize-driven framebuffer parity is still an open gap and should be treated as a real investigation target before claiming broader interaction parity.
+   Status: partially done. Transcript-driven shared-visual tests now exist for the GPU batch builder, and end-to-end GPU framebuffer parity now covers several transcript/probe cases plus visible interaction cases like selection highlight, incremental typing, line repaint, and resize-driven layout changes, but broader interaction/live parity still remains.
 3. Verify glyph atlas upload and rendering across normal text, wide glyphs, and fallback/emoji paths.
 4. Benchmark RSS, startup time, redraw throughput, and frame pacing on CPU vs GPU.
 5. Keep validating the GPU default path against live shell/TUI workloads and continue tightening parity until CPU is no longer the fallback/debug backend.

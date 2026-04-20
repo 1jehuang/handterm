@@ -2027,6 +2027,17 @@ mod tests {
                 Some(entry)
             },
         );
+        if config.scrollback.scrollbar {
+            append_scrollbar_overlay_instances(
+                &mut batches.overlay_instances,
+                base_fg,
+                width as f32,
+                height as f32,
+                terminal.grid().scrollback_len(),
+                terminal.grid().rows,
+                scroll_rows,
+            );
+        }
 
         let mut image_textures = std::collections::HashMap::new();
         let mut image_instances = Vec::new();
@@ -2695,6 +2706,34 @@ mod tests {
         assert_eq!(
             gpu, cpu.pixels,
             "GPU framebuffer should match CPU output after a line repaint"
+        );
+    }
+
+    #[test]
+    fn gpu_framebuffer_matches_cpu_for_resize_driven_layout_change() {
+        let config = AppConfig::default();
+        let mut atlas =
+            GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, 96)
+                .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, 96))
+                .expect("should load font atlas for GPU resize parity");
+        let mut terminal = Terminal::new(8, 2);
+        let mut cpu = OffscreenRenderer::new(8, 2, &atlas);
+
+        terminal.process(b"alpha\r\nbeta gamma");
+        terminal.resize(5, 3);
+        terminal.process(b"\x1b[2J\x1b[H123\r\n45");
+        terminal.cursor_visible = false;
+
+        cpu.resize_pixels(
+            terminal.cols as usize * atlas.cell_width,
+            terminal.rows as usize * atlas.cell_height,
+        );
+        cpu.render(&mut terminal, &mut atlas, &config);
+        let gpu = render_like_gpu(&mut terminal, &mut atlas, &config);
+
+        assert_eq!(
+            gpu, cpu.pixels,
+            "GPU framebuffer should match CPU output after a resize-driven layout change"
         );
     }
 

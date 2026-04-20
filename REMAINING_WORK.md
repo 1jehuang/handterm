@@ -164,6 +164,7 @@ That should **not** be repeated in the same way.
 - replace compositor-heavy benchmarking with safer host-internal instrumentation
 - measure repeated `open-window` calls without opening excessive live windows unnecessarily
 - prefer the new `scripts/profile_host_json_series.sh` workflow for small machine-parsed host sample series, because it uses `HANDTERM_PROFILE_JSON=1` plus an isolated host socket instead of compositor-heavy scraping
+- when medians across separate host launches matter, prefer the same script's repeat support instead of stuffing more live windows into one compositor session
 - a later broader safe JSON-series run with 3 added windows still showed the same answer: add-window time remained dominated by the compositor-facing bucket, especially `configure`, so the overall bottleneck interpretation did not materially change
 - collect:
   - total open-window time
@@ -262,6 +263,8 @@ README and OPTIMIZATION have been updated substantially, but any future changes 
 For now, `HANDTERM_PROFILE_JSON=1` should stay as an **internal opt-in diagnostics aid** rather than a prominently documented README feature. It is useful for safe machine-parsed profiling, but it is not a primary product surface.
 
 Likewise, `HANDTERM_HOST_SOCKET` should stay as an **internal diagnostics/testing hook** for isolated host-control workflows such as profiling scripts. It is useful for tests and local instrumentation, but it should not be treated as a primary user-facing product feature unless there is a stronger advanced-workflow use case later.
+
+The new CPU-host structured profiling events are useful for the same internal tooling path, but they do not need a separate CPU-specific public docs note right now. The current internal profiling notes are enough unless CPU-host startup becomes a much higher-priority investigation track later.
 
 The remaining Kitty image `partial*` gaps are no longer the preferred next protocol slice. Handterm now covers the core inline raw/compressed RGB/RGBA/PNG upload-place-delete path, and the remaining gaps are lower-leverage features such as non-inline transports and richer placement/operation parameters.
 

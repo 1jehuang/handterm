@@ -147,6 +147,18 @@ pub fn resolve_config_path(config_override: Option<&Path>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::Builder;
+
+    fn repo_local_tempdir() -> tempfile::TempDir {
+        let base = std::env::current_dir()
+            .expect("current dir should resolve")
+            .join(".jcode-tmp");
+        fs::create_dir_all(&base).expect("repo-local temp root should be creatable");
+        Builder::new()
+            .prefix("config-test-")
+            .tempdir_in(base)
+            .expect("repo-local temp dir should be created")
+    }
 
     #[test]
     fn defaults_match_current_kitty_style() {
@@ -226,7 +238,7 @@ mod tests {
 
     #[test]
     fn writes_default_config() {
-        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let temp = repo_local_tempdir();
         let path = temp.path().join("config.toml");
         let written =
             AppConfig::save_default_if_missing(Some(&path)).expect("default config should write");

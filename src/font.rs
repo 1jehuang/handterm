@@ -251,18 +251,15 @@ impl GlyphAtlas {
             let span_cells = codepoint_span_cells(ch);
             self.ensure_fallback_faces_loaded();
             for (index, face) in self.fallback_faces.iter().enumerate() {
-                if let Some(glyph) = face
-                    .as_ref()
-                    .and_then(|face| {
-                        rasterize_fallback_glyph(
-                            face,
-                            ch,
-                            self.cell_width,
-                            self.cell_height,
-                            span_cells,
-                        )
-                    })
-                {
+                if let Some(glyph) = face.as_ref().and_then(|face| {
+                    rasterize_fallback_glyph(
+                        face,
+                        ch,
+                        self.cell_width,
+                        self.cell_height,
+                        span_cells,
+                    )
+                }) {
                     self.glyphs.insert(ch, glyph);
                     #[cfg(feature = "local-fonts")]
                     self.glyph_sources.insert(ch, GlyphSource::Fallback(index));
@@ -764,13 +761,7 @@ impl GlyphAtlas {
             .get(index)
             .and_then(|face| face.as_ref())
             .and_then(|face| {
-                rasterize_fallback_glyph(
-                    face,
-                    ch,
-                    self.cell_width,
-                    self.cell_height,
-                    span_cells,
-                )
+                rasterize_fallback_glyph(face, ch, self.cell_width, self.cell_height, span_cells)
             })
             .map(|glyph| (index, glyph))
     }
@@ -1051,8 +1042,20 @@ fn normalize_fixed_size_glyph(
 
 fn resize_glyph_pixels(glyph: &RasterizedGlyph, new_width: usize, new_height: usize) -> Vec<u8> {
     match glyph.format {
-        GlyphFormat::Alpha => resize_alpha_pixels(&glyph.pixels, glyph.width, glyph.height, new_width, new_height),
-        GlyphFormat::Rgba => resize_rgba_pixels(&glyph.pixels, glyph.width, glyph.height, new_width, new_height),
+        GlyphFormat::Alpha => resize_alpha_pixels(
+            &glyph.pixels,
+            glyph.width,
+            glyph.height,
+            new_width,
+            new_height,
+        ),
+        GlyphFormat::Rgba => resize_rgba_pixels(
+            &glyph.pixels,
+            glyph.width,
+            glyph.height,
+            new_width,
+            new_height,
+        ),
     }
 }
 
@@ -1675,9 +1678,13 @@ fn load_cached_font_metrics(
     load_cached_font_metrics_from(&cache, family, font_size_pt, dpi)
 }
 
-fn save_cached_font_path_to(cache: &std::path::Path, family: &str, path: &str) {
+fn save_cached_font_path_to(
+    cache: &std::path::Path,
+    family: &str,
+    path: &str,
+) -> std::io::Result<()> {
     if let Some(parent) = cache.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
     let mut lines = std::fs::read_to_string(cache)
         .unwrap_or_default()
@@ -1688,14 +1695,14 @@ fn save_cached_font_path_to(cache: &std::path::Path, family: &str, path: &str) {
     lines.push(format!("{family}={path}"));
     let mut content = lines.join("\n");
     content.push('\n');
-    let _ = std::fs::write(cache, content);
+    std::fs::write(cache, content)
 }
 
 fn save_cached_font_path(family: &str, path: &str) {
     let Some(cache) = font_cache_path() else {
         return;
     };
-    save_cached_font_path_to(&cache, family, path);
+    let _ = save_cached_font_path_to(&cache, family, path);
 }
 
 fn save_cached_font_metrics_to(
@@ -1704,9 +1711,9 @@ fn save_cached_font_metrics_to(
     font_size_pt: f64,
     dpi: u32,
     metrics: &FontBootstrapMetrics,
-) {
+) -> std::io::Result<()> {
     if let Some(parent) = cache.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
 
     let size_key = format!("{font_size_pt:.2}");
@@ -1733,7 +1740,7 @@ fn save_cached_font_metrics_to(
     lines.push(entry.trim_end().to_string());
     let mut content = lines.join("\n");
     content.push('\n');
-    let _ = std::fs::write(cache, content);
+    std::fs::write(cache, content)
 }
 
 fn save_cached_font_metrics(
@@ -1745,13 +1752,24 @@ fn save_cached_font_metrics(
     let Some(cache) = font_metrics_cache_path() else {
         return;
     };
-    save_cached_font_metrics_to(&cache, family, font_size_pt, dpi, metrics);
+    let _ = save_cached_font_metrics_to(&cache, family, font_size_pt, dpi, metrics);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use tempfile::Builder;
+
+    fn repo_local_tempdir() -> tempfile::TempDir {
+        let base = std::env::current_dir()
+            .expect("current dir should resolve")
+            .join(".jcode-tmp");
+        std::fs::create_dir_all(&base).expect("repo-local temp root should be creatable");
+        Builder::new()
+            .prefix("font-test-")
+            .tempdir_in(base)
+            .expect("repo-local temp dir should be created")
+    }
 
     fn sample_metrics(
         font_path: &str,
@@ -1779,12 +1797,15 @@ mod tests {
 
     #[test]
     fn font_path_cache_roundtrips_and_replaces_existing_entries() {
-        let temp = tempdir().expect("temp dir should be created");
+        let temp = repo_local_tempdir();
         let cache = font_cache_path_in(temp.path());
 
-        save_cached_font_path_to(&cache, "JetBrains Mono", "/fonts/old.ttf");
-        save_cached_font_path_to(&cache, "Fira Code", "/fonts/fira.ttf");
-        save_cached_font_path_to(&cache, "JetBrains Mono", "/fonts/new.ttf");
+        save_cached_font_path_to(&cache, "JetBrains Mono", "/fonts/old.ttf")
+            .expect("first cache entry should write");
+        save_cached_font_path_to(&cache, "Fira Code", "/fonts/fira.ttf")
+            .expect("second cache entry should write");
+        save_cached_font_path_to(&cache, "JetBrains Mono", "/fonts/new.ttf")
+            .expect("replacement cache entry should write");
 
         assert_eq!(
             load_cached_font_path_from(&cache, "JetBrains Mono"),
@@ -1799,7 +1820,7 @@ mod tests {
 
     #[test]
     fn font_metrics_cache_roundtrips_and_replaces_existing_entries() {
-        let temp = tempdir().expect("temp dir should be created");
+        let temp = repo_local_tempdir();
         let cache = font_metrics_cache_path_in(temp.path());
 
         save_cached_font_metrics_to(
@@ -1808,21 +1829,24 @@ mod tests {
             11.0,
             96,
             &sample_metrics("/fonts/old.ttf", 8, 16, 12),
-        );
+        )
+        .expect("first metrics cache entry should write");
         save_cached_font_metrics_to(
             &cache,
             "JetBrains Mono",
             11.0,
             96,
             &sample_metrics("/fonts/new.ttf", 9, 17, 13),
-        );
+        )
+        .expect("replacement metrics cache entry should write");
         save_cached_font_metrics_to(
             &cache,
             "JetBrains Mono",
             11.0,
             144,
             &sample_metrics("/fonts/hidpi.ttf", 13, 26, 20),
-        );
+        )
+        .expect("hidpi metrics cache entry should write");
 
         assert_eq!(
             load_cached_font_metrics_from(&cache, "JetBrains Mono", 11.0, 96)
@@ -1839,7 +1863,7 @@ mod tests {
 
     #[test]
     fn malformed_font_metrics_cache_entries_are_ignored() {
-        let temp = tempdir().expect("temp dir should be created");
+        let temp = repo_local_tempdir();
         let cache = font_metrics_cache_path_in(temp.path());
         std::fs::write(
             &cache,
@@ -1997,10 +2021,16 @@ mod tests {
             return;
         }
 
-        assert!(atlas.ensure_glyph(braille), "braille should resolve via fallback");
+        assert!(
+            atlas.ensure_glyph(braille),
+            "braille should resolve via fallback"
+        );
         assert!(atlas.ensure_glyph(question), "question mark should resolve");
         assert!(
-            matches!(atlas.glyph_sources.get(&braille), Some(GlyphSource::Fallback(_))),
+            matches!(
+                atlas.glyph_sources.get(&braille),
+                Some(GlyphSource::Fallback(_))
+            ),
             "braille should come from a fallback font"
         );
 
@@ -2069,7 +2099,10 @@ mod tests {
                 ch
             );
             assert!(
-                matches!(atlas.glyph_sources.get(&codepoint), Some(GlyphSource::Fallback(_))),
+                matches!(
+                    atlas.glyph_sources.get(&codepoint),
+                    Some(GlyphSource::Fallback(_))
+                ),
                 "fallback sample {:?} should be sourced from a fallback face",
                 ch
             );
@@ -2225,11 +2258,22 @@ mod tests {
                 let glyph = atlas
                     .get_glyph(ch as u32)
                     .expect("resolved emoji glyph should be cached");
-                assert!(glyph.width > 0, "emoji {:?} should have width at dpi {}", ch, dpi);
-                assert!(glyph.height > 0, "emoji {:?} should have height at dpi {}", ch, dpi);
+                assert!(
+                    glyph.width > 0,
+                    "emoji {:?} should have width at dpi {}",
+                    ch,
+                    dpi
+                );
+                assert!(
+                    glyph.height > 0,
+                    "emoji {:?} should have height at dpi {}",
+                    ch,
+                    dpi
+                );
             }
 
-            for grapheme in ["🐦‍⬛", "❤️", "👍🏻", "1️⃣", "🇺🇸", "👨‍💻"] {
+            for grapheme in ["🐦‍⬛", "❤️", "👍🏻", "1️⃣", "🇺🇸", "👨‍💻"]
+            {
                 assert!(
                     atlas.ensure_grapheme(grapheme),
                     "grapheme {:?} should resolve at dpi {}",
@@ -2266,7 +2310,11 @@ mod tests {
                 .expect("should load configured font atlas");
 
             for ch in ['😀', '🪸', '🫎'] {
-                assert!(atlas.ensure_glyph(ch as u32), "emoji {:?} should resolve", ch);
+                assert!(
+                    atlas.ensure_glyph(ch as u32),
+                    "emoji {:?} should resolve",
+                    ch
+                );
                 let glyph = atlas
                     .get_glyph(ch as u32)
                     .expect("resolved emoji glyph should be cached");
@@ -2294,7 +2342,8 @@ mod tests {
                 );
             }
 
-            for grapheme in ["🐦‍⬛", "❤️", "👍🏻", "1️⃣", "🇺🇸", "👨‍💻"] {
+            for grapheme in ["🐦‍⬛", "❤️", "👍🏻", "1️⃣", "🇺🇸", "👨‍💻"]
+            {
                 assert!(
                     atlas.ensure_grapheme(grapheme),
                     "emoji grapheme {:?} should resolve",
@@ -2335,7 +2384,9 @@ mod tests {
         let paths = find_emoji_font_paths().expect("emoji font discovery should work");
         let path = paths.first().expect("an emoji fallback font should exist");
         let lib = freetype::Library::init().expect("freetype should init");
-        let face = lib.new_face(path, 0).expect("emoji fallback face should load");
+        let face = lib
+            .new_face(path, 0)
+            .expect("emoji fallback face should load");
 
         let emoji_codepoints: Vec<u32> = face
             .chars()
@@ -2379,24 +2430,153 @@ mod tests {
     #[cfg(feature = "local-fonts")]
     fn configured_font_resolves_large_multi_codepoint_emoji_sequence_set() {
         const GRAPHEMES: &[&str] = &[
-            "❤️", "🩷", "🧡", "💛", "💚", "💙", "🩵", "💜", "🖤", "🤍", "🤎",
-            "😀", "😃", "😄", "😁", "😆", "🥹", "😂", "🤣", "😊", "😍", "😘",
-            "👍🏻", "👍🏽", "👍🏿", "👎🏻", "👏🏽", "🙏🏿", "👋🏻", "🤝", "🫶",
-            "👨‍💻", "👩‍💻", "🧑‍💻", "👨‍🔬", "👩‍🔬", "🧑‍🚀", "👨‍🚀", "👩‍🚀",
-            "🐦‍⬛", "🧑‍🎨", "👨‍🎨", "👩‍🎨", "🧑‍🍳", "👨‍🍳", "👩‍🍳",
-            "🇺🇸", "🇨🇦", "🇯🇵", "🇺🇦", "🇫🇷", "🇩🇪", "🇰🇷", "🇧🇷", "🇮🇳", "🇲🇽",
-            "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "0️⃣",
-            "©️", "®️", "™️", "#️⃣", "*️⃣", "↔️", "↕️", "⬅️", "➡️", "⬆️", "⬇️",
-            "🪸", "🫎", "🪿", "🫠", "🫡", "🩶", "🩷", "🩵", "🪼", "🪽", "🪻",
-            "👨‍👩‍👧‍👦", "👩‍❤️‍👩", "👨‍❤️‍👨", "👩‍❤️‍💋‍👨", "👨‍❤️‍💋‍👨",
-            "🧔🏽‍♂️", "🧔🏽‍♀️", "🧑🏽‍🦽", "🧑🏽‍🦼", "🧑🏽‍🦯",
-            "👮🏻‍♂️", "👮🏽‍♀️", "🧑🏻‍⚕️", "🧑🏽‍🏫", "🧑🏿‍🌾", "🧑🏻‍🔧", "🧑🏾‍🏭",
-            "🧑🏽‍🎤", "🧑🏿‍🚒", "🧑🏻‍✈️", "🧑🏽‍⚖️", "🧑🏾‍🤝‍🧑🏻", "👩🏽‍🍼", "👨🏻‍🍼",
-            "🧑🏽‍🎄", "🧑🏻‍🎓", "🧑🏾‍💼", "🧑🏿‍🔬", "🧑🏻‍🚀", "🧑🏽‍🚀", "🧑🏿‍💻",
-            "🏳️‍🌈", "🏳️‍⚧️", "👁️‍🗨️", "🗣️", "🫱🏽‍🫲🏻", "🫱🏿‍🫲🏽", "🧑‍❤️‍💋‍🧑",
-            "👨🏽‍❤️‍👨🏻", "👩🏿‍❤️‍👩🏻", "👨🏻‍👨🏽‍👧", "👩🏻‍👩🏽‍👦", "👨🏻‍👩🏽‍👧‍👦",
-            "🧑🏻‍🎨", "🧑🏽‍🍳", "🧑🏿‍🔧", "🧑🏻‍🌾", "🧑🏽‍🚒", "🧑🏿‍✈️", "🧑🏻‍⚖️",
-            "😮‍💨", "😵‍💫", "❤️‍🔥", "❤️‍🩹", "🏴‍☠️", "🐕‍🦺", "🦮", "🧎🏽‍➡️", "🚶🏽‍➡️",
+            "❤️",
+            "🩷",
+            "🧡",
+            "💛",
+            "💚",
+            "💙",
+            "🩵",
+            "💜",
+            "🖤",
+            "🤍",
+            "🤎",
+            "😀",
+            "😃",
+            "😄",
+            "😁",
+            "😆",
+            "🥹",
+            "😂",
+            "🤣",
+            "😊",
+            "😍",
+            "😘",
+            "👍🏻",
+            "👍🏽",
+            "👍🏿",
+            "👎🏻",
+            "👏🏽",
+            "🙏🏿",
+            "👋🏻",
+            "🤝",
+            "🫶",
+            "👨‍💻",
+            "👩‍💻",
+            "🧑‍💻",
+            "👨‍🔬",
+            "👩‍🔬",
+            "🧑‍🚀",
+            "👨‍🚀",
+            "👩‍🚀",
+            "🐦‍⬛",
+            "🧑‍🎨",
+            "👨‍🎨",
+            "👩‍🎨",
+            "🧑‍🍳",
+            "👨‍🍳",
+            "👩‍🍳",
+            "🇺🇸",
+            "🇨🇦",
+            "🇯🇵",
+            "🇺🇦",
+            "🇫🇷",
+            "🇩🇪",
+            "🇰🇷",
+            "🇧🇷",
+            "🇮🇳",
+            "🇲🇽",
+            "1️⃣",
+            "2️⃣",
+            "3️⃣",
+            "4️⃣",
+            "5️⃣",
+            "6️⃣",
+            "7️⃣",
+            "8️⃣",
+            "9️⃣",
+            "0️⃣",
+            "©️",
+            "®️",
+            "™️",
+            "#️⃣",
+            "*️⃣",
+            "↔️",
+            "↕️",
+            "⬅️",
+            "➡️",
+            "⬆️",
+            "⬇️",
+            "🪸",
+            "🫎",
+            "🪿",
+            "🫠",
+            "🫡",
+            "🩶",
+            "🩷",
+            "🩵",
+            "🪼",
+            "🪽",
+            "🪻",
+            "👨‍👩‍👧‍👦",
+            "👩‍❤️‍👩",
+            "👨‍❤️‍👨",
+            "👩‍❤️‍💋‍👨",
+            "👨‍❤️‍💋‍👨",
+            "🧔🏽‍♂️",
+            "🧔🏽‍♀️",
+            "🧑🏽‍🦽",
+            "🧑🏽‍🦼",
+            "🧑🏽‍🦯",
+            "👮🏻‍♂️",
+            "👮🏽‍♀️",
+            "🧑🏻‍⚕️",
+            "🧑🏽‍🏫",
+            "🧑🏿‍🌾",
+            "🧑🏻‍🔧",
+            "🧑🏾‍🏭",
+            "🧑🏽‍🎤",
+            "🧑🏿‍🚒",
+            "🧑🏻‍✈️",
+            "🧑🏽‍⚖️",
+            "🧑🏾‍🤝‍🧑🏻",
+            "👩🏽‍🍼",
+            "👨🏻‍🍼",
+            "🧑🏽‍🎄",
+            "🧑🏻‍🎓",
+            "🧑🏾‍💼",
+            "🧑🏿‍🔬",
+            "🧑🏻‍🚀",
+            "🧑🏽‍🚀",
+            "🧑🏿‍💻",
+            "🏳️‍🌈",
+            "🏳️‍⚧️",
+            "👁️‍🗨️",
+            "🗣️",
+            "🫱🏽‍🫲🏻",
+            "🫱🏿‍🫲🏽",
+            "🧑‍❤️‍💋‍🧑",
+            "👨🏽‍❤️‍👨🏻",
+            "👩🏿‍❤️‍👩🏻",
+            "👨🏻‍👨🏽‍👧",
+            "👩🏻‍👩🏽‍👦",
+            "👨🏻‍👩🏽‍👧‍👦",
+            "🧑🏻‍🎨",
+            "🧑🏽‍🍳",
+            "🧑🏿‍🔧",
+            "🧑🏻‍🌾",
+            "🧑🏽‍🚒",
+            "🧑🏿‍✈️",
+            "🧑🏻‍⚖️",
+            "😮‍💨",
+            "😵‍💫",
+            "❤️‍🔥",
+            "❤️‍🩹",
+            "🏴‍☠️",
+            "🐕‍🦺",
+            "🦮",
+            "🧎🏽‍➡️",
+            "🚶🏽‍➡️",
         ];
 
         assert!(GRAPHEMES.len() >= 100);

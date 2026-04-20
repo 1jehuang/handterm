@@ -150,6 +150,10 @@ fn synthetic_key_event_from_request(req: &Request) -> Result<SyntheticKeyEvent, 
     Ok(SyntheticKeyEvent {
         kind,
         key: key.to_string(),
+        physical_key: args
+            .get("physical_key")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string),
         text: args
             .get("text")
             .and_then(|v| v.as_str())
@@ -213,8 +217,8 @@ mod tests {
             serde_json::json!({
                 "window_id": 7,
                 "kind": "repeat",
-                "key": "A",
-                "text": "a",
+                "key": "menu",
+                "physical_key": "context_menu",
                 "ctrl": true,
             }),
         ))
@@ -225,8 +229,9 @@ mod tests {
             HostControlRequest::SyntheticKeyEvent { window, event } => {
                 assert_eq!(window, Some(7));
                 assert_eq!(event.kind, KeyEventKind::Repeat);
-                assert_eq!(event.key, "A");
-                assert_eq!(event.text.as_deref(), Some("a"));
+                assert_eq!(event.key, "menu");
+                assert_eq!(event.physical_key.as_deref(), Some("context_menu"));
+                assert_eq!(event.text.as_deref(), None);
                 assert!(event.ctrl);
                 assert!(!event.alt);
             }

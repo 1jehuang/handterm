@@ -80,6 +80,7 @@ pub enum IpcAction {
 pub struct SyntheticKeyEvent {
     pub kind: crate::frontend::KeyEventKind,
     pub key: String,
+    pub physical_key: Option<String>,
     pub text: Option<String>,
     pub ctrl: bool,
     pub alt: bool,

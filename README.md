@@ -278,6 +278,20 @@ handterm bench
 - Host window creation via `handterm open-window`
 - Core commands: get-text, send-text, send-key, send-key-event, send-ime-commit, get-cursor, get-size, set-title, close, ls
 - Host-specific commands: open-window, focus-window, list-windows
+- Synthetic `send-key-event` accepts an optional `physical_key` field for keypad keys, MENU/context-menu, and side-specific modifier variants that `winit` exposes
+
+Examples:
+
+```bash
+# Context menu / MENU key via host control
+handterm @ send-key-event '{"key":"menu","physical_key":"context_menu"}'
+
+# Keypad center (KP_BEGIN / numpad 5 in navigation mode)
+handterm @ send-key-event '{"key":"clear","physical_key":"numpad5"}'
+
+# Right shift press
+handterm @ send-key-event '{"key":"shift","physical_key":"shift_right","kind":"press","shift":true}'
+```
 
 ## Install
 

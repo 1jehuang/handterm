@@ -6,7 +6,7 @@ pub use crate::input::{
 use crate::terminal::{CursorStyle, TerminalView};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
 const IME_KEY_DEDUPE_WINDOW: Duration = Duration::from_millis(50);
 const SCROLLBACK_WHEEL_STEP_MULTIPLIER: usize = 2;
@@ -36,6 +36,8 @@ pub fn parse_synthetic_key(spec: &str) -> Key {
         "home" => Key::Named(NamedKey::Home),
         "end" => Key::Named(NamedKey::End),
         "delete" => Key::Named(NamedKey::Delete),
+        "clear" => Key::Named(NamedKey::Clear),
+        "menu" | "context_menu" | "contextmenu" => Key::Named(NamedKey::ContextMenu),
         "page_up" | "pageup" => Key::Named(NamedKey::PageUp),
         "page_down" | "pagedown" => Key::Named(NamedKey::PageDown),
         "alt" => Key::Named(NamedKey::Alt),
@@ -46,6 +48,44 @@ pub fn parse_synthetic_key(spec: &str) -> Key {
         "num_lock" | "numlock" => Key::Named(NamedKey::NumLock),
         _ => Key::Character(spec.into()),
     }
+}
+
+pub fn parse_synthetic_physical_key(spec: Option<&str>) -> Option<PhysicalKey> {
+    let spec = spec?;
+    let lower = spec.to_ascii_lowercase();
+    let code = match lower.as_str() {
+        "context_menu" | "contextmenu" | "menu" => KeyCode::ContextMenu,
+        "shift_left" | "shiftleft" => KeyCode::ShiftLeft,
+        "shift_right" | "shiftright" => KeyCode::ShiftRight,
+        "control_left" | "controlleft" | "ctrl_left" | "ctrlleft" => KeyCode::ControlLeft,
+        "control_right" | "controlright" | "ctrl_right" | "ctrlright" => KeyCode::ControlRight,
+        "alt_left" | "altleft" => KeyCode::AltLeft,
+        "alt_right" | "altright" => KeyCode::AltRight,
+        "super_left" | "superleft" => KeyCode::SuperLeft,
+        "super_right" | "superright" => KeyCode::SuperRight,
+        "meta" => KeyCode::Meta,
+        "hyper" => KeyCode::Hyper,
+        "numpad0" => KeyCode::Numpad0,
+        "numpad1" => KeyCode::Numpad1,
+        "numpad2" => KeyCode::Numpad2,
+        "numpad3" => KeyCode::Numpad3,
+        "numpad4" => KeyCode::Numpad4,
+        "numpad5" => KeyCode::Numpad5,
+        "numpad6" => KeyCode::Numpad6,
+        "numpad7" => KeyCode::Numpad7,
+        "numpad8" => KeyCode::Numpad8,
+        "numpad9" => KeyCode::Numpad9,
+        "numpad_decimal" | "numpaddecimal" => KeyCode::NumpadDecimal,
+        "numpad_divide" | "numpaddivide" => KeyCode::NumpadDivide,
+        "numpad_multiply" | "numpadmultiply" => KeyCode::NumpadMultiply,
+        "numpad_subtract" | "numpadsubtract" => KeyCode::NumpadSubtract,
+        "numpad_add" | "numpadadd" => KeyCode::NumpadAdd,
+        "numpad_enter" | "numpadenter" => KeyCode::NumpadEnter,
+        "numpad_equal" | "numpadequal" => KeyCode::NumpadEqual,
+        "numpad_comma" | "numpadcomma" => KeyCode::NumpadComma,
+        _ => return None,
+    };
+    Some(PhysicalKey::Code(code))
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1274,8 +1314,31 @@ mod tests {
             parse_synthetic_key("num_lock"),
             Key::Named(NamedKey::NumLock)
         );
+        assert_eq!(parse_synthetic_key("clear"), Key::Named(NamedKey::Clear));
+        assert_eq!(
+            parse_synthetic_key("context_menu"),
+            Key::Named(NamedKey::ContextMenu)
+        );
         assert_eq!(parse_synthetic_key("x"), Key::Character("x".into()));
         assert_eq!(parse_synthetic_key("👨‍💻"), Key::Character("👨‍💻".into()));
+    }
+
+    #[test]
+    fn parse_synthetic_physical_key_supports_keypad_menu_and_side_specific_modifiers() {
+        assert_eq!(
+            parse_synthetic_physical_key(Some("context_menu")),
+            Some(PhysicalKey::Code(KeyCode::ContextMenu))
+        );
+        assert_eq!(
+            parse_synthetic_physical_key(Some("numpad5")),
+            Some(PhysicalKey::Code(KeyCode::Numpad5))
+        );
+        assert_eq!(
+            parse_synthetic_physical_key(Some("shift_right")),
+            Some(PhysicalKey::Code(KeyCode::ShiftRight))
+        );
+        assert_eq!(parse_synthetic_physical_key(Some("unknown")), None);
+        assert_eq!(parse_synthetic_physical_key(None), None);
     }
 
     #[test]

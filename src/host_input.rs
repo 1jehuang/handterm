@@ -99,10 +99,11 @@ pub fn apply_synthetic_key_event<T: SyntheticInputTarget>(
         )
     };
 
+    let physical_key = crate::frontend::parse_synthetic_physical_key(event.physical_key.as_deref());
     let changed = if let Some(bytes) = key_to_bytes(
         &logical_key,
         event.text.as_deref(),
-        None,
+        physical_key.as_ref(),
         application_cursor_keys,
         modifiers,
         kitty_keyboard_flags,
@@ -169,7 +170,7 @@ pub fn apply_synthetic_key_event<T: SyntheticInputTarget>(
 mod tests {
     use super::*;
     use crate::frontend::{KeyEventKind, apply_modifier_key_transition};
-    use crate::terminal::{KITTY_KBD_REPORT_ALL, KITTY_KBD_REPORT_EVENTS};
+    use crate::terminal::{KITTY_KBD_DISAMBIGUATE, KITTY_KBD_REPORT_ALL, KITTY_KBD_REPORT_EVENTS};
     use std::time::{Duration, Instant};
     use winit::keyboard::Key;
 
@@ -334,6 +335,7 @@ mod tests {
         let press = SyntheticKeyEvent {
             kind: KeyEventKind::Press,
             key: "ctrl".to_string(),
+            physical_key: None,
             text: None,
             ctrl: true,
             alt: false,
@@ -348,6 +350,7 @@ mod tests {
         let release = SyntheticKeyEvent {
             kind: KeyEventKind::Release,
             key: "ctrl".to_string(),
+            physical_key: None,
             text: None,
             ctrl: true,
             alt: false,
@@ -363,5 +366,51 @@ mod tests {
             KITTY_KBD_REPORT_ALL | KITTY_KBD_REPORT_EVENTS
         );
         assert_eq!(state.scrollback_reset_count, 0);
+    }
+
+    #[test]
+    fn synthetic_key_event_supports_context_menu_legacy_encoding_via_physical_key() {
+        let mut state = TestSyntheticTarget::new();
+        state
+            .terminal
+            .process(&format!("\x1b[={}u", KITTY_KBD_DISAMBIGUATE).into_bytes());
+
+        let event = SyntheticKeyEvent {
+            kind: KeyEventKind::Press,
+            key: "menu".to_string(),
+            physical_key: Some("context_menu".to_string()),
+            text: None,
+            ctrl: false,
+            alt: false,
+            shift: false,
+            super_key: false,
+            hyper: false,
+            meta: false,
+        };
+        assert!(apply_synthetic_key_event(&mut state, &event));
+        assert_eq!(state.take_captured_output(), b"\x1b[29~");
+    }
+
+    #[test]
+    fn synthetic_key_event_supports_keypad_begin_via_physical_key() {
+        let mut state = TestSyntheticTarget::new();
+        state
+            .terminal
+            .process(&format!("\x1b[={}u", KITTY_KBD_DISAMBIGUATE).into_bytes());
+
+        let event = SyntheticKeyEvent {
+            kind: KeyEventKind::Press,
+            key: "clear".to_string(),
+            physical_key: Some("numpad5".to_string()),
+            text: None,
+            ctrl: false,
+            alt: false,
+            shift: false,
+            super_key: false,
+            hyper: false,
+            meta: false,
+        };
+        assert!(apply_synthetic_key_event(&mut state, &event));
+        assert_eq!(state.take_captured_output(), b"\x1b[E");
     }
 }

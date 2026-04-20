@@ -98,6 +98,8 @@ With a shared-GPU host model, each additional window can plausibly approach **~1
 4. Benchmark RSS, startup time, redraw throughput, and frame pacing on CPU vs GPU.
 5. Keep validating the GPU default path against live shell/TUI workloads and continue tightening parity until CPU is no longer the fallback/debug backend.
 
+Current safe live-validation path: `scripts/live_gpu_validation.sh` launches one isolated GPU host, verifies deterministic terminal text plus basic host control operations, opens one additional window, and cleans it up again without doing compositor-heavy benchmarking.
+
 ### Expected result
 
 ~21MB -> ~8-10MB per instance.

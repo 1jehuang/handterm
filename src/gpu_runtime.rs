@@ -74,6 +74,39 @@ pub struct SharedGpuContext {
     pub atlas: Mutex<SharedAtlasState>,
 }
 
+fn create_shared_atlas_state(device: &wgpu::Device) -> (SharedAtlasState, Duration) {
+    let start = Instant::now();
+    let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("glyph_atlas"),
+        size: wgpu::Extent3d {
+            width: ATLAS_WIDTH,
+            height: ATLAS_HEIGHT,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (
+        SharedAtlasState {
+            atlas_texture,
+            atlas_view,
+            glyph_map: HashMap::with_capacity(256),
+            grapheme_map: HashMap::with_capacity(32),
+            image_map: HashMap::with_capacity(32),
+            atlas_cursor_x: 0,
+            atlas_cursor_y: 0,
+            atlas_row_height: 0,
+            last_kitty_generation: 0,
+        },
+        start.elapsed(),
+    )
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SharedGpuInitProfile {
     pub adapter_request: Duration,
@@ -712,23 +745,7 @@ pub fn create_shared_gpu_context_profiled() -> Result<(Arc<SharedGpuContext>, Sh
     });
     let atlas_sampler_create = step_start.elapsed();
 
-    let step_start = Instant::now();
-    let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("glyph_atlas"),
-        size: wgpu::Extent3d {
-            width: ATLAS_WIDTH,
-            height: ATLAS_HEIGHT,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let atlas_texture_create = step_start.elapsed();
+    let (atlas_state, atlas_texture_create) = create_shared_atlas_state(&device);
 
     let shared = Arc::new(SharedGpuContext {
         instance,
@@ -741,17 +758,7 @@ pub fn create_shared_gpu_context_profiled() -> Result<(Arc<SharedGpuContext>, Sh
         pipeline_layout,
         atlas_sampler,
         pipeline_cache: Mutex::new(HashMap::new()),
-        atlas: Mutex::new(SharedAtlasState {
-            atlas_texture,
-            atlas_view,
-            glyph_map: HashMap::with_capacity(256),
-            grapheme_map: HashMap::with_capacity(32),
-            image_map: HashMap::with_capacity(32),
-            atlas_cursor_x: 0,
-            atlas_cursor_y: 0,
-            atlas_row_height: 0,
-            last_kitty_generation: 0,
-        }),
+        atlas: Mutex::new(atlas_state),
     });
 
     Ok((

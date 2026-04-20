@@ -1,7 +1,7 @@
 use crate::control_strings::{
     ApcEvent, ControlStringEvent, ControlStringState, DcsEvent, OscEvent, SixelEvent,
 };
-pub use crate::graphics::{KittyImage, KittyPlacement};
+pub use crate::graphics::{KittyGraphicsCommand, KittyImage, KittyImageFinalize, KittyPlacement};
 use crate::grid::Grid;
 use crate::parser::{Action, Parser};
 use crate::protocol::{CursorState, DirtyCell, ServerMessage, WindowModes};
@@ -122,25 +122,6 @@ pub trait TerminalView {
     fn content_generation(&self) -> u64 {
         self.grid().generation()
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct KittyImageFinalize {
-    id: u32,
-    compression: Option<u8>,
-    format: u32,
-    width: u32,
-    height: u32,
-    action: u8,
-    cols: u32,
-    rows_param: u32,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct KittyGraphicsCommand {
-    image_id: u32,
-    delete: Option<u8>,
-    quiet: u8,
 }
 
 pub const KITTY_KBD_DISAMBIGUATE: u8 = 0b00001;

@@ -252,6 +252,8 @@ README and OPTIMIZATION have been updated substantially, but any future changes 
 
 For now, `HANDTERM_PROFILE_JSON=1` should stay as an **internal opt-in diagnostics aid** rather than a prominently documented README feature. It is useful for safe machine-parsed profiling, but it is not a primary product surface.
 
+The remaining Kitty image `partial*` gaps are no longer the preferred next protocol slice. Handterm now covers the core inline raw/compressed RGB/RGBA/PNG upload-place-delete path, and the remaining gaps are lower-leverage features such as non-inline transports and richer placement/operation parameters.
+
 ## Current Known Risks / Notes
 
 ### Niri interaction warning

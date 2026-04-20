@@ -2807,6 +2807,32 @@ mod tests {
     }
 
     #[test]
+    fn gpu_framebuffer_matches_cpu_for_cursor_styles() {
+        let config = AppConfig::default();
+        let mut atlas =
+            GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, 96)
+                .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, 96))
+                .expect("should load font atlas for GPU cursor-style parity");
+
+        for cursor_style in [crate::terminal::CursorStyle::Bar, crate::terminal::CursorStyle::Underline] {
+            let mut terminal = Terminal::new(8, 2);
+            let mut cpu = OffscreenRenderer::new(8, 2, &atlas);
+            terminal.process(b"cursor");
+            terminal.cursor_style = cursor_style;
+
+            cpu.reset();
+            cpu.render(&mut terminal, &mut atlas, &config);
+            let gpu = render_like_gpu(&mut terminal, &mut atlas, &config);
+
+            assert_eq!(
+                gpu, cpu.pixels,
+                "GPU framebuffer should match CPU output for cursor style {:?}",
+                cursor_style
+            );
+        }
+    }
+
+    #[test]
     fn gpu_fractional_scroll_framebuffer_shifts_rows_by_partial_cell_height() {
         let config = AppConfig::default();
         let mut atlas =

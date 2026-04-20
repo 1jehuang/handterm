@@ -121,6 +121,7 @@ The recent internal GPU profiling now shows this more precisely:
   - `kind=first-window` vs `kind=add-window`
   - warm-cache flags such as `shared_warm`, `atlas_cached`, `defaults_reused`, and `pipeline_cache_hit`
   - aggregate buckets: `host_setup_before_surface`, `compositor_facing`, `handterm_surface_setup`, and `surface_unaccounted`
+  - when `HANDTERM_PROFILE_JSON=1` is set, the GPU host also emits machine-parsable JSON profile events for `gpu_host_open_window` and `gpu_host_first_frame`
 - a new safe live add-window sample on this session measured:
   - `total=30.68ms`
   - `host_setup_before_surface=13.93ms`
@@ -134,6 +135,11 @@ The recent internal GPU profiling now shows this more precisely:
   - add-window `open_to_first_present`: `17.98-31.22ms`, median `21.90ms`
   - add-window `compositor_facing`: `14.28-25.22ms`, median `16.80ms`
   - add-window `handterm_surface_setup`: `1.06-1.68ms`, median `1.31ms`
+- a follow-up safe 3-run machine-parsed verification with `HANDTERM_PROFILE_JSON=1` reported the same overall result:
+  - add-window `total`: `14.58-27.85ms`, median `18.91ms`
+  - add-window `open_to_first_present`: `16.72-30.24ms`, median `20.46ms`
+  - add-window `compositor_facing`: `12.21-25.78ms`, median `16.31ms`
+  - add-window `handterm_surface_setup`: `0.96-1.43ms`, median `1.00ms`
 - interpretation: the add-window path is still primarily blocked by compositor-facing window/surface configure work, while handterm-side GPU surface setup is now a much smaller portion of the total
 
 ### CPU host limitation

@@ -1,5 +1,9 @@
 use nix::libc;
+use serde_json::{Value, json};
+use std::sync::OnceLock;
 use std::time::Duration;
+
+const STRUCTURED_PROFILE_ENV: &str = "HANDTERM_PROFILE_JSON";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProcessCpuTime {
@@ -56,9 +60,40 @@ fn duration_ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
+fn structured_profile_enabled_from(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+pub fn structured_profile_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        structured_profile_enabled_from(std::env::var(STRUCTURED_PROFILE_ENV).ok().as_deref())
+    })
+}
+
+pub fn structured_profile_event_line(event: &str, data: Value) -> String {
+    serde_json::to_string(&json!({
+        "type": "handterm_profile",
+        "event": event,
+        "data": data,
+    }))
+    .expect("structured profile event should serialize")
+}
+
+pub fn emit_structured_profile_event(event: &str, data: Value) {
+    if !structured_profile_enabled() {
+        return;
+    }
+    eprintln!("{}", structured_profile_event_line(event, data));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn delta_since_saturates_each_component() {
@@ -87,5 +122,25 @@ mod tests {
         assert!((cpu.user_ms() - 1.5).abs() < f64::EPSILON);
         assert!((cpu.system_ms() - 2.25).abs() < f64::EPSILON);
         assert!((cpu.total_ms() - 3.75).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn structured_profile_env_accepts_common_truthy_values() {
+        for value in [Some("1"), Some("true"), Some("YES"), Some(" on ")] {
+            assert!(structured_profile_enabled_from(value));
+        }
+        for value in [None, Some("0"), Some("false"), Some("no")] {
+            assert!(!structured_profile_enabled_from(value));
+        }
+    }
+
+    #[test]
+    fn structured_profile_event_line_is_machine_parsable_json() {
+        let line = structured_profile_event_line("gpu_host_open_window", json!({"id": 2}));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&line).expect("event line should parse as json");
+        assert_eq!(parsed["type"], "handterm_profile");
+        assert_eq!(parsed["event"], "gpu_host_open_window");
+        assert_eq!(parsed["data"]["id"], 2);
     }
 }

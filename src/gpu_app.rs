@@ -23,11 +23,12 @@ use crate::host_input::{
 use crate::ipc::{IpcAction, IpcServer, Request, Response};
 use crate::native_scroll::NativeScrollBridge;
 use crate::platform::{copy_to_clipboard, open_url, paste_from_clipboard};
-use crate::profiling::ProcessCpuTime;
+use crate::profiling::{ProcessCpuTime, emit_structured_profile_event};
 use crate::pty::PtyChild;
 use crate::standalone_support::handle_ipc_request;
 use crate::terminal::Terminal;
 use anyhow::{Context, Result};
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -613,6 +614,51 @@ impl GpuApp {
             open_cpu.map(ProcessCpuTime::user_ms).unwrap_or(0.0),
             open_cpu.map(ProcessCpuTime::system_ms).unwrap_or(0.0),
             open_cpu.map(ProcessCpuTime::total_ms).unwrap_or(0.0),
+        );
+        emit_structured_profile_event(
+            "gpu_host_open_window",
+            json!({
+                "id": id,
+                "kind": open_kind,
+                "existing_windows": existing_windows,
+                "shared_warm": shared_warm,
+                "atlas_cached": atlas_cached,
+                "preferred_surface_defaults_available": preferred_surface_defaults_available,
+                "defaults_reused": sp.reused_surface_defaults,
+                "pipeline_cache_hit": sp.pipeline_cache_hit,
+                "total_ms": start.elapsed().as_secs_f64() * 1000.0,
+                "host_setup_before_surface_ms": host_setup_before_surface_ms,
+                "watcher_ms": watcher_ms.as_secs_f64() * 1000.0,
+                "surface_total_ms": surface_total_ms.as_secs_f64() * 1000.0,
+                "compositor_facing_ms": compositor_facing_ms,
+                "handterm_surface_setup_ms": handterm_surface_setup_ms,
+                "surface_unaccounted_ms": surface_unaccounted_ms,
+                "dpi_ms": dpi_ms.as_secs_f64() * 1000.0,
+                "bootstrap_ms": bootstrap_ms.as_secs_f64() * 1000.0,
+                "window_ms": window_ms.as_secs_f64() * 1000.0,
+                "atlas_ms": atlas_ms.as_secs_f64() * 1000.0,
+                "shared_ms": shared_ms.as_secs_f64() * 1000.0,
+                "terminal_ms": terminal_ms.as_secs_f64() * 1000.0,
+                "pty_ms": pty_ms.as_secs_f64() * 1000.0,
+                "surface": {
+                    "window_create_ms": sp.window_create.as_secs_f64() * 1000.0,
+                    "ime_setup_ms": sp.ime_setup.as_secs_f64() * 1000.0,
+                    "surface_create_ms": sp.surface_create.as_secs_f64() * 1000.0,
+                    "default_config_ms": sp.default_config.as_secs_f64() * 1000.0,
+                    "capabilities_ms": sp.capabilities.as_secs_f64() * 1000.0,
+                    "configure_ms": sp.configure.as_secs_f64() * 1000.0,
+                    "atlas_texture_ms": sp.atlas_texture.as_secs_f64() * 1000.0,
+                    "uniform_buffer_ms": sp.uniform_buffer.as_secs_f64() * 1000.0,
+                    "instance_buffers_ms": sp.instance_buffers.as_secs_f64() * 1000.0,
+                    "bind_group_ms": sp.bind_group.as_secs_f64() * 1000.0,
+                    "pipeline_lookup_ms": sp.pipeline_lookup.as_secs_f64() * 1000.0,
+                },
+                "host_cpu": {
+                    "user_ms": open_cpu.map(ProcessCpuTime::user_ms).unwrap_or(0.0),
+                    "system_ms": open_cpu.map(ProcessCpuTime::system_ms).unwrap_or(0.0),
+                    "total_ms": open_cpu.map(ProcessCpuTime::total_ms).unwrap_or(0.0),
+                }
+            }),
         );
         Ok(id)
     }
@@ -1315,6 +1361,27 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                                     first_present_cpu
                                         .map(ProcessCpuTime::total_ms)
                                         .unwrap_or(0.0),
+                                );
+                                emit_structured_profile_event(
+                                    "gpu_host_first_frame",
+                                    json!({
+                                        "id": state.id,
+                                        "open_to_first_present_ms": open_to_present,
+                                        "render": {
+                                            "acquire_surface_ms": rp.acquire_surface.as_secs_f64() * 1000.0,
+                                            "build_display_list_ms": rp.build_display_list.as_secs_f64() * 1000.0,
+                                            "upload_buffers_ms": rp.upload_buffers.as_secs_f64() * 1000.0,
+                                            "encode_pass_ms": rp.encode_pass.as_secs_f64() * 1000.0,
+                                            "submit_ms": rp.submit.as_secs_f64() * 1000.0,
+                                            "present_ms": rp.present.as_secs_f64() * 1000.0,
+                                            "total_ms": rp.total.as_secs_f64() * 1000.0,
+                                        },
+                                        "host_cpu": {
+                                            "user_ms": first_present_cpu.map(ProcessCpuTime::user_ms).unwrap_or(0.0),
+                                            "system_ms": first_present_cpu.map(ProcessCpuTime::system_ms).unwrap_or(0.0),
+                                            "total_ms": first_present_cpu.map(ProcessCpuTime::total_ms).unwrap_or(0.0),
+                                        }
+                                    }),
                                 );
                             }
                             state.open_window_start = None;

@@ -1,6 +1,7 @@
 use crate::control_strings::{
     ApcEvent, ControlStringEvent, ControlStringState, DcsEvent, OscEvent, SixelEvent,
 };
+pub use crate::graphics::{KittyImage, KittyPlacement};
 use crate::grid::Grid;
 use crate::parser::{Action, Parser};
 use crate::protocol::{CursorState, DirtyCell, ServerMessage, WindowModes};
@@ -106,23 +107,6 @@ pub enum MouseEncoding {
     X10,
     Utf8,
     Sgr,
-}
-
-#[derive(Debug, Clone)]
-pub struct KittyImage {
-    pub id: u32,
-    pub width: u32,
-    pub height: u32,
-    pub data: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct KittyPlacement {
-    pub image_id: u32,
-    pub col: usize,
-    pub row: usize,
-    pub cols: usize,
-    pub rows: usize,
 }
 
 pub trait TerminalView {

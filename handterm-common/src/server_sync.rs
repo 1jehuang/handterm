@@ -1,6 +1,7 @@
+use crate::graphics::{KittyImage, KittyPlacement};
 use crate::grid::{Cell, CellSnapshot, Grid, UnderlineStyle};
 use crate::protocol::{CursorState, DirtyCell, KittyImageData, KittyImagePlacement};
-use crate::terminal::{CursorStyle, KittyImage, KittyPlacement};
+use crate::terminal::CursorStyle;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct AppliedServerEffects {

@@ -38,6 +38,7 @@ pub struct Terminal {
     dcs_events: Vec<DcsEvent>,
     sixel_events: Vec<Vec<u8>>,
     apc_events: Vec<ApcEvent>,
+    osc_events: Vec<OscEvent>,
     response_buf: Vec<u8>,
     saved_cursor: Option<(usize, usize)>,
     mode_bracketed_paste: bool,
@@ -125,6 +126,11 @@ pub enum DcsEvent {
 pub enum ApcEvent {
     Generic(Vec<u8>),
     KittyGraphics(Vec<u8>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OscEvent {
+    Raw(Vec<u8>),
 }
 
 pub trait TerminalView {
@@ -229,6 +235,7 @@ impl Terminal {
             dcs_events: Vec::new(),
             sixel_events: Vec::new(),
             apc_events: Vec::new(),
+            osc_events: Vec::new(),
             response_buf: Vec::new(),
             saved_cursor: None,
             mode_bracketed_paste: false,
@@ -284,6 +291,18 @@ impl Terminal {
 
     pub fn take_title(&mut self) -> Option<String> {
         self.title.take()
+    }
+
+    pub fn take_osc(&mut self) -> Option<OscEvent> {
+        if self.osc_events.is_empty() {
+            None
+        } else {
+            Some(self.osc_events.remove(0))
+        }
+    }
+
+    pub fn drain_osc(&mut self) -> Vec<OscEvent> {
+        std::mem::take(&mut self.osc_events)
     }
 
     pub fn take_dcs(&mut self) -> Option<DcsEvent> {
@@ -996,6 +1015,7 @@ impl Terminal {
     }
 
     fn osc_dispatch(&mut self, data: &[u8]) {
+        self.osc_events.push(OscEvent::Raw(data.to_vec()));
         if let Some(semi) = data.iter().position(|&b| b == b';') {
             let cmd = &data[..semi];
             let payload = &data[semi + 1..];
@@ -2003,6 +2023,7 @@ mod tests {
     fn osc_st_terminator() {
         let mut t = Terminal::new(80, 24);
         t.process(b"\x1b]0;My Title\x1b\\visible");
+        assert_eq!(t.take_osc(), Some(OscEvent::Raw(b"0;My Title".to_vec())));
         assert_eq!(t.take_title().unwrap(), "My Title");
         assert_eq!(t.grid.cell_char(0, 0), 'v');
         assert_eq!(t.grid.cell_char(0, 6), 'e');

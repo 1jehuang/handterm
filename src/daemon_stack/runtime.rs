@@ -18,6 +18,11 @@ const SERVER_POLL_TIMEOUT_MS: u16 = 50;
 const CLIENT_IO_BUF_SIZE: usize = 64 * 1024;
 const SERVER_START_TIMEOUT: Duration = Duration::from_secs(2);
 
+fn daemon_style_defaults() -> (String, f64) {
+    let defaults = AppConfig::default();
+    (defaults.style.font_family, defaults.style.font_size)
+}
+
 pub fn default_server_socket_path() -> PathBuf {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
         .unwrap_or_else(|_| format!("/tmp/handterm-{}", std::process::id()));
@@ -123,7 +128,10 @@ impl ServerDaemon {
             listener,
             path: path.to_path_buf(),
             clients: Vec::new(),
-            core: ServerCore::new_with_scrollback(scrollback_limit),
+            core: {
+                let (font_family, font_size) = daemon_style_defaults();
+                ServerCore::new_with_style(scrollback_limit, font_family, font_size)
+            },
             ptys: BTreeMap::new(),
             io_buf: vec![0; CLIENT_IO_BUF_SIZE],
         })

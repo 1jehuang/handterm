@@ -60,31 +60,7 @@ pub enum ServerError {
     UnknownWindow(WindowId),
 }
 
-impl Default for ServerCore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ServerCore {
-    pub fn new() -> Self {
-        let defaults = crate::config::AppConfig::default();
-        Self::new_with_style(
-            crate::grid::DEFAULT_SCROLLBACK_MAX,
-            defaults.style.font_family,
-            defaults.style.font_size,
-        )
-    }
-
-    pub fn new_with_scrollback(scrollback_limit: usize) -> Self {
-        let defaults = crate::config::AppConfig::default();
-        Self::new_with_style(
-            scrollback_limit,
-            defaults.style.font_family,
-            defaults.style.font_size,
-        )
-    }
-
     pub fn new_with_style(scrollback_limit: usize, font_family: String, font_size: f64) -> Self {
         Self {
             next_window_id: 1,
@@ -518,6 +494,10 @@ fn dirty_cells_from_terminal(terminal: &Terminal) -> Vec<DirtyCell> {
 mod tests {
     use super::*;
 
+    fn test_server() -> ServerCore {
+        ServerCore::new_with_style(10_000, "JetBrainsMono Nerd Font Light".to_string(), 11.0)
+    }
+
     fn created_window_id(message: ServerMessage) -> WindowId {
         match message {
             ServerMessage::WindowCreated { window_id, .. } => window_id,
@@ -527,7 +507,7 @@ mod tests {
 
     #[test]
     fn server_core_creates_and_closes_windows() {
-        let mut server = ServerCore::new();
+        let mut server = test_server();
         let window_id = created_window_id(server.create_window(80, 24, 96));
 
         assert!(server.has_window(window_id));
@@ -543,7 +523,8 @@ mod tests {
 
     #[test]
     fn server_core_uses_configured_scrollback_limit_for_new_windows() {
-        let mut server = ServerCore::new_with_scrollback(0);
+        let mut server =
+            ServerCore::new_with_style(0, "JetBrainsMono Nerd Font Light".to_string(), 11.0);
         let window_id = created_window_id(server.create_window(4, 2, 96));
         let window = server.windows.get(&window_id).expect("window should exist");
 
@@ -560,7 +541,7 @@ mod tests {
 
     #[test]
     fn server_core_emits_dirty_cells_and_cursor_updates() {
-        let mut server = ServerCore::new();
+        let mut server = test_server();
         let window_id = created_window_id(server.create_window(8, 2, 96));
 
         let updates = server
@@ -596,7 +577,7 @@ mod tests {
 
     #[test]
     fn server_core_emits_title_bell_and_clipboard_side_effects() {
-        let mut server = ServerCore::new();
+        let mut server = test_server();
         let window_id = created_window_id(server.create_window(8, 2, 96));
 
         let updates = server
@@ -627,7 +608,7 @@ mod tests {
 
     #[test]
     fn resize_window_marks_full_snapshot_dirty() {
-        let mut server = ServerCore::new();
+        let mut server = test_server();
         let window_id = created_window_id(server.create_window(4, 2, 96));
         server.process_output(window_id, b"ab");
 
@@ -647,7 +628,7 @@ mod tests {
 
     #[test]
     fn handle_client_message_emits_spawn_and_forward_actions() {
-        let mut server = ServerCore::new();
+        let mut server = test_server();
         let created = server
             .handle_client_message(ClientMessage::NewWindow {
                 cols: 80,
@@ -692,7 +673,7 @@ mod tests {
 
     #[test]
     fn handle_client_message_resize_and_close_emit_messages_and_actions() {
-        let mut server = ServerCore::new();
+        let mut server = test_server();
         let window_id = created_window_id(server.create_window(4, 2, 96));
 
         let resized = server
@@ -732,7 +713,7 @@ mod tests {
 
     #[test]
     fn handle_client_message_rejects_unknown_windows() {
-        let mut server = ServerCore::new();
+        let mut server = test_server();
         let err = server
             .handle_client_message(ClientMessage::Paste {
                 window_id: 99,
@@ -744,7 +725,7 @@ mod tests {
 
     #[test]
     fn process_output_emits_terminal_response_io_actions() {
-        let mut server = ServerCore::new();
+        let mut server = test_server();
         let window_id = created_window_id(server.create_window(8, 2, 96));
 
         let updates = server
@@ -762,7 +743,7 @@ mod tests {
 
     #[test]
     fn handle_client_mouse_input_encodes_pty_bytes() {
-        let mut server = ServerCore::new();
+        let mut server = test_server();
         let window_id = created_window_id(server.create_window(8, 2, 96));
         let window = server
             .windows
@@ -794,7 +775,7 @@ mod tests {
 
     #[test]
     fn handle_client_ping_replies_with_current_build_id() {
-        let mut server = ServerCore::new();
+        let mut server = test_server();
         let result = server
             .handle_client_message(ClientMessage::Ping {
                 build_id: "old-build".to_string(),
@@ -812,7 +793,7 @@ mod tests {
 
     #[test]
     fn server_core_emits_kitty_image_state_when_generation_changes() {
-        let mut server = ServerCore::new();
+        let mut server = test_server();
         let window_id = created_window_id(server.create_window(8, 2, 96));
 
         let updates = server
@@ -845,7 +826,7 @@ mod tests {
 
     #[test]
     fn server_core_only_sends_new_atlas_updates_once_per_window() {
-        let mut server = ServerCore::new();
+        let mut server = test_server();
         let window_id = created_window_id(server.create_window(8, 2, 96));
 
         let first = server

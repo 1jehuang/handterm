@@ -36,7 +36,7 @@ pub struct Terminal {
     pub cursor_visible: bool,
     pub title: Option<String>,
     dcs_events: Vec<DcsEvent>,
-    sixel_events: Vec<Vec<u8>>,
+    sixel_events: Vec<SixelEvent>,
     apc_events: Vec<ApcEvent>,
     osc_events: Vec<OscEvent>,
     control_string_events: Vec<ControlStringEvent>,
@@ -118,9 +118,14 @@ pub struct KittyPlacement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SixelEvent {
+    pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DcsEvent {
     Generic(Vec<u8>),
-    Sixel(Vec<u8>),
+    Sixel(SixelEvent),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -340,7 +345,7 @@ impl Terminal {
         std::mem::take(&mut self.dcs_events)
     }
 
-    pub fn take_sixel(&mut self) -> Option<Vec<u8>> {
+    pub fn take_sixel(&mut self) -> Option<SixelEvent> {
         if self.sixel_events.is_empty() {
             None
         } else {
@@ -348,7 +353,7 @@ impl Terminal {
         }
     }
 
-    pub fn drain_sixel(&mut self) -> Vec<Vec<u8>> {
+    pub fn drain_sixel(&mut self) -> Vec<SixelEvent> {
         std::mem::take(&mut self.sixel_events)
     }
 
@@ -1113,8 +1118,11 @@ impl Terminal {
 
     fn dcs_dispatch(&mut self, data: &[u8]) {
         let event = if let Some(payload) = data.strip_prefix(b"q") {
-            self.sixel_events.push(payload.to_vec());
-            DcsEvent::Sixel(payload.to_vec())
+            let sixel = SixelEvent {
+                payload: payload.to_vec(),
+            };
+            self.sixel_events.push(sixel.clone());
+            DcsEvent::Sixel(sixel)
         } else {
             DcsEvent::Generic(data.to_vec())
         };
@@ -2041,8 +2049,18 @@ mod tests {
     fn sixel_dcs_payloads_are_queued_separately() {
         let mut t = Terminal::new(80, 24);
         t.process(b"\x1bPqABC\x1b\\");
-        assert_eq!(t.take_dcs(), Some(DcsEvent::Sixel(b"ABC".to_vec())));
-        assert_eq!(t.take_sixel().as_deref(), Some(b"ABC".as_slice()));
+        assert_eq!(
+            t.take_dcs(),
+            Some(DcsEvent::Sixel(SixelEvent {
+                payload: b"ABC".to_vec(),
+            }))
+        );
+        assert_eq!(
+            t.take_sixel(),
+            Some(SixelEvent {
+                payload: b"ABC".to_vec(),
+            })
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crate::server_sync::{
     AppliedServerEffects, apply_cursor_state as apply_wire_cursor_state,
     apply_dirty_cell as apply_wire_dirty_cell, kitty_images_from_wire, kitty_placements_from_wire,
 };
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 
 fn dec_special_to_unicode(b: u8) -> u32 {
     match b {
@@ -57,6 +57,7 @@ pub struct Terminal {
     kitty_pending_fmt: u32,
     kitty_pending_width: u32,
     kitty_pending_height: u32,
+    kitty_pending_compression: Option<u8>,
     kitty_more_chunks: bool,
     kitty_generation: u64,
     kitty_keyboard_main_flags: u8,
@@ -129,6 +130,7 @@ pub trait TerminalView {
 #[derive(Debug, Clone, Copy)]
 struct KittyImageFinalize {
     id: u32,
+    compression: Option<u8>,
     format: u32,
     width: u32,
     height: u32,
@@ -231,6 +233,7 @@ impl Terminal {
             kitty_pending_fmt: 0,
             kitty_pending_width: 0,
             kitty_pending_height: 0,
+            kitty_pending_compression: None,
             kitty_more_chunks: false,
             kitty_generation: 0,
             kitty_keyboard_main_flags: 0,
@@ -1023,6 +1026,7 @@ impl Terminal {
         let mut rows_param = 0u32;
         let mut delete = None;
         let mut quiet = 0u8;
+        let mut compression = None;
 
         for kv in control.split(|&b| b == b',') {
             if kv.len() < 3 || kv[1] != b'=' {
@@ -1050,6 +1054,7 @@ impl Terminal {
                 b'r' => rows_param = val_num(),
                 b'd' => delete = val.first().copied(),
                 b'q' => quiet = val_num().min(u8::MAX as u32) as u8,
+                b'o' => compression = val.first().copied(),
                 _ => {}
             }
         }
@@ -1079,6 +1084,9 @@ impl Terminal {
                     if height > 0 {
                         self.kitty_pending_height = height;
                     }
+                    if compression.is_some() {
+                        self.kitty_pending_compression = compression;
+                    }
                     self.kitty_more_chunks = more;
                     if !more {
                         let full_payload = std::mem::take(&mut self.kitty_payload_buf);
@@ -1086,12 +1094,14 @@ impl Terminal {
                         let final_fmt = self.kitty_pending_fmt;
                         let final_w = self.kitty_pending_width;
                         let final_h = self.kitty_pending_height;
+                        let final_compression = self.kitty_pending_compression.take();
                         self.kitty_pending_id = 0;
                         self.kitty_pending_fmt = 0;
                         self.kitty_pending_width = 0;
                         self.kitty_pending_height = 0;
                         let request = KittyImageFinalize {
                             id: final_id,
+                            compression: final_compression,
                             format: final_fmt,
                             width: final_w,
                             height: final_h,
@@ -1106,6 +1116,7 @@ impl Terminal {
                 }
                 let request = KittyImageFinalize {
                     id: img_id,
+                    compression,
                     format: fmt,
                     width,
                     height,
@@ -1167,9 +1178,13 @@ impl Terminal {
     }
 
     fn finalize_kitty_image(&mut self, request: KittyImageFinalize, payload: &[u8], quiet: u8) {
-        let (actual_width, actual_height, decoded) = if let Ok(d) =
-            self.decode_kitty_image_payload(request.format, payload, request.width, request.height)
-        {
+        let (actual_width, actual_height, decoded) = if let Ok(d) = self.decode_kitty_image_payload(
+            request.format,
+            request.compression,
+            payload,
+            request.width,
+            request.height,
+        ) {
             d
         } else {
             return;
@@ -1302,11 +1317,13 @@ impl Terminal {
     fn decode_kitty_image_payload(
         &self,
         format: u32,
+        compression: Option<u8>,
         payload: &[u8],
         width: u32,
         height: u32,
     ) -> Result<(u32, u32, Vec<u8>), ()> {
         let decoded = self.base64_decode_kitty(payload)?;
+        let decoded = self.decompress_kitty_payload(decoded, compression)?;
         match format {
             24 => {
                 if width == 0 || height == 0 {
@@ -1379,6 +1396,23 @@ impl Terminal {
         };
 
         Ok((info.width, info.height, rgba))
+    }
+
+    fn decompress_kitty_payload(
+        &self,
+        decoded: Vec<u8>,
+        compression: Option<u8>,
+    ) -> Result<Vec<u8>, ()> {
+        match compression {
+            None => Ok(decoded),
+            Some(b'z') => {
+                let mut decoder = flate2::read::ZlibDecoder::new(decoded.as_slice());
+                let mut out = Vec::new();
+                decoder.read_to_end(&mut out).map_err(|_| ())?;
+                Ok(out)
+            }
+            Some(_) => Err(()),
+        }
     }
 
     #[allow(dead_code)]
@@ -2272,6 +2306,109 @@ mod tests {
         assert_eq!(image.data, vec![0xff, 0x00, 0x00, 0xff]);
         assert_eq!(t.kitty_placements.len(), 1);
         assert_eq!(t.kitty_placements[0].image_id, 14);
+    }
+
+    #[test]
+    fn kitty_graphics_compressed_rgba_upload_decodes_and_places_image() {
+        fn base64_encode(input: &[u8]) -> String {
+            const TABLE: &[u8; 64] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+            for chunk in input.chunks(3) {
+                let b0 = chunk[0];
+                let b1 = *chunk.get(1).unwrap_or(&0);
+                let b2 = *chunk.get(2).unwrap_or(&0);
+                let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
+                out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+                out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+                out.push(if chunk.len() > 1 {
+                    TABLE[((n >> 6) & 0x3f) as usize] as char
+                } else {
+                    '='
+                });
+                out.push(if chunk.len() > 2 {
+                    TABLE[(n & 0x3f) as usize] as char
+                } else {
+                    '='
+                });
+            }
+            out
+        }
+
+        let rgba = [0x00, 0xff, 0x00, 0xff];
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, &rgba).expect("zlib payload should encode");
+        let compressed = encoder.finish().expect("zlib payload should finish");
+        let payload = base64_encode(&compressed);
+
+        let seq = format!("\x1b_Ga=T,i=15,o=z,f=32,s=1,v=1,c=1,r=1;{payload}\x1b\\");
+        let mut t = Terminal::new(8, 4);
+        t.process(seq.as_bytes());
+
+        let image = t
+            .kitty_image(15)
+            .expect("compressed rgba kitty image should exist");
+        assert_eq!(image.width, 1);
+        assert_eq!(image.height, 1);
+        assert_eq!(image.data, vec![0x00, 0xff, 0x00, 0xff]);
+        assert_eq!(t.kitty_placements.len(), 1);
+    }
+
+    #[test]
+    fn kitty_graphics_compressed_png_upload_decodes_to_rgba() {
+        fn base64_encode(input: &[u8]) -> String {
+            const TABLE: &[u8; 64] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+            for chunk in input.chunks(3) {
+                let b0 = chunk[0];
+                let b1 = *chunk.get(1).unwrap_or(&0);
+                let b2 = *chunk.get(2).unwrap_or(&0);
+                let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
+                out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+                out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+                out.push(if chunk.len() > 1 {
+                    TABLE[((n >> 6) & 0x3f) as usize] as char
+                } else {
+                    '='
+                });
+                out.push(if chunk.len() > 2 {
+                    TABLE[(n & 0x3f) as usize] as char
+                } else {
+                    '='
+                });
+            }
+            out
+        }
+
+        let mut png_bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png_bytes, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("png header should encode");
+            writer
+                .write_image_data(&[0x00, 0x00, 0xff, 0xff])
+                .expect("png image should encode");
+        }
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut z, &png_bytes)
+            .expect("compressed png payload should encode");
+        let compressed = z.finish().expect("compressed png payload should finish");
+        let payload = base64_encode(&compressed);
+
+        let seq = format!("\x1b_Ga=T,i=16,o=z,f=100,c=1,r=1;{payload}\x1b\\");
+        let mut t = Terminal::new(8, 4);
+        t.process(seq.as_bytes());
+
+        let image = t
+            .kitty_image(16)
+            .expect("compressed png kitty image should exist");
+        assert_eq!(image.width, 1);
+        assert_eq!(image.height, 1);
+        assert_eq!(image.data, vec![0x00, 0x00, 0xff, 0xff]);
+        assert_eq!(t.kitty_placements.len(), 1);
     }
 
     #[test]

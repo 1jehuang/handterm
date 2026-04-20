@@ -219,6 +219,8 @@ The current split is good, but not final.
 
 README and OPTIMIZATION have been updated substantially, but any future changes should continue to reflect measured results, not intended architecture.
 
+For now, `HANDTERM_PROFILE_JSON=1` should stay as an **internal opt-in diagnostics aid** rather than a prominently documented README feature. It is useful for safe machine-parsed profiling, but it is not a primary product surface.
+
 ## Current Known Risks / Notes
 
 ### Niri interaction warning
@@ -244,6 +246,8 @@ However, compositor reload behavior should be handled safely and carefully.
 
 If work resumes, the best next task is:
 
-## **focus on safe profiling and optimization of shared-GPU host add-window startup**
+## **focus on compositor-facing measurement and constraints in shared-GPU host add-window startup**
 
 That is the most meaningful remaining path toward the practical theoretical limit.
+
+The latest validated samples suggest handterm-side GPU setup is already relatively small, so future work should not prioritize micro-optimizing local setup unless new measurements show that balance changing.

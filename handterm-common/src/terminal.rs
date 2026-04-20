@@ -35,7 +35,7 @@ pub struct Terminal {
     pub rows: u16,
     pub cursor_visible: bool,
     pub title: Option<String>,
-    dcs_events: Vec<Vec<u8>>,
+    dcs_events: Vec<DcsEvent>,
     sixel_events: Vec<Vec<u8>>,
     response_buf: Vec<u8>,
     saved_cursor: Option<(usize, usize)>,
@@ -112,6 +112,12 @@ pub struct KittyPlacement {
     pub row: usize,
     pub cols: usize,
     pub rows: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DcsEvent {
+    Generic(Vec<u8>),
+    Sixel(Vec<u8>),
 }
 
 pub trait TerminalView {
@@ -272,7 +278,7 @@ impl Terminal {
         self.title.take()
     }
 
-    pub fn take_dcs(&mut self) -> Option<Vec<u8>> {
+    pub fn take_dcs(&mut self) -> Option<DcsEvent> {
         if self.dcs_events.is_empty() {
             None
         } else {
@@ -280,7 +286,7 @@ impl Terminal {
         }
     }
 
-    pub fn drain_dcs(&mut self) -> Vec<Vec<u8>> {
+    pub fn drain_dcs(&mut self) -> Vec<DcsEvent> {
         std::mem::take(&mut self.dcs_events)
     }
 
@@ -1030,10 +1036,13 @@ impl Terminal {
     }
 
     fn dcs_dispatch(&mut self, data: &[u8]) {
-        self.dcs_events.push(data.to_vec());
-        if let Some(payload) = data.strip_prefix(b"q") {
+        let event = if let Some(payload) = data.strip_prefix(b"q") {
             self.sixel_events.push(payload.to_vec());
-        }
+            DcsEvent::Sixel(payload.to_vec())
+        } else {
+            DcsEvent::Generic(data.to_vec())
+        };
+        self.dcs_events.push(event);
     }
 
     fn apc_dispatch(&mut self, data: &[u8]) {
@@ -1913,7 +1922,10 @@ mod tests {
     fn dcs_string_dispatches_without_leaking_text() {
         let mut t = Terminal::new(80, 24);
         t.process(b"\x1bP+q696e646e\x1b\\");
-        assert_eq!(t.take_dcs().as_deref(), Some(b"+q696e646e".as_slice()));
+        assert_eq!(
+            t.take_dcs(),
+            Some(DcsEvent::Generic(b"+q696e646e".to_vec()))
+        );
         for col in 0..80 {
             let ch = t.grid.cell_char(0, col);
             assert!(
@@ -1929,14 +1941,20 @@ mod tests {
     fn dcs_events_are_queued_in_order() {
         let mut t = Terminal::new(80, 24);
         t.process(b"\x1bP+q1111\x1b\\\x1bP+q2222\x1b\\");
-        assert_eq!(t.drain_dcs(), vec![b"+q1111".to_vec(), b"+q2222".to_vec()]);
+        assert_eq!(
+            t.drain_dcs(),
+            vec![
+                DcsEvent::Generic(b"+q1111".to_vec()),
+                DcsEvent::Generic(b"+q2222".to_vec())
+            ]
+        );
     }
 
     #[test]
     fn sixel_dcs_payloads_are_queued_separately() {
         let mut t = Terminal::new(80, 24);
         t.process(b"\x1bPqABC\x1b\\");
-        assert_eq!(t.take_dcs().as_deref(), Some(b"qABC".as_slice()));
+        assert_eq!(t.take_dcs(), Some(DcsEvent::Sixel(b"ABC".to_vec())));
         assert_eq!(t.take_sixel().as_deref(), Some(b"ABC".as_slice()));
     }
 

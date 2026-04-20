@@ -279,6 +279,8 @@ The new CPU-host structured profiling events are useful for the same internal to
 
 The remaining Kitty image `partial*` gaps are no longer the preferred next protocol slice. Handterm now covers the core inline raw/compressed RGB/RGBA/PNG upload-place-delete path, and the remaining gaps are lower-leverage features such as non-inline transports and richer placement/operation parameters.
 
+The broader string-control groundwork is also much healthier now: DCS/OSC/APC all have real ST handling, typed terminal-side event surfaces, and a unified ordered control-string queue. That is a reasonable stopping point for this feature-path pass unless there is a strong reason to push directly into a larger DCS/Sixel feature implementation next.
+
 If work shifts away from daemon/package cleanup and away from Kitty protocol follow-through, the next notable non-Kitty feature gap to evaluate is Sixel support, since it remains one of the clearest missing graphics/protocol capabilities in the feature table.
 
 A first enabling slice is now in place: the parser/terminal path can surface DCS payloads instead of only silently consuming them. Even with that in place, Sixel still does not currently look like the right immediate next slice, because it would need a broader terminal/image-model path beyond this parser plumbing.

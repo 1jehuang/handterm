@@ -4,6 +4,8 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 const STRUCTURED_PROFILE_ENV: &str = "HANDTERM_PROFILE_JSON";
+const STRUCTURED_PROFILE_SCHEMA: &str = "handterm.profile_event";
+const STRUCTURED_PROFILE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProcessCpuTime {
@@ -77,6 +79,8 @@ pub fn structured_profile_enabled() -> bool {
 pub fn structured_profile_event_line(event: &str, data: Value) -> String {
     serde_json::to_string(&json!({
         "type": "handterm_profile",
+        "schema": STRUCTURED_PROFILE_SCHEMA,
+        "schema_version": STRUCTURED_PROFILE_SCHEMA_VERSION,
         "event": event,
         "data": data,
     }))
@@ -140,6 +144,8 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&line).expect("event line should parse as json");
         assert_eq!(parsed["type"], "handterm_profile");
+        assert_eq!(parsed["schema"], "handterm.profile_event");
+        assert_eq!(parsed["schema_version"], 1);
         assert_eq!(parsed["event"], "gpu_host_open_window");
         assert_eq!(parsed["data"]["id"], 2);
     }

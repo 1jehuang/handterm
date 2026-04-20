@@ -35,7 +35,7 @@ pub struct Terminal {
     pub rows: u16,
     pub cursor_visible: bool,
     pub title: Option<String>,
-    last_dcs: Option<Vec<u8>>,
+    dcs_events: Vec<Vec<u8>>,
     response_buf: Vec<u8>,
     saved_cursor: Option<(usize, usize)>,
     mode_bracketed_paste: bool,
@@ -212,7 +212,7 @@ impl Terminal {
             rows,
             cursor_visible: true,
             title: None,
-            last_dcs: None,
+            dcs_events: Vec::new(),
             response_buf: Vec::new(),
             saved_cursor: None,
             mode_bracketed_paste: false,
@@ -271,7 +271,15 @@ impl Terminal {
     }
 
     pub fn take_dcs(&mut self) -> Option<Vec<u8>> {
-        self.last_dcs.take()
+        if self.dcs_events.is_empty() {
+            None
+        } else {
+            Some(self.dcs_events.remove(0))
+        }
+    }
+
+    pub fn drain_dcs(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.dcs_events)
     }
 
     pub fn bracketed_paste_mode(&self) -> bool {
@@ -1008,7 +1016,7 @@ impl Terminal {
     }
 
     fn dcs_dispatch(&mut self, data: &[u8]) {
-        self.last_dcs = Some(data.to_vec());
+        self.dcs_events.push(data.to_vec());
     }
 
     fn apc_dispatch(&mut self, data: &[u8]) {
@@ -1898,6 +1906,13 @@ mod tests {
                 col
             );
         }
+    }
+
+    #[test]
+    fn dcs_events_are_queued_in_order() {
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1bP+q1111\x1b\\\x1bP+q2222\x1b\\");
+        assert_eq!(t.drain_dcs(), vec![b"+q1111".to_vec(), b"+q2222".to_vec()]);
     }
 
     #[test]

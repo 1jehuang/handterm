@@ -240,6 +240,12 @@ That launch-glue isolation is now done, and it is a reasonable stopping point un
 
 If the split continues later, the next smallest safer slice is likely `src/daemon.rs` + `src/server.rs` before tackling `src/client.rs` and the remote frontends, because the remote CPU/GPU frontends still pull in much more windowing/rendering/UI surface area.
 
+Concrete dependencies to plan for in that deeper `src/daemon.rs` + `src/server.rs` move:
+- PTY/process management (`crate::pty::PtyChild`)
+- config/build metadata inputs (`crate::config::AppConfig`, `crate::build_info::protocol_build_id`)
+- font/protocol rendering support still owned by the root crate (`crate::font::{GlyphAtlas, GlyphFormat}`)
+- protocol/common terminal types, which are already much closer to the shared-core boundary
+
 ### 5. Keep docs aligned with measured reality
 
 README and OPTIMIZATION have been updated substantially, but any future changes should continue to reflect measured results, not intended architecture.

@@ -6,6 +6,8 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
+const HOST_SOCKET_ENV: &str = "HANDTERM_HOST_SOCKET";
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request {
     pub cmd: String,
@@ -241,7 +243,21 @@ fn host_socket_name(backend: Backend) -> &'static str {
     }
 }
 
+fn host_socket_override_from(value: Option<&str>) -> Option<PathBuf> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn configured_host_socket_path() -> Option<PathBuf> {
+    host_socket_override_from(std::env::var(HOST_SOCKET_ENV).ok().as_deref())
+}
+
 pub fn default_socket_path_for_backend(backend: Backend) -> PathBuf {
+    if let Some(path) = configured_host_socket_path() {
+        return path;
+    }
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
         .unwrap_or_else(|_| format!("/tmp/handterm-{}", std::process::id()));
     PathBuf::from(runtime_dir).join(host_socket_name(backend))
@@ -252,6 +268,16 @@ pub fn default_socket_path() -> PathBuf {
 }
 
 pub fn find_socket_for_backend(backend: Backend) -> Option<PathBuf> {
+    if let Some(path) = configured_host_socket_path() {
+        if UnixStream::connect(&path).is_ok() {
+            return Some(path);
+        }
+        if path.exists() {
+            std::fs::remove_file(&path).ok();
+        }
+        return None;
+    }
+
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
         .unwrap_or_else(|_| format!("/tmp/handterm-{}", std::process::id()));
     let dir = PathBuf::from(&runtime_dir);
@@ -314,4 +340,24 @@ pub fn send_command(socket_path: &Path, req: &Request) -> Result<Response> {
     let resp: Response =
         serde_json::from_slice(line.trim_ascii()).context("failed to parse response")?;
     Ok(resp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_socket_override_accepts_non_empty_value() {
+        assert_eq!(
+            host_socket_override_from(Some(" /tmp/custom.sock ")),
+            Some(PathBuf::from("/tmp/custom.sock"))
+        );
+    }
+
+    #[test]
+    fn host_socket_override_rejects_empty_values() {
+        assert_eq!(host_socket_override_from(None), None);
+        assert_eq!(host_socket_override_from(Some("")), None);
+        assert_eq!(host_socket_override_from(Some("   ")), None);
+    }
 }

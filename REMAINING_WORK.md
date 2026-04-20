@@ -163,6 +163,7 @@ That should **not** be repeated in the same way.
 
 - replace compositor-heavy benchmarking with safer host-internal instrumentation
 - measure repeated `open-window` calls without opening excessive live windows unnecessarily
+- prefer the new `scripts/profile_gpu_host_json_series.sh` workflow for small machine-parsed GPU-host sample series, because it uses `HANDTERM_PROFILE_JSON=1` plus an isolated host socket instead of compositor-heavy scraping
 - collect:
   - total open-window time
   - window/surface creation time
@@ -175,6 +176,7 @@ That should **not** be repeated in the same way.
 Do **not** hammer `niri msg` in a tight loop.
 Do **not** signal or restart the compositor.
 Do **not** open huge numbers of real windows on the live desktop without explicit need.
+Keep profiling runs to small window counts by default. The new JSON-series script refuses larger runs unless explicitly overridden.
 
 ### 2. Optimize GPU host add-window startup
 

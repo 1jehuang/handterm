@@ -972,11 +972,11 @@ impl Terminal {
                     if let Some(semi2) = payload.iter().position(|&b| b == b';') {
                         let b64_data = &payload[semi2 + 1..];
                         if b64_data != b"?" {
-                            let data = b64_data.to_vec();
-                            self.osc52_clipboard = Some(data.clone());
+                            let clipboard_data = b64_data.to_vec();
+                            self.osc52_clipboard = Some(clipboard_data.clone());
                             event = OscEvent::Clipboard {
                                 raw: data.to_vec(),
-                                data,
+                                data: clipboard_data,
                             };
                         }
                     }

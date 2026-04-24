@@ -39,6 +39,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, NamedKey};
 use winit::window::WindowId as WinitWindowId;
 
+type SharedGpuInitResult = Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)>;
+type SharedGpuInitTask = std::thread::JoinHandle<SharedGpuInitResult>;
+
 #[derive(Debug, Clone)]
 enum GpuAppEvent {
     PtyReadable(u64),
@@ -78,8 +81,7 @@ struct GpuApp {
     config: AppConfig,
     startup_command: Option<String>,
     shared: Option<Arc<SharedGpuContext>>,
-    shared_init_task:
-        Option<std::thread::JoinHandle<Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)>>>,
+    shared_init_task: Option<SharedGpuInitTask>,
     windows: HashMap<WinitWindowId, GpuWindowState>,
     window_ids: HashMap<u64, WinitWindowId>,
     next_window_id: u64,
@@ -194,13 +196,8 @@ impl SyntheticInputTarget for GpuWindowState {
 }
 
 impl GpuApp {
-    fn spawn_shared_init_task()
-    -> std::thread::JoinHandle<Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)>> {
-        std::thread::spawn(
-            || -> Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)> {
-                create_shared_gpu_context_profiled()
-            },
-        )
+    fn spawn_shared_init_task() -> SharedGpuInitTask {
+        std::thread::spawn(|| -> SharedGpuInitResult { create_shared_gpu_context_profiled() })
     }
 
     fn new(
@@ -208,9 +205,7 @@ impl GpuApp {
         startup_command: Option<String>,
         ipc: Option<IpcServer>,
         proxy: EventLoopProxy<GpuAppEvent>,
-        shared_init_task: Option<
-            std::thread::JoinHandle<Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)>>,
-        >,
+        shared_init_task: Option<SharedGpuInitTask>,
     ) -> Self {
         Self {
             config,
@@ -905,41 +900,6 @@ impl GpuApp {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use winit::dpi::PhysicalPosition;
-
-    #[test]
-    fn smooth_pixel_wheel_delta_preserves_fractional_rows() {
-        let config = AppConfig::default();
-        let (_up, delta_rows) = GpuApp::wheel_delta_rows(
-            &config,
-            &MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 4.0)),
-            16.0,
-        );
-
-        assert!(
-            delta_rows > 0.0 && delta_rows < 1.0,
-            "expected fractional smooth scroll delta, got {delta_rows}"
-        );
-    }
-
-    #[test]
-    fn non_smooth_pixel_wheel_delta_still_steps_at_least_one_row() {
-        let mut config = AppConfig::default();
-        config.scrollback.smooth = false;
-
-        let (_up, delta_rows) = GpuApp::wheel_delta_rows(
-            &config,
-            &MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 4.0)),
-            16.0,
-        );
-
-        assert!(delta_rows >= 1.0);
-    }
-}
-
 impl ApplicationHandler<GpuAppEvent> for GpuApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.ensure_initial_window(event_loop);
@@ -1573,4 +1533,39 @@ fn drain_pty(state: &mut GpuWindowState) -> usize {
     }
 
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winit::dpi::PhysicalPosition;
+
+    #[test]
+    fn smooth_pixel_wheel_delta_preserves_fractional_rows() {
+        let config = AppConfig::default();
+        let (_up, delta_rows) = GpuApp::wheel_delta_rows(
+            &config,
+            &MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 4.0)),
+            16.0,
+        );
+
+        assert!(
+            delta_rows > 0.0 && delta_rows < 1.0,
+            "expected fractional smooth scroll delta, got {delta_rows}"
+        );
+    }
+
+    #[test]
+    fn non_smooth_pixel_wheel_delta_still_steps_at_least_one_row() {
+        let mut config = AppConfig::default();
+        config.scrollback.smooth = false;
+
+        let (_up, delta_rows) = GpuApp::wheel_delta_rows(
+            &config,
+            &MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 4.0)),
+            16.0,
+        );
+
+        assert!(delta_rows >= 1.0);
+    }
 }

@@ -109,9 +109,14 @@ impl ControlStringState {
     }
 
     pub fn push_osc(&mut self, event: OscEvent) {
+        let raw_event = match &event {
+            OscEvent::Raw(raw) | OscEvent::Title { raw, .. } | OscEvent::Clipboard { raw, .. } => {
+                OscEvent::Raw(raw.clone())
+            }
+        };
         push_bounded(
             &mut self.control_string_events,
-            ControlStringEvent::Osc(event.clone()),
+            ControlStringEvent::Osc(raw_event),
         );
         push_bounded(&mut self.osc_events, event);
     }

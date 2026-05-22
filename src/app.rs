@@ -35,6 +35,7 @@ use winit::dpi::{LogicalSize, Size};
 use winit::event::{ElementState, Ime, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
+#[cfg(target_os = "linux")]
 use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{ImePurpose, Window, WindowAttributes, WindowId as WinitWindowId};
 
@@ -293,11 +294,15 @@ impl HandtermApp {
         let width = cols as f64 * cell_width as f64;
         let height = rows as f64 * cell_height as f64;
 
-        Window::default_attributes()
+        let attrs = Window::default_attributes()
             .with_title("handterm [cpu host]")
-            .with_name("handterm", "handterm")
             .with_transparent(false)
-            .with_inner_size(Size::Logical(LogicalSize::new(width, height)))
+            .with_inner_size(Size::Logical(LogicalSize::new(width, height)));
+
+        #[cfg(target_os = "linux")]
+        let attrs = attrs.with_name("handterm", "handterm");
+
+        attrs
     }
 
     fn open_window(

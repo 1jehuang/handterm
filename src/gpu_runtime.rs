@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
 use winit::dpi::{LogicalSize, Size};
 use winit::event_loop::ActiveEventLoop;
+#[cfg(target_os = "linux")]
 use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{ImePurpose, Window, WindowAttributes};
 
@@ -644,11 +645,15 @@ pub fn create_window_attributes_for_metrics(
     let width = config.window.columns as f64 * cell_width as f64;
     let height = config.window.rows as f64 * cell_height as f64;
 
-    Window::default_attributes()
+    let attrs = Window::default_attributes()
         .with_title(title)
-        .with_name("handterm", "handterm")
         .with_transparent(transparency_requested(config.style.background_opacity))
-        .with_inner_size(Size::Logical(LogicalSize::new(width, height)))
+        .with_inner_size(Size::Logical(LogicalSize::new(width, height)));
+
+    #[cfg(target_os = "linux")]
+    let attrs = attrs.with_name("handterm", "handterm");
+
+    attrs
 }
 
 pub fn create_shared_gpu_context() -> Result<Arc<SharedGpuContext>> {

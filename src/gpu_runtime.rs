@@ -16,7 +16,6 @@ use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
 use winit::dpi::{LogicalSize, Size};
 use winit::event_loop::ActiveEventLoop;
-use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{ImePurpose, Window, WindowAttributes};
 
 #[repr(C)]
@@ -644,9 +643,7 @@ pub fn create_window_attributes_for_metrics(
     let width = config.window.columns as f64 * cell_width as f64;
     let height = config.window.rows as f64 * cell_height as f64;
 
-    Window::default_attributes()
-        .with_title(title)
-        .with_name("handterm", "handterm")
+    crate::platform::with_app_id(Window::default_attributes().with_title(title), "handterm")
         .with_transparent(transparency_requested(config.style.background_opacity))
         .with_inner_size(Size::Logical(LogicalSize::new(width, height)))
 }
@@ -659,8 +656,18 @@ pub fn create_shared_gpu_context() -> Result<Arc<SharedGpuContext>> {
 pub fn create_shared_gpu_context_profiled() -> Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)>
 {
     let total_start = Instant::now();
+    // Pick the native graphics backend for the platform: Metal on macOS,
+    // Vulkan on Linux/other. Falling back to `Backends::all()` keeps things
+    // working if a platform exposes a different native backend.
+    #[cfg(target_os = "macos")]
+    let backends = wgpu::Backends::METAL;
+    #[cfg(target_os = "linux")]
+    let backends = wgpu::Backends::VULKAN;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let backends = wgpu::Backends::all();
+
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::VULKAN,
+        backends,
         ..Default::default()
     });
 

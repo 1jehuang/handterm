@@ -201,12 +201,18 @@ mod tests {
 
             let mut ready = Vec::new();
             let mut buffer = [0_u8; 1024];
-            let deadline = Instant::now() + Duration::from_secs(2);
+            // Generous deadline: these tests spawn a real PTY and can be starved
+            // when the suite runs many threads in parallel (especially on macOS),
+            // so allow plenty of time for the shell to reach the ready marker.
+            let deadline = Instant::now() + Duration::from_secs(10);
             while Instant::now() < deadline {
                 let n = pty
                     .try_read(&mut buffer)
                     .expect("ready read should succeed");
                 if n == 0 {
+                    // Avoid a busy-spin that hot-loops the CPU and starves other
+                    // parallel test threads; yield briefly between empty reads.
+                    std::thread::sleep(Duration::from_millis(2));
                     continue;
                 }
                 ready.extend_from_slice(&buffer[..n]);

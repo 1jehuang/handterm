@@ -174,7 +174,7 @@ That puts the incremental cost in roughly the **1-2 MB/window** range after the 
 | Kitty keyboard protocol | partial* | ✅ | - | ✅ | ✅ |
 | IPC / remote control | ✅ | - | - | ✅ | - |
 | X11 support | - | - | ✅ | ✅ | ✅ |
-| macOS support | - | - | ✅ | ✅ | ✅ |
+| macOS support | ✅\* | - | ✅ | ✅ | ✅ |
 | Font shaping engine | rustybuzz | harfbuzz | built-in | harfbuzz | harfbuzz |
 | Config format | TOML | INI | TOML | conf | custom |
 | Scrollback (default) | 10,000 | 10,000 | 10,000 | 2,000 | 10,000 |
@@ -297,6 +297,8 @@ handterm @ send-key-event '{"key":"shift","physical_key":"shift_right","kind":"p
 
 ## Install
 
+### Linux (Wayland)
+
 Requires Wayland, FreeType, and Fontconfig.
 
 ```bash
@@ -309,6 +311,42 @@ cargo build --release
 ```
 
 This default build includes both CPU and GPU frontends. Plain local `handterm` now follows the **host path by default**: when a compatible host is already running, repeated launches reuse that host and open another window in the same process instead of spawning a full new renderer process.
+
+### macOS
+
+handterm runs on macOS (Apple Silicon tested) using the GPU renderer on **Metal**
+(via `wgpu`) and a native `winit` window. The terminal core, PTY, IPC remote
+control, and single-process multi-window host all work the same as on Linux.
+
+Install the build/runtime prerequisites with Homebrew:
+
+```bash
+brew install pkg-config freetype fontconfig
+# Recommended default font (matches the bundled config):
+brew install --cask font-jetbrains-mono-nerd-font
+```
+
+Then build, pointing `pkg-config` at the Homebrew FreeType/Fontconfig:
+
+```bash
+export PKG_CONFIG_PATH="$(brew --prefix freetype)/lib/pkgconfig:$(brew --prefix fontconfig)/lib/pkgconfig"
+cargo build --release
+./target/release/handterm
+```
+
+Platform notes:
+
+- Clipboard uses `pbcopy`/`pbpaste`; `open` is used for URLs (instead of
+  `wl-copy`/`wl-paste`/`xdg-open`).
+- Font discovery uses the Homebrew `fontconfig` CLIs (`fc-list`/`fc-match`).
+  Apple's universal `LastResort` placeholder font is intentionally skipped so
+  genuinely missing glyphs are not rendered as labeled boxes.
+- Color-emoji fallback retries across the font's fixed bitmap strikes, since
+  `Apple Color Emoji` ships some glyphs only at larger sizes.
+
+\* macOS support covers the standalone/host GPU path. The Wayland-specific
+window `app_id` is a no-op, and the CPU `softbuffer` backend follows macOS
+presentation semantics.
 
 ### Build with GPU rendering only
 

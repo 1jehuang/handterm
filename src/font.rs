@@ -950,6 +950,52 @@ fn rasterize_fallback_glyph(
     cell_height: usize,
     span_cells: usize,
 ) -> Option<RasterizedGlyph> {
+    if let Some(glyph) =
+        rasterize_fallback_at_current_strike(face, ch, cell_width, cell_height, span_cells)
+    {
+        return Some(glyph);
+    }
+
+    // Color emoji fonts (notably macOS `Apple Color Emoji`) sometimes only ship
+    // bitmap artwork for a given glyph at a subset of their fixed strikes. When
+    // the strike selected for the configured font size has an empty bitmap for
+    // this codepoint, retry at the other available strikes (smallest first) and
+    // let `normalize_fixed_size_glyph` downscale the larger artwork into the
+    // cell. The original strike selection is restored afterwards so ordinary
+    // glyphs keep rendering at the configured size.
+    if !face.has_fixed_sizes() {
+        return None;
+    }
+
+    let original_ppem = face.size_metrics().map(|m| i32::from(m.y_ppem));
+    let mut result = None;
+    for index in fixed_strike_indices_by_ppem(face) {
+        if face.select_size(index).is_err() {
+            continue;
+        }
+        if let Some(glyph) =
+            rasterize_fallback_at_current_strike(face, ch, cell_width, cell_height, span_cells)
+        {
+            result = Some(glyph);
+            break;
+        }
+    }
+
+    if let Some(ppem) = original_ppem {
+        restore_fixed_strike_by_ppem(face, ppem);
+    }
+
+    result
+}
+
+#[cfg(feature = "local-fonts")]
+fn rasterize_fallback_at_current_strike(
+    face: &freetype::Face,
+    ch: u32,
+    cell_width: usize,
+    cell_height: usize,
+    span_cells: usize,
+) -> Option<RasterizedGlyph> {
     let glyph = rasterize_char(face, ch, LoadFlag::RENDER | LoadFlag::COLOR)?;
     Some(normalize_fixed_size_glyph(
         face,
@@ -957,6 +1003,52 @@ fn rasterize_fallback_glyph(
         span_cells.saturating_mul(cell_width).max(1),
         cell_height.max(1),
     ))
+}
+
+/// Fixed-strike indices of a bitmap font, ordered by ascending pixel size so
+/// retries prefer the smallest strike that still contains real artwork (which
+/// requires the least downscaling).
+#[cfg(feature = "local-fonts")]
+fn fixed_strike_indices_by_ppem(face: &freetype::Face) -> Vec<i32> {
+    let raw = face.raw();
+    let count = raw.num_fixed_sizes.max(0) as usize;
+    if count == 0 || raw.available_sizes.is_null() {
+        return Vec::new();
+    }
+    let mut sizes: Vec<(i32, i64)> = (0..count)
+        .map(|index| {
+            let strike = unsafe { *raw.available_sizes.add(index) };
+            (index as i32, strike.y_ppem)
+        })
+        .collect();
+    sizes.sort_by_key(|&(_, ppem)| ppem);
+    sizes.into_iter().map(|(index, _)| index).collect()
+}
+
+/// Re-select the fixed strike whose pixel size is closest to `ppem` (in
+/// pixels), used to restore the configured size after a fallback retry.
+#[cfg(feature = "local-fonts")]
+fn restore_fixed_strike_by_ppem(face: &freetype::Face, ppem: i32) {
+    let raw = face.raw();
+    let count = raw.num_fixed_sizes.max(0) as usize;
+    if count == 0 || raw.available_sizes.is_null() {
+        return;
+    }
+    let target = i64::from(ppem);
+    let mut best_index = 0i32;
+    let mut best_error = i64::MAX;
+    for index in 0..count {
+        let strike = unsafe { *raw.available_sizes.add(index) };
+        // `available_sizes[*].y_ppem` is in 26.6 fixed point; size metrics
+        // report pixels, so divide to compare like-for-like.
+        let strike_ppem = strike.y_ppem / 64;
+        let error = (strike_ppem - target).abs();
+        if error < best_error {
+            best_error = error;
+            best_index = index as i32;
+        }
+    }
+    let _ = face.select_size(best_index);
 }
 
 #[cfg(feature = "local-fonts")]
@@ -1537,6 +1629,16 @@ fn find_emoji_font_paths() -> Result<Vec<String>> {
 
 #[cfg(feature = "local-fonts")]
 fn find_system_fallback_font_path(ch: u32) -> Option<String> {
+    // Prefer `fc-list :charset=<cp>`: it enumerates every font whose charset
+    // actually covers the codepoint. This is more reliable than `fc-match`,
+    // which on macOS frequently returns the universal `LastResort` placeholder
+    // font (covering all codepoints with labeled boxes) even when a real
+    // covering font exists. We skip LastResort so genuinely missing glyphs fall
+    // through to `.notdef`/grapheme handling instead of rendering a box.
+    if let Some(path) = fc_list_charset(ch) {
+        return Some(path);
+    }
+
     let pattern = format!(":charset={ch:x}");
     let output = std::process::Command::new("fc-match")
         .arg(pattern)
@@ -1550,10 +1652,42 @@ fn find_system_fallback_font_path(ch: u32) -> Option<String> {
 
     let path = String::from_utf8(output.stdout).ok()?;
     let path = path.lines().next()?.trim();
-    if path.is_empty() {
+    if path.is_empty() || is_last_resort_font(path) {
         return None;
     }
     Some(path.to_string())
+}
+
+/// Use `fc-list :charset=<cp>` to find a real font covering `ch`, skipping the
+/// universal `LastResort` placeholder font. Returns the first usable path.
+fn fc_list_charset(ch: u32) -> Option<String> {
+    let pattern = format!(":charset={ch:x}");
+    let output = std::process::Command::new("fc-list")
+        .arg(pattern)
+        .arg("file")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8(output.stdout).ok()?;
+    text.lines()
+        .map(|line| line.trim().trim_end_matches(':').trim())
+        .filter(|path| !path.is_empty() && !is_last_resort_font(path))
+        .map(ToString::to_string)
+        .next()
+}
+
+/// Apple's `LastResort` font (and its dotted-name variant) covers the entire
+/// Unicode range with placeholder glyphs, so it must not be used as a genuine
+/// fallback face.
+fn is_last_resort_font(path: &str) -> bool {
+    path.rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .to_ascii_lowercase()
+        .contains("lastresort")
 }
 
 fn should_try_emoji_fallback(ch: u32) -> bool {

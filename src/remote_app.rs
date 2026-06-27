@@ -30,7 +30,6 @@ use winit::dpi::{LogicalSize, Size};
 use winit::event::{ElementState, Ime, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
-use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{ImePurpose, Window, WindowAttributes, WindowId as WinitWindowId};
 
 #[derive(Debug, Clone)]
@@ -130,11 +129,12 @@ impl RemoteHandtermApp {
         let width = self.config.window.columns as f64 * f64::from(metrics.cell_width.max(1));
         let height = self.config.window.rows as f64 * f64::from(metrics.cell_height.max(1));
 
-        Window::default_attributes()
-            .with_title("handterm [cpu remote]")
-            .with_name("handterm", "handterm")
-            .with_transparent(false)
-            .with_inner_size(Size::Logical(LogicalSize::new(width, height)))
+        crate::platform::with_app_id(
+            Window::default_attributes().with_title("handterm [cpu remote]"),
+            "handterm",
+        )
+        .with_transparent(false)
+        .with_inner_size(Size::Logical(LogicalSize::new(width, height)))
     }
 }
 

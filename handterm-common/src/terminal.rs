@@ -1835,7 +1835,10 @@ mod tests {
         assert_eq!(
             t.drain_control_strings(),
             vec![
-                ControlStringEvent::Osc(OscEvent::Raw(b"0;Title".to_vec())),
+                ControlStringEvent::Osc(OscEvent::Title {
+                    raw: b"0;Title".to_vec(),
+                    title: "Title".to_string(),
+                }),
                 ControlStringEvent::Dcs(DcsEvent::Generic(b"+q12".to_vec())),
                 ControlStringEvent::Apc(ApcEvent::KittyGraphics(b"i=7,a=d".to_vec())),
             ]
@@ -1865,7 +1868,7 @@ mod tests {
         assert_eq!(
             t.take_osc(),
             Some(OscEvent::Clipboard {
-                raw: b"52;c;Zm9v".to_vec(),
+                raw: b"Zm9v".to_vec(),
                 data: b"Zm9v".to_vec(),
             })
         );

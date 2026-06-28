@@ -1,2 +1,4 @@
+*.json
 *.raw.txt
 compare_live.txt
+!baseline.json

@@ -23,17 +23,45 @@ The biggest architectural lesson from the current implementation is that **share
 
 ## macOS (Apple Silicon, Metal) measured state
 
-On macOS the shared-GPU host is the default/only GUI path (Metal via wgpu). Live
-`phys_footprint` on an Apple Silicon laptop, idle single window:
+On macOS the shared-GPU host is the default/only GUI path (Metal via wgpu).
 
-| Terminal | Single idle window |
-|----------|-------------------:|
-| **handterm (GPU host)** | **~66-71 MB** |
-| Ghostty 1.3.1 | ~130 MB |
-| kitty 0.47 | ~182 MB |
+### Three-way comparison vs Ghostty 1.3.1 and kitty 0.47
 
-handterm already wins single-window footprint vs both. The two open macOS-specific
-gaps are:
+Measured on an Apple Silicon laptop with `scripts/cross_terminal_bench.sh` (memory),
+self-timing PTY payloads (throughput), and launch-to-shell timing (startup):
+
+| Metric | handterm | Ghostty | kitty | winner |
+|--------|---------:|--------:|------:|--------|
+| Memory, single window (phys_footprint) | **~39 MB** | ~130 MB | ~161 MB | handterm 3-4x |
+| Memory, per extra window | **~+11 MB** | shared | ~+63 MB | handterm |
+| Startup, cold launch -> shell | **~83 ms** | ~201 ms | ~208 ms | handterm 2.4x |
+| Throughput, realistic 80-col lines | **~242 MB/s** | ~91 MB/s | ~120 MB/s | handterm 2-2.6x |
+| Throughput, pathological 1-char lines (`yes`) | ~28 MB/s | **~51 MB/s** | ~15 MB/s | Ghostty (handterm beats kitty) |
+
+handterm wins every realistic metric. The single case it loses is a pathological
+scroll storm (`yes`-style output: one character then a newline, forcing a full
+scroll on every other byte). Profiling shows `Grid::scroll_up` is ~73% of that
+workload, dominated by the per-line scrollback copy (~1.9 KB) plus blanking the
+recycled row (~1.9 KB). Throughput climbs steeply with line length and is already
+far ahead of both competitors by ~10-char lines:
+
+| line length | handterm scroll throughput |
+|------------:|---------------------------:|
+| 1 char | ~34 MB/s |
+| 10 chars | ~133 MB/s |
+| 40 chars | ~246 MB/s |
+| 79 chars | ~298 MB/s |
+
+Closing the 1-char worst case to also beat Ghostty there requires a unified
+ring-buffer grid (active screen + scrollback sharing one ring so a scroll is a
+pointer advance with no per-line copy). That is a large, higher-risk refactor of
+the terminal core (101 covering tests, plus selection/resize/alt-screen
+interactions) and is deferred rather than risk silent scrollback corruption for a
+pathological-only case.
+
+### Remaining macOS-specific gaps
+
+The two open macOS-specific gaps are:
 
 - **Per-additional-window scaling is ~+10 MB/window on macOS** after fixing a
   window auto-grow bug (was ~+30 MB/window). Root cause: on a multi-display setup

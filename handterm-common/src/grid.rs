@@ -558,6 +558,23 @@ impl Grid {
         self.scrollback_graphemes.len()
     }
 
+    /// Approximate heap bytes retained by the scrollback ring: the cell array
+    /// plus the (lazily allocated) parallel grapheme ring and any boxed cluster
+    /// strings it points at. For pure ASCII/BMP output the grapheme ring stays
+    /// empty, so this reports only the dense cell array.
+    #[allow(dead_code)]
+    pub fn scrollback_memory_bytes(&self) -> usize {
+        let cell_bytes = self.scrollback.capacity() * std::mem::size_of::<Cell>();
+        let ring_bytes =
+            self.scrollback_graphemes.capacity() * std::mem::size_of::<Option<Box<str>>>();
+        let string_bytes: usize = self
+            .scrollback_graphemes
+            .iter()
+            .filter_map(|g| g.as_ref().map(|s| s.len()))
+            .sum();
+        cell_bytes + ring_bytes + string_bytes
+    }
+
     pub fn cell_at_scrollback_offset(&self, scroll_offset: usize, row: usize, col: usize) -> &Cell {
         if scroll_offset == 0 {
             return self.cell_at(row, col);
@@ -1752,5 +1769,33 @@ mod tests {
         assert_eq!(g.cell_char(0, 0), 'h');
         assert_eq!(g.cell_grapheme_at(0, 0), None);
         assert_eq!(g.cell_grapheme_at(0, 1), None);
+    }
+
+    #[test]
+    fn full_ascii_scrollback_keeps_grapheme_ring_unallocated() {
+        // Fill a full 10k-line, 80-col scrollback with pure ASCII and confirm
+        // the parallel grapheme ring is never allocated. Old behavior eagerly
+        // grew scrollback_graphemes to match scrollback (16 bytes/cell), i.e.
+        // ~12.8 MB for this geometry; the lazy ring keeps that at zero.
+        let cols = 80usize;
+        let lines = super::DEFAULT_SCROLLBACK_MAX;
+        let mut g = Grid::new(cols as u16, 2, [0xff; 3], [0; 3]);
+        for _ in 0..(lines + 50) {
+            g.write_bytes(b"x\r\n");
+        }
+        assert_eq!(g.scrollback_len(), lines);
+        assert_eq!(
+            g.scrollback_graphemes_capacity(),
+            0,
+            "ASCII-only scrollback must not allocate the grapheme ring"
+        );
+        let option_box_bytes = std::mem::size_of::<Option<Box<str>>>();
+        let saved = lines * cols * option_box_bytes;
+        assert!(
+            saved >= 12_000_000,
+            "expected the lazy ring to avoid >=12MB, computed {saved} bytes"
+        );
+        // The dense cell array is still retained, as expected.
+        assert!(g.scrollback_memory_bytes() >= lines * cols);
     }
 }

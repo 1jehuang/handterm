@@ -545,7 +545,9 @@ impl Terminal {
                                     self.grid.write_bytes(&data[run_start..i]);
                                 }
                                 i += 1;
-                                self.handle_action(next_action);
+                                if !matches!(next_action, Action::Nop) {
+                                    self.handle_action(next_action);
+                                }
                                 break;
                             }
                         }
@@ -559,7 +561,9 @@ impl Terminal {
                     }
                 }
                 _ => {
-                    self.handle_action(action);
+                    if !matches!(action, Action::Nop) {
+                        self.handle_action(action);
+                    }
                 }
             }
         }
@@ -572,6 +576,23 @@ impl Terminal {
             self.charset_g1
         };
         cs == Charset::DecSpecialGraphics
+    }
+
+    /// Copy the parser's current CSI params into a fixed-size stack array.
+    ///
+    /// The private-mode set/reset handlers (`CSI ? Pm h/l`) need to iterate the
+    /// params while also mutating `self`, which conflicts with borrowing the
+    /// parser's slice. Copying onto the stack avoids both the borrow conflict
+    /// and the per-call heap allocation that `params().to_vec()` incurred on
+    /// this steady-state path (mode toggles like `?25h`/`?25l` are extremely
+    /// common in interactive output).
+    #[inline]
+    fn copy_params(&self) -> ([u16; crate::parser::MAX_PARAMS], usize) {
+        let params = self.parser.params();
+        let mut out = [0u16; crate::parser::MAX_PARAMS];
+        let n = params.len();
+        out[..n].copy_from_slice(params);
+        (out, n)
     }
 
     fn write_bytes_translated(&mut self, bytes: &[u8]) {
@@ -745,8 +766,8 @@ impl Terminal {
             }
             // Private mode set
             (b'?', b'h') => {
-                let params: Vec<u16> = self.parser.params().to_vec();
-                for param in &params {
+                let (params, n) = self.copy_params();
+                for param in &params[..n] {
                     match param {
                         1 => self.application_cursor_keys = true,
                         7 => self.grid.autowrap = true,
@@ -772,8 +793,8 @@ impl Terminal {
             }
             // Private mode reset
             (b'?', b'l') => {
-                let params: Vec<u16> = self.parser.params().to_vec();
-                for param in &params {
+                let (params, n) = self.copy_params();
+                for param in &params[..n] {
                     match param {
                         1 => self.application_cursor_keys = false,
                         7 => self.grid.autowrap = false,
@@ -1548,6 +1569,27 @@ mod tests {
         assert!(t.application_cursor_keys);
         t.process(b"\x1b[?1l");
         assert!(!t.application_cursor_keys);
+    }
+
+    #[test]
+    fn combined_private_mode_set_applies_all_params() {
+        // A single CSI ? Pm h with several params must toggle every mode,
+        // exercising the no-alloc stack `copy_params` path with n > 1.
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[?25l"); // hide cursor first so we can observe it flip back
+        assert!(!t.cursor_visible);
+
+        t.process(b"\x1b[?25;7;1;2004h");
+        assert!(t.cursor_visible, "DECTCEM show");
+        assert!(t.grid.autowrap, "autowrap on");
+        assert!(t.application_cursor_keys, "app cursor keys on");
+        assert!(t.bracketed_paste_mode(), "bracketed paste on");
+
+        t.process(b"\x1b[?25;7;1;2004l");
+        assert!(!t.cursor_visible);
+        assert!(!t.grid.autowrap);
+        assert!(!t.application_cursor_keys);
+        assert!(!t.bracketed_paste_mode());
     }
 
     #[test]

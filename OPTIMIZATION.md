@@ -21,6 +21,39 @@ Goal: reach the theoretical minimum resource usage for a Wayland terminal emulat
 
 The biggest architectural lesson from the current implementation is that **shared-GPU single-process hosting** is the strongest path toward the theoretical per-window floor. CPU host mode improved a lot, but it runs into a hard Wayland/softbuffer SHM ceiling. GPU host mode pays a large fixed first-window cost, then scales at roughly **1-2 MB per extra window**.
 
+## macOS (Apple Silicon, Metal) measured state
+
+On macOS the shared-GPU host is the default/only GUI path (Metal via wgpu). Live
+`phys_footprint` on an Apple Silicon laptop, idle single window:
+
+| Terminal | Single idle window |
+|----------|-------------------:|
+| **handterm (GPU host)** | **~66-71 MB** |
+| Ghostty 1.3.1 | ~130 MB |
+| kitty 0.47 | ~182 MB |
+
+handterm already wins single-window footprint vs both. The two open macOS-specific
+gaps are:
+
+- **Per-additional-window scaling is ~+30-37 MB/window on macOS** (vs ~1-2 MB on
+  Linux). The dominant cost is the Metal drawable/IOSurface, which on a 2x Retina
+  display is sized to the full backing store (e.g. 2880x1584). winit on macOS
+  reports the window at the native backing scale regardless of whether the inner
+  size is requested logically or physically, so simply requesting a physical inner
+  size does not shrink the drawable. Closing this needs a genuinely smaller backing
+  surface (e.g. rendering at a capped/internal resolution, or a content scale
+  override), which is the top remaining macOS memory target.
+- First-window startup (~48 ms `open_to_first_present`) and added-window startup
+  (~14 ms) are dominated by shared GPU adapter/atlas bring-up, not font discovery
+  or DPI probing, so those are the next startup levers rather than per-window glue.
+
+The deterministic logic pipeline (`scripts/bench_capture.sh`) is far from its
+memcpy ceiling and is the most productive optimization surface: a parallel
+optimization pass landed measurable, regression-free wins across the parser, grid,
+terminal, GPU frame-prep, CPU renderer, input encoding, and protocol codec layers
+while growing automated coverage from 118 to 240+ tests.
+
+
 ## Implemented
 
 - Shared frontend scheduling/input/IPC helpers were extracted so the CPU and GPU frontends are less duplicated.

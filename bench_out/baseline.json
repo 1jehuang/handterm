@@ -1,0 +1,144 @@
+{
+  "label": "baseline",
+  "timestamp": "2026-06-28T07:25:06.203246Z",
+  "metrics": {
+    "memcpy_mb_s": {
+      "value": 18664.0,
+      "median": 18047.0,
+      "n": 5,
+      "better": "max"
+    },
+    "byte_scan_mb_s": {
+      "value": 7599.0,
+      "median": 7492.0,
+      "n": 5,
+      "better": "max"
+    },
+    "parser_ascii_mb_s": {
+      "value": 922.0,
+      "median": 920.0,
+      "n": 5,
+      "better": "max"
+    },
+    "parser_sgr_mb_s": {
+      "value": 616.0,
+      "median": 610.0,
+      "n": 5,
+      "better": "max"
+    },
+    "parser_mixed_mb_s": {
+      "value": 587.0,
+      "median": 573.0,
+      "n": 5,
+      "better": "max"
+    },
+    "grid_ascii_mb_s": {
+      "value": 326.6,
+      "median": 325.2,
+      "n": 5,
+      "better": "max"
+    },
+    "grid_utf8_mb_s": {
+      "value": 236.3,
+      "median": 235.2,
+      "n": 5,
+      "better": "max"
+    },
+    "grid_sgr_mb_s": {
+      "value": 293.9,
+      "median": 292.4,
+      "n": 5,
+      "better": "max"
+    },
+    "terminal_ascii_mb_s": {
+      "value": 292.8,
+      "median": 291.7,
+      "n": 5,
+      "better": "max"
+    },
+    "terminal_sgr_mb_s": {
+      "value": 243.2,
+      "median": 237.0,
+      "n": 5,
+      "better": "max"
+    },
+    "terminal_mixed_mb_s": {
+      "value": 258.6,
+      "median": 251.0,
+      "n": 5,
+      "better": "max"
+    },
+    "gpu_cell_fill_mcells_s": {
+      "value": 216.7,
+      "median": 213.8,
+      "n": 5,
+      "better": "max"
+    },
+    "gpu_text_batch_mcells_s": {
+      "value": 82.7,
+      "median": 82.5,
+      "n": 5,
+      "better": "max"
+    },
+    "gpu_prompt_fps": {
+      "value": 35897.0,
+      "median": 35533.0,
+      "n": 5,
+      "better": "max"
+    },
+    "gpu_tui_fps": {
+      "value": 260598.0,
+      "median": 259747.0,
+      "n": 5,
+      "better": "max"
+    },
+    "cpu_full_redraw_fps": {
+      "value": 1412.0,
+      "median": 1398.0,
+      "n": 5,
+      "better": "max"
+    },
+    "cpu_incremental_fps": {
+      "value": 145181.0,
+      "median": 139923.0,
+      "n": 5,
+      "better": "max"
+    },
+    "cpu_prompt_fps": {
+      "value": 16799.0,
+      "median": 16534.0,
+      "n": 5,
+      "better": "max"
+    },
+    "cpu_tui_fps": {
+      "value": 114142.0,
+      "median": 111631.0,
+      "n": 5,
+      "better": "max"
+    },
+    "protocol_msg_s": {
+      "value": 19965898.0,
+      "median": 18744880.0,
+      "n": 5,
+      "better": "max"
+    },
+    "cell_size_bytes": {
+      "value": 24.0,
+      "median": 24.0,
+      "n": 5,
+      "better": "min"
+    },
+    "cell_write_ns": {
+      "value": 3.5,
+      "median": 3.5,
+      "n": 5,
+      "better": "min"
+    },
+    "scrollback_10k_kb": {
+      "value": 18750.0,
+      "median": 18750.0,
+      "n": 5,
+      "better": "min"
+    }
+  }
+}

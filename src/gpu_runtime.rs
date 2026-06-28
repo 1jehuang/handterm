@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
-use winit::dpi::{LogicalSize, Size};
+use winit::dpi::{PhysicalSize, Size};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{ImePurpose, Window, WindowAttributes};
 
@@ -640,12 +640,27 @@ pub fn create_window_attributes_for_metrics(
     cell_height: usize,
     title: &str,
 ) -> WindowAttributes {
+    // `cell_width`/`cell_height` are already in *physical* pixels: they come
+    // from rasterizing the font at the display DPI (`font_size_pt * dpi / 72`).
+    // The window inner size must therefore be requested in physical pixels.
+    //
+    // Using `Size::Logical` here was a latent bug on HiDPI displays: winit
+    // multiplies a logical size by the monitor scale factor, so on a 2x retina
+    // Mac an 80x24 grid produced a 4x-too-large surface (e.g. 2880x1584 instead
+    // of 1440x792). Each Metal drawable is sized to that surface, and wgpu keeps
+    // two of them per window, so the bug quadrupled the dominant per-window GPU
+    // memory cost (IOSurface drawables ~= 2 * width * height * 4 bytes). On
+    // scale-factor-1 platforms (typical Linux) logical and physical coincide, so
+    // the bug was invisible there and only inflated macOS per-window footprint.
     let width = config.window.columns as f64 * cell_width as f64;
     let height = config.window.rows as f64 * cell_height as f64;
 
     crate::platform::with_app_id(Window::default_attributes().with_title(title), "handterm")
         .with_transparent(transparency_requested(config.style.background_opacity))
-        .with_inner_size(Size::Logical(LogicalSize::new(width, height)))
+        .with_inner_size(Size::Physical(PhysicalSize::new(
+            width.round().max(1.0) as u32,
+            height.round().max(1.0) as u32,
+        )))
 }
 
 pub fn create_shared_gpu_context() -> Result<Arc<SharedGpuContext>> {
@@ -2607,6 +2622,38 @@ mod tests {
         assert_eq!(config.format, wgpu::TextureFormat::Bgra8Unorm);
         assert_eq!(config.present_mode, wgpu::PresentMode::Fifo);
         assert_eq!(config.alpha_mode, wgpu::CompositeAlphaMode::PostMultiplied);
+    }
+
+    #[test]
+    fn window_inner_size_is_requested_in_physical_pixels() {
+        // The cell metrics are already physical pixels (rasterized at display
+        // DPI). Requesting the window size in physical pixels keeps the GPU
+        // surface exactly grid-sized; requesting it as logical would let winit
+        // re-multiply by the HiDPI scale factor and quadruple drawable memory on
+        // a 2x display. Pinning the request as `Size::Physical` guards that.
+        let mut config = AppConfig::default();
+        config.window.columns = 80;
+        config.window.rows = 24;
+        let cell_width = 18;
+        let cell_height = 33;
+
+        let attrs = create_window_attributes_for_metrics(&config, cell_width, cell_height, "t");
+        let inner = attrs.inner_size.expect("inner size should be set");
+
+        match inner {
+            Size::Physical(size) => {
+                assert_eq!(size.width, (80 * cell_width) as u32);
+                assert_eq!(size.height, (24 * cell_height) as u32);
+            }
+            Size::Logical(other) => panic!("expected physical inner size, got logical {other:?}"),
+        }
+
+        // Independent of any scale factor, the physical request is constant, so
+        // the Metal drawable surface (and thus per-window IOSurface memory)
+        // stays proportional to the grid rather than the grid times scale^2.
+        let physical: winit::dpi::PhysicalSize<u32> = inner.to_physical(2.0);
+        assert_eq!(physical.width, (80 * cell_width) as u32);
+        assert_eq!(physical.height, (24 * cell_height) as u32);
     }
 
     #[test]

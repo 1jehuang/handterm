@@ -107,21 +107,36 @@ pub fn render_terminal_to_buffer(
             }
 
             let cell = grid.cell_at_scroll(row, col);
-            let has_custom_bg = cell.bg != COLOR_DEFAULT;
-            let is_dirty = grid.is_cell_dirty(row, col);
 
-            if !full_redraw && !is_cursor && !has_custom_bg && !is_dirty {
-                continue;
+            if !full_redraw {
+                let has_custom_bg = cell.bg != COLOR_DEFAULT;
+                let is_dirty = grid.is_cell_dirty(row, col);
+                if !is_cursor && !has_custom_bg && !is_dirty {
+                    continue;
+                }
             }
 
             let is_cursor_block = is_cursor && cursor_style == CursorStyle::Block;
+
+            // Fast path: on a full redraw the whole buffer was already cleared to
+            // `base_bg`, and a default-background cell with no inverse attribute,
+            // no selection, and no block cursor resolves to exactly `base_bg`. Such
+            // cells need no work at all, so skip the color resolve, selection test,
+            // and fill. This is the overwhelmingly common case for typical content.
+            if full_redraw
+                && !is_cursor_block
+                && selection.is_none()
+                && cell.bg == COLOR_DEFAULT
+                && cell.attrs & crate::grid::ATTR_INVERSE == 0
+            {
+                continue;
+            }
+
             let selected = is_in_selection(selection, row, col);
             let colors = resolve_cell_colors(cell, base_fg, base_bg, is_cursor_block, selected);
 
-            // On a full redraw the whole buffer was already cleared to `base_bg`
-            // above, so re-filling cells whose background equals `base_bg` is pure
-            // duplicate work (an entire framebuffer's worth of writes for typical
-            // default-background content). Only paint cells that actually differ.
+            // For cells that survive the fast path on a full redraw, only paint a
+            // background that actually differs from the already-cleared `base_bg`.
             // For incremental redraws the buffer persists between frames, so dirty
             // cells must always be repainted to clear their previous contents.
             if !full_redraw || colors.bg != base_bg {

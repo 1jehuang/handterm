@@ -118,7 +118,15 @@ pub fn render_terminal_to_buffer(
             let selected = is_in_selection(selection, row, col);
             let colors = resolve_cell_colors(cell, base_fg, base_bg, is_cursor_block, selected);
 
-            atlas.draw_bg(buffer, buf_w, buf_h, col, row, colors.bg);
+            // On a full redraw the whole buffer was already cleared to `base_bg`
+            // above, so re-filling cells whose background equals `base_bg` is pure
+            // duplicate work (an entire framebuffer's worth of writes for typical
+            // default-background content). Only paint cells that actually differ.
+            // For incremental redraws the buffer persists between frames, so dirty
+            // cells must always be repainted to clear their previous contents.
+            if !full_redraw || colors.bg != base_bg {
+                atlas.draw_bg(buffer, buf_w, buf_h, col, row, colors.bg);
+            }
         }
     }
 

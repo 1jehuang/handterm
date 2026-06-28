@@ -1436,6 +1436,16 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                                 viewport_scroll,
                             );
                             state.first_frame_logged = true;
+                            // The initial window size was clamped on macOS to stop
+                            // AppKit from auto-growing the fresh window to fill the
+                            // display (which would inflate the GPU drawables). Now
+                            // that the first frame is up at the intended grid size,
+                            // lift the cap so the window is freely resizable again.
+                            #[cfg(target_os = "macos")]
+                            state
+                                .renderer
+                                .window
+                                .set_max_inner_size(None::<winit::dpi::PhysicalSize<u32>>);
                             if let Some(rp) = render_profile {
                                 let open_to_present = state
                                     .open_window_start

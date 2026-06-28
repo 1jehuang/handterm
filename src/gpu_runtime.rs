@@ -646,21 +646,29 @@ pub fn create_window_attributes_for_metrics(
     //
     // Using `Size::Logical` here was a latent bug on HiDPI displays: winit
     // multiplies a logical size by the monitor scale factor, so on a 2x retina
-    // Mac an 80x24 grid produced a 4x-too-large surface (e.g. 2880x1584 instead
-    // of 1440x792). Each Metal drawable is sized to that surface, and wgpu keeps
-    // two of them per window, so the bug quadrupled the dominant per-window GPU
-    // memory cost (IOSurface drawables ~= 2 * width * height * 4 bytes). On
-    // scale-factor-1 platforms (typical Linux) logical and physical coincide, so
-    // the bug was invisible there and only inflated macOS per-window footprint.
+    // Mac an 80x24 grid produced a 4x-too-large surface. On scale-factor-1
+    // platforms (typical Linux) logical and physical coincide, so the bug was
+    // invisible there and only inflated macOS per-window footprint.
     let width = config.window.columns as f64 * cell_width as f64;
     let height = config.window.rows as f64 * cell_height as f64;
 
-    crate::platform::with_app_id(Window::default_attributes().with_title(title), "handterm")
+    let inner = PhysicalSize::new(width.round().max(1.0) as u32, height.round().max(1.0) as u32);
+    let attrs = crate::platform::with_app_id(Window::default_attributes().with_title(title), "handterm")
         .with_transparent(transparency_requested(config.style.background_opacity))
-        .with_inner_size(Size::Physical(PhysicalSize::new(
-            width.round().max(1.0) as u32,
-            height.round().max(1.0) as u32,
-        )))
+        .with_inner_size(Size::Physical(inner));
+
+    // On macOS, AppKit otherwise grows a freshly created window to fill the
+    // display it lands on (observed: an 80x24 request settling at the full
+    // monitor height). The GPU swapchain drawables are sized to the *actual*
+    // window, so that auto-grow inflated the dominant per-window memory cost
+    // (two ~13 MB IOSurfaces instead of two ~4.5 MB ones). Clamp the initial
+    // max size to the requested grid size to defeat the auto-grow. The cap is
+    // lifted again once the first frame is presented (see gpu_app), so the
+    // window stays freely resizable in steady state.
+    #[cfg(target_os = "macos")]
+    let attrs = attrs.with_max_inner_size(Size::Physical(inner));
+
+    attrs
 }
 
 pub fn create_shared_gpu_context() -> Result<Arc<SharedGpuContext>> {
@@ -2654,6 +2662,33 @@ mod tests {
         let physical: winit::dpi::PhysicalSize<u32> = inner.to_physical(2.0);
         assert_eq!(physical.width, (80 * cell_width) as u32);
         assert_eq!(physical.height, (24 * cell_height) as u32);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn window_max_inner_size_is_clamped_to_grid_on_macos() {
+        // On macOS the freshly created window is otherwise auto-grown by AppKit
+        // to fill its display, which inflates the GPU swapchain drawables. The
+        // attributes clamp the initial max size to the requested grid size so the
+        // window opens grid-sized; gpu_app lifts the cap after the first frame so
+        // the window remains resizable.
+        let mut config = AppConfig::default();
+        config.window.columns = 80;
+        config.window.rows = 24;
+        let cell_width = 18;
+        let cell_height = 33;
+
+        let attrs = create_window_attributes_for_metrics(&config, cell_width, cell_height, "t");
+        let max = attrs
+            .max_inner_size
+            .expect("max inner size should be set on macOS");
+        match max {
+            Size::Physical(size) => {
+                assert_eq!(size.width, (80 * cell_width) as u32);
+                assert_eq!(size.height, (24 * cell_height) as u32);
+            }
+            Size::Logical(other) => panic!("expected physical max inner size, got {other:?}"),
+        }
     }
 
     #[test]

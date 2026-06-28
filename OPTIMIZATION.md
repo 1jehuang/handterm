@@ -35,15 +35,20 @@ On macOS the shared-GPU host is the default/only GUI path (Metal via wgpu). Live
 handterm already wins single-window footprint vs both. The two open macOS-specific
 gaps are:
 
-- **Per-additional-window scaling is ~+30-37 MB/window on macOS** (vs ~1-2 MB on
-  Linux). The dominant cost is the Metal drawable/IOSurface, which on a 2x Retina
-  display is sized to the full backing store (e.g. 2880x1584). winit on macOS
-  reports the window at the native backing scale regardless of whether the inner
-  size is requested logically or physically, so simply requesting a physical inner
-  size does not shrink the drawable. Closing this needs a genuinely smaller backing
-  surface (e.g. rendering at a capped/internal resolution, or a content scale
-  override), which is the top remaining macOS memory target.
-- First-window startup (~48 ms `open_to_first_present`) and added-window startup
+- **Per-additional-window scaling is ~+10 MB/window on macOS** after fixing a
+  window auto-grow bug (was ~+30 MB/window). Root cause: on a multi-display setup
+  AppKit grows a freshly created window to fill the display it lands on (an 80x24
+  request was observed settling at the full external-monitor height, e.g. a
+  1608x2082 drawable instead of 1440x792). The Metal swapchain drawables are sized
+  to the *actual* window, so the auto-grow tripled the dominant per-window cost
+  (two ~13 MB IOSurfaces vs two ~4.5 MB ones). Fixed by clamping the initial
+  `max_inner_size` to the requested grid size and lifting the clamp after the
+  first frame, so the window opens grid-sized but stays freely resizable. The
+  remaining ~+10 MB/window is the legitimate cost of two grid-sized Retina
+  drawables plus per-window terminal/render state. Measured first-window
+  footprint dropped ~65 MB -> ~39 MB and 3-window ~125 MB -> ~59 MB in the
+  auto-grow case.
+- First-window startup (~40 ms `open_to_first_present`) and added-window startup
   (~14 ms) are dominated by shared GPU adapter/atlas bring-up, not font discovery
   or DPI probing, so those are the next startup levers rather than per-window glue.
 

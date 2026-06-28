@@ -64,3 +64,12 @@ tempfile = "3.15.0"
 lto = true
 strip = true
 codegen-units = 1
+
+# Fast iteration profile for the optimization swarm: optimized enough to be
+# representative for hot-path microbenchmarks, but builds far faster than the
+# full LTO release profile. Final benchmark gating still uses `--release`.
+[profile.quick]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = false

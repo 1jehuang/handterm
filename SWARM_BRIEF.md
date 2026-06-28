@@ -12,10 +12,13 @@ terminal in Rust) for **performance and resource efficiency on macOS (Apple Sili
    - `cargo test --workspace` must stay green (currently 118 passing).
    - `cargo build --release` must succeed.
 3. **Prove every win with numbers.** Use the deterministic gate:
-   - `cargo build --release` then `./scripts/bench_capture.sh before 5`
-   - make changes
-   - `cargo build --release` then `./scripts/bench_capture.sh after 5`
+   - Build fast while iterating with the **quick** profile (optimized, no LTO, ~4s
+     incremental): `cargo build --profile quick`
+   - `./scripts/bench_capture.sh before 5` (auto-detects target/quick or target/release)
+   - make changes, rebuild, `./scripts/bench_capture.sh after 5`
    - compare `bench_out/before.json` vs `bench_out/after.json`.
+   - For your FINAL numbers, rebuild with full `cargo build --release` and
+     re-run `bench_capture.sh` so the reported win reflects the shipping profile.
    Only keep changes that show a real, repeatable improvement (or pure memory/no-regression).
 4. **Add automated coverage** for any new logic (unit tests in the same crate).
 5. **Commit to your own branch** with clear messages. Do NOT push. Do NOT merge.

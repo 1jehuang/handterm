@@ -18,7 +18,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LABEL="${1:-baseline}"
 REPEATS="${2:-5}"
-HANDTERM_BIN="${HANDTERM_BIN:-$ROOT/target/release/handterm}"
+# HANDTERM_BIN may be overridden; otherwise default to the release binary, but
+# fall back to the quick-profile binary if that is what exists (faster iteration).
+if [[ -n "${HANDTERM_BIN:-}" ]]; then
+  :
+elif [[ -x "$ROOT/target/release/handterm" ]]; then
+  HANDTERM_BIN="$ROOT/target/release/handterm"
+elif [[ -x "$ROOT/target/quick/handterm" ]]; then
+  HANDTERM_BIN="$ROOT/target/quick/handterm"
+else
+  HANDTERM_BIN="$ROOT/target/release/handterm"
+fi
 OUT_DIR="${BENCH_OUT_DIR:-$ROOT/bench_out}"
 mkdir -p "$OUT_DIR"
 

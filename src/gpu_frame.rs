@@ -1,6 +1,6 @@
 use crate::frontend::{ViewportScroll, compute_scrollbar_geometry};
 use crate::terminal::{CursorStyle, KittyPlacement, TerminalView};
-use crate::visual::{is_in_selection, resolve_cell_colors, resolve_underline_color};
+use crate::visual::{resolve_cell_colors, resolve_underline_color};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -144,19 +144,47 @@ pub(crate) fn fill_cell_infos_with_scroll(
     let cursor_style = terminal.cursor_style();
     let selection = grid.selection;
     let visible_rows = grid.rows + viewport_scroll.extra_visible_rows();
+    let sample_offset = viewport_scroll.sample_offset;
+
+    // Normalize the selection rectangle once instead of re-normalizing it for
+    // every cell inside `is_in_selection`. We then reduce per-row work to a
+    // simple inclusive column interval test.
+    let norm_sel = selection.map(|sel| {
+        if sel.start_row < sel.end_row
+            || (sel.start_row == sel.end_row && sel.start_col <= sel.end_col)
+        {
+            (sel.start_row, sel.start_col, sel.end_row, sel.end_col)
+        } else {
+            (sel.end_row, sel.end_col, sel.start_row, sel.start_col)
+        }
+    });
 
     cell_infos.clear();
     let target_cells = visible_rows * grid.cols;
     cell_infos.reserve(target_cells.saturating_sub(cell_infos.capacity()));
 
     for row in 0..visible_rows {
+        // Selected column interval for this row (inclusive). `None` means the
+        // row has no selected cells, which matches `is_in_selection` returning
+        // false for every column on the row.
+        let row_sel = norm_sel.and_then(|(sr, sc, er, ec)| {
+            if row < sr || row > er {
+                None
+            } else {
+                let lo = if row == sr { sc } else { 0 };
+                let hi = if row == er { ec } else { usize::MAX };
+                Some((lo, hi))
+            }
+        });
+        let cursor_on_row = show_cursor && row == cursor_row;
+
         for col in 0..grid.cols {
-            let cell = grid.cell_at_scrollback_offset(viewport_scroll.sample_offset, row, col);
+            let cell = grid.cell_at_scrollback_offset(sample_offset, row, col);
             if cell.flags & crate::grid::FLAG_WIDE_CONT != 0 {
                 continue;
             }
 
-            let is_cursor = show_cursor && row == cursor_row && col == cursor_col;
+            let is_cursor = cursor_on_row && col == cursor_col;
             let is_cursor_block = is_cursor && cursor_style == CursorStyle::Block;
             let cursor_overlay = if is_cursor && !is_cursor_block {
                 Some(cursor_style)
@@ -164,17 +192,21 @@ pub(crate) fn fill_cell_infos_with_scroll(
                 None
             };
 
+            let selected = match row_sel {
+                Some((lo, hi)) => col >= lo && col <= hi,
+                None => false,
+            };
+
             cell_infos.push(CellInfo {
                 row,
                 col,
                 ch: cell.ch,
-                grapheme: terminal
-                    .grid()
-                    .cell_grapheme_at_scrollback_offset(viewport_scroll.sample_offset, row, col)
+                grapheme: grid
+                    .cell_grapheme_at_scrollback_offset(sample_offset, row, col)
                     .map(Into::into),
                 cells: cell_span(cell),
                 cell: *cell,
-                selected: is_in_selection(selection, row, col),
+                selected,
                 is_cursor_block,
                 cursor_style: cursor_overlay,
             });
@@ -198,13 +230,6 @@ pub(crate) fn build_cell_instances(
         ci.is_cursor_block,
         ci.selected,
     );
-    let fg = rgb_to_f32(colors.fg);
-    let bg = if colors.bg == style.base_bg {
-        rgb_to_f32_alpha(colors.bg, style.background_alpha)
-    } else {
-        rgb_to_f32(colors.bg)
-    };
-    let deco = rgb_to_f32(resolve_underline_color(&ci.cell, colors.fg));
 
     let mut flags = 0u32;
     let mut uv_offset = [0.0, 0.0];
@@ -240,32 +265,49 @@ pub(crate) fn build_cell_instances(
         flags |= FLAG_STRIKETHROUGH;
     }
 
-    let bg_instance = (colors.bg != style.base_bg).then_some(CellInstance {
-        pos: [
-            ci.col as f32 * style.cell_w,
-            ci.row as f32 * style.cell_h + style.viewport_offset_y,
-        ],
-        size: [style.cell_w * ci.cells as f32, style.cell_h],
-        uv_offset: [0.0, 0.0],
-        uv_size: [0.0, 0.0],
-        fg: [0.0, 0.0, 0.0, 0.0],
-        bg,
-        deco: [0.0, 0.0, 0.0, 0.0],
-        flags: 0,
-        _pad: [0; 2],
-    });
+    // Per-cell pixel origin and advance width, computed once and reused below.
+    let base_x = ci.col as f32 * style.cell_w;
+    let base_y = ci.row as f32 * style.cell_h + style.viewport_offset_y;
+    let span_w = style.cell_w * ci.cells as f32;
+
+    // A background quad is only emitted for cells whose resolved background
+    // differs from the frame background. In that case the colour is always the
+    // opaque resolved background (the `background_alpha` blend only ever applies
+    // to the default background, which by definition is suppressed here), so we
+    // resolve the colour lazily inside this branch and skip the whole struct for
+    // the common default-background cell.
+    let bg_instance = if colors.bg != style.base_bg {
+        Some(CellInstance {
+            pos: [base_x, base_y],
+            size: [span_w, style.cell_h],
+            uv_offset: [0.0, 0.0],
+            uv_size: [0.0, 0.0],
+            fg: [0.0, 0.0, 0.0, 0.0],
+            bg: rgb_to_f32(colors.bg),
+            deco: [0.0, 0.0, 0.0, 0.0],
+            flags: 0,
+            _pad: [0; 2],
+        })
+    } else {
+        None
+    };
 
     let fg_instance = if flags != 0 {
-        let glyph_width = glyph_entry
-            .map(|entry| entry.width as f32)
-            .unwrap_or(style.cell_w * ci.cells as f32);
+        // Foreground/decoration colours are only needed when an fg quad is
+        // emitted, so resolve them here. The underline colour collapses to the
+        // foreground unless the cell carries an explicit underline colour.
+        let fg = rgb_to_f32(colors.fg);
+        let deco_rgb = resolve_underline_color(&ci.cell, colors.fg);
+        let deco = if deco_rgb == colors.fg {
+            fg
+        } else {
+            rgb_to_f32(deco_rgb)
+        };
+        let glyph_width = glyph_entry.map(|entry| entry.width as f32).unwrap_or(span_w);
         Some(CellInstance {
-            pos: [
-                ci.col as f32 * style.cell_w - glyph_left_pad,
-                ci.row as f32 * style.cell_h + style.viewport_offset_y - glyph_top_pad,
-            ],
+            pos: [base_x - glyph_left_pad, base_y - glyph_top_pad],
             size: [
-                glyph_width.max(style.cell_w * ci.cells as f32 + glyph_left_pad),
+                glyph_width.max(span_w + glyph_left_pad),
                 uv_size[1].max(style.cell_h + glyph_top_pad),
             ],
             uv_offset,
@@ -282,10 +324,7 @@ pub(crate) fn build_cell_instances(
 
     let overlay = match ci.cursor_style {
         Some(CursorStyle::Bar) => Some(CellInstance {
-            pos: [
-                ci.col as f32 * style.cell_w,
-                ci.row as f32 * style.cell_h + style.viewport_offset_y,
-            ],
+            pos: [base_x, base_y],
             size: [style.cell_w, style.cell_h],
             uv_offset: [0.0, 0.0],
             uv_size: [0.0, 0.0],
@@ -296,10 +335,7 @@ pub(crate) fn build_cell_instances(
             _pad: [0; 2],
         }),
         Some(CursorStyle::Underline) => Some(CellInstance {
-            pos: [
-                ci.col as f32 * style.cell_w,
-                ci.row as f32 * style.cell_h + style.viewport_offset_y,
-            ],
+            pos: [base_x, base_y],
             size: [style.cell_w, style.cell_h],
             uv_offset: [0.0, 0.0],
             uv_size: [0.0, 0.0],

@@ -38,7 +38,7 @@ pub enum Action {
     Print(u8),
     Execute(u8),
     CsiDispatch {
-        params_count: usize,
+        params_count: u8,
         intermediate: u8,
         final_byte: u8,
     },
@@ -46,9 +46,9 @@ pub enum Action {
         intermediate: u8,
         final_byte: u8,
     },
-    OscDispatch(Vec<u8>),
-    DcsDispatch(Vec<u8>),
-    ApcDispatch(Vec<u8>),
+    OscDispatch(Box<Vec<u8>>),
+    DcsDispatch(Box<Vec<u8>>),
+    ApcDispatch(Box<Vec<u8>>),
     Nop,
 }
 
@@ -196,7 +196,7 @@ impl Parser {
                 self.push_param(self.current_param);
                 self.state = State::Ground;
                 Action::CsiDispatch {
-                    params_count: self.param_count,
+                    params_count: self.param_count as u8,
                     intermediate: self.intermediate,
                     final_byte: byte,
                 }
@@ -238,7 +238,7 @@ impl Parser {
                 self.push_param(self.current_param);
                 self.state = State::Ground;
                 Action::CsiDispatch {
-                    params_count: self.param_count,
+                    params_count: self.param_count as u8,
                     intermediate: self.intermediate,
                     final_byte: byte,
                 }
@@ -259,7 +259,7 @@ impl Parser {
             0x40..=0x7e => {
                 self.state = State::Ground;
                 Action::CsiDispatch {
-                    params_count: self.param_count,
+                    params_count: self.param_count as u8,
                     intermediate: self.intermediate,
                     final_byte: byte,
                 }
@@ -276,7 +276,7 @@ impl Parser {
             0x07 => {
                 self.state = State::Ground;
                 let data = std::mem::take(&mut self.osc_buf);
-                Action::OscDispatch(data)
+                Action::OscDispatch(Box::new(data))
             }
             0x1b => {
                 self.state = State::OscEscape;
@@ -296,7 +296,7 @@ impl Parser {
             b'\\' => {
                 self.state = State::Ground;
                 let data = std::mem::take(&mut self.osc_buf);
-                Action::OscDispatch(data)
+                Action::OscDispatch(Box::new(data))
             }
             other => {
                 self.state = State::OscString;
@@ -318,7 +318,7 @@ impl Parser {
             0x07 => {
                 self.state = State::Ground;
                 let data = std::mem::take(&mut self.dcs_buf);
-                Action::DcsDispatch(data)
+                Action::DcsDispatch(Box::new(data))
             }
             _ => {
                 if self.dcs_buf.len() < 1024 * 1024 {
@@ -334,7 +334,7 @@ impl Parser {
             b'\\' => {
                 self.state = State::Ground;
                 let data = std::mem::take(&mut self.dcs_buf);
-                Action::DcsDispatch(data)
+                Action::DcsDispatch(Box::new(data))
             }
             other => {
                 self.state = State::DcsString;
@@ -356,7 +356,7 @@ impl Parser {
             0x07 => {
                 self.state = State::Ground;
                 let data = std::mem::take(&mut self.osc_buf);
-                Action::ApcDispatch(data)
+                Action::ApcDispatch(Box::new(data))
             }
             _ => {
                 if self.osc_buf.len() < 1024 * 1024 {
@@ -372,7 +372,7 @@ impl Parser {
             b'\\' => {
                 self.state = State::Ground;
                 let data = std::mem::take(&mut self.osc_buf);
-                Action::ApcDispatch(data)
+                Action::ApcDispatch(Box::new(data))
             }
             other => {
                 self.state = State::ApcString;
@@ -386,7 +386,9 @@ impl Parser {
     }
 
     fn csi_reset(&mut self) {
-        self.params = [0; MAX_PARAMS];
+        // No need to clear the `params` array: every reader is bounded by
+        // `param_count`, and `push_param` always writes `params[param_count]`
+        // before advancing the count, so stale slots are never observed.
         self.param_count = 0;
         self.current_param = 0;
         self.intermediate = 0;
@@ -478,7 +480,7 @@ mod tests {
         assert_eq!(p.advance(b'0'), Action::Nop);
         assert_eq!(p.advance(b';'), Action::Nop);
         assert_eq!(p.advance(b'x'), Action::Nop);
-        assert_eq!(p.advance(0x07), Action::OscDispatch(b"0;x".to_vec()));
+        assert_eq!(p.advance(0x07), Action::OscDispatch(Box::new(b"0;x".to_vec())));
         assert_eq!(p.advance(b'A'), Action::Print(b'A'));
     }
 
@@ -491,7 +493,7 @@ mod tests {
         assert_eq!(p.advance(b';'), Action::Nop);
         assert_eq!(p.advance(b'x'), Action::Nop);
         assert_eq!(p.advance(0x1b), Action::Nop);
-        assert_eq!(p.advance(b'\\'), Action::OscDispatch(b"0;x".to_vec()));
+        assert_eq!(p.advance(b'\\'), Action::OscDispatch(Box::new(b"0;x".to_vec())));
     }
 
     #[test]
@@ -504,7 +506,7 @@ mod tests {
         assert_eq!(p.advance(b'1'), Action::Nop);
         assert_eq!(p.advance(b'2'), Action::Nop);
         assert_eq!(p.advance(0x1b), Action::Nop);
-        assert_eq!(p.advance(b'\\'), Action::DcsDispatch(b"+q12".to_vec()));
+        assert_eq!(p.advance(b'\\'), Action::DcsDispatch(Box::new(b"+q12".to_vec())));
     }
 
     #[test]
@@ -518,5 +520,63 @@ mod tests {
                 final_byte: b'M',
             }
         );
+    }
+
+    /// The returned `Action` is produced for every parsed byte on the hot path,
+    /// so it must stay small enough to be returned in registers (no hidden
+    /// sret/return-slot copy). Keep it at or below two machine words.
+    #[test]
+    fn action_is_register_sized() {
+        assert!(
+            std::mem::size_of::<Action>() <= 16,
+            "Action grew to {} bytes; the hot parser path depends on it fitting in registers",
+            std::mem::size_of::<Action>()
+        );
+    }
+
+    /// `csi_reset` no longer zeroes the whole params array; it relies on
+    /// `param_count` bounding every reader. Verify a shorter CSI sequence after
+    /// a longer one never exposes stale parameters from the previous sequence.
+    #[test]
+    fn csi_params_do_not_leak_between_sequences() {
+        let mut p = Parser::new();
+        for &b in b"\x1b[11;22;33;44m" {
+            p.advance(b);
+        }
+        assert_eq!(p.params(), &[11, 22, 33, 44]);
+
+        // A subsequent shorter sequence must report only its own params.
+        let mut last = Action::Nop;
+        for &b in b"\x1b[9m" {
+            last = p.advance(b);
+        }
+        assert_eq!(
+            last,
+            Action::CsiDispatch {
+                params_count: 1,
+                intermediate: 0,
+                final_byte: b'm',
+            }
+        );
+        assert_eq!(p.params(), &[9]);
+        assert_eq!(p.param(0, 0), 9);
+        // Index 1 is out of range for this sequence and must fall back to default,
+        // not the stale `22` from the previous sequence.
+        assert_eq!(p.param(1, 7), 7);
+    }
+
+    /// OSC/DCS/APC dispatch payloads are now boxed; confirm the payload still
+    /// round-trips byte-identically and the boxed value derefs as a slice.
+    #[test]
+    fn boxed_dispatch_payload_roundtrips() {
+        let mut p = Parser::new();
+        for &b in b"\x1b]2;hello world\x07" {
+            let action = p.advance(b);
+            if let Action::OscDispatch(data) = action {
+                assert_eq!(&data[..], b"2;hello world");
+                return;
+            }
+        }
+        panic!("expected an OscDispatch action");
     }
 }

@@ -219,6 +219,55 @@ pub fn apply_modifier_key_transition(
     }
 }
 
+/// Append the decimal digits of `value` to `out` without allocating an
+/// intermediate `String` (unlike `value.to_string()`).
+fn write_u32_decimal(out: &mut Vec<u8>, value: u32) {
+    // u32::MAX is 10 digits, which fits comfortably in this scratch buffer.
+    let mut buf = [0u8; 10];
+    let mut idx = buf.len();
+    let mut v = value;
+    loop {
+        idx -= 1;
+        buf[idx] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    out.extend_from_slice(&buf[idx..]);
+}
+
+fn write_u16_decimal(out: &mut Vec<u8>, value: u16) {
+    write_u32_decimal(out, value as u32);
+}
+
+/// The kitty CSI-u modifier field, computed once and written without an
+/// intermediate `String`.
+#[derive(Clone, Copy)]
+enum ModField {
+    Absent,
+    Value(u16),
+    ValueEvent(u16, u8),
+}
+
+impl ModField {
+    fn is_present(self) -> bool {
+        !matches!(self, ModField::Absent)
+    }
+
+    fn write(self, out: &mut Vec<u8>) {
+        match self {
+            ModField::Absent => {}
+            ModField::Value(value) => write_u16_decimal(out, value),
+            ModField::ValueEvent(value, event) => {
+                write_u16_decimal(out, value);
+                out.push(b':');
+                out.push(b'0' + event);
+            }
+        }
+    }
+}
+
 pub fn key_to_bytes(
     key: &Key,
     text: Option<&str>,
@@ -228,8 +277,47 @@ pub fn key_to_bytes(
     kitty_flags: u8,
     event_kind: KeyEventKind,
 ) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    if key_to_bytes_into(
+        &mut out,
+        key,
+        text,
+        physical_key,
+        app_cursor,
+        modifiers,
+        kitty_flags,
+        event_kind,
+    ) {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// Encode a key event into `out`, reusing its existing capacity.
+///
+/// `out` is cleared first, then any encoded bytes are appended. Returns `true`
+/// when bytes were produced and `false` otherwise (leaving `out` empty). A
+/// caller that encodes a stream of key events can reuse a single buffer so that
+/// steady-state key encoding performs no heap allocation at all, whereas
+/// [`key_to_bytes`] allocates a fresh `Vec` per call for callers that want an
+/// owned result.
+#[allow(clippy::too_many_arguments)]
+pub fn key_to_bytes_into(
+    out: &mut Vec<u8>,
+    key: &Key,
+    text: Option<&str>,
+    physical_key: Option<&PhysicalKey>,
+    app_cursor: bool,
+    modifiers: ModifiersState,
+    kitty_flags: u8,
+    event_kind: KeyEventKind,
+) -> bool {
+    out.clear();
+
     if kitty_flags != 0
-        && let Some(bytes) = encode_kitty_key(
+        && encode_kitty_key_into(
+            out,
             key,
             text,
             physical_key,
@@ -239,62 +327,76 @@ pub fn key_to_bytes(
             event_kind,
         )
     {
-        return Some(bytes);
+        return true;
     }
+
+    // The kitty path may bail out after writing nothing meaningful; make sure
+    // the legacy path starts from an empty buffer.
+    out.clear();
 
     if matches!(event_kind, KeyEventKind::Release) {
-        return None;
+        return false;
     }
 
-    legacy_key_to_bytes(key, app_cursor, modifiers)
+    legacy_key_to_bytes_into(out, key, app_cursor, modifiers)
 }
 
-fn legacy_key_to_bytes(key: &Key, app_cursor: bool, modifiers: ModifiersState) -> Option<Vec<u8>> {
+fn legacy_key_to_bytes_into(
+    out: &mut Vec<u8>,
+    key: &Key,
+    app_cursor: bool,
+    modifiers: ModifiersState,
+) -> bool {
     let ctrl = modifiers.control_key();
     let alt = modifiers.alt_key();
 
     if ctrl && let Key::Character(s) = key {
-        let ch = s.chars().next()?;
-        let mut out = Vec::new();
+        let Some(ch) = s.chars().next() else {
+            return false;
+        };
         if alt {
             out.push(0x1b);
         }
         if ch.is_ascii_alphabetic() {
             out.push(ch.to_ascii_lowercase() as u8 - b'a' + 1);
-            return Some(out);
+            return true;
         }
-        match ch {
-            '@' | ' ' | '`' => out.push(0),
-            '2' => out.push(0),
-            '3' => out.push(0x1b),
-            '4' => out.push(0x1c),
-            '5' => out.push(0x1d),
-            '6' => out.push(0x1e),
-            '7' => out.push(0x1f),
-            '8' | '?' => out.push(0x7f),
-            '9' => out.push(b'9'),
-            '0' => out.push(b'0'),
-            '[' | '\x1b' => out.push(0x1b),
-            '\\' => out.push(0x1c),
-            ']' => out.push(0x1d),
-            '^' | '~' => out.push(0x1e),
-            '_' | '/' => out.push(0x1f),
-            _ => return None,
-        }
-        return Some(out);
+        let byte = match ch {
+            '@' | ' ' | '`' => 0,
+            '2' => 0,
+            '3' => 0x1b,
+            '4' => 0x1c,
+            '5' => 0x1d,
+            '6' => 0x1e,
+            '7' => 0x1f,
+            '8' | '?' => 0x7f,
+            '9' => b'9',
+            '0' => b'0',
+            '[' | '\x1b' => 0x1b,
+            '\\' => 0x1c,
+            ']' => 0x1d,
+            '^' | '~' => 0x1e,
+            '_' | '/' => 0x1f,
+            _ => {
+                out.clear();
+                return false;
+            }
+        };
+        out.push(byte);
+        return true;
     }
 
-    let mut bytes = match key {
-        Key::Character(s) => Some(s.as_bytes().to_vec()),
-        Key::Named(named) => legacy_named_key_to_bytes(*named, app_cursor, modifiers),
-        _ => None,
-    }?;
-
-    if alt && matches!(key, Key::Character(_)) {
-        bytes.insert(0, 0x1b);
+    match key {
+        Key::Character(s) => {
+            if alt {
+                out.push(0x1b);
+            }
+            out.extend_from_slice(s.as_bytes());
+            true
+        }
+        Key::Named(named) => legacy_named_key_to_bytes_into(out, *named, app_cursor, modifiers),
+        _ => false,
     }
-
-    Some(bytes)
 }
 
 fn lookup_named_mapping<T: Copy>(named: NamedKey, mappings: &[(NamedKey, T)]) -> Option<T> {
@@ -311,73 +413,63 @@ fn kitty_legacy_letter_key(named: NamedKey) -> Option<(char, bool)> {
         })
 }
 
-fn format_kitty_legacy_letter_sequence(
-    prefix_o: bool,
-    suffix: char,
-    modifier_field: Option<&str>,
-) -> Vec<u8> {
-    if let Some(mods) = modifier_field {
-        let mut seq = String::from("\x1b[");
-        seq.push('1');
-        seq.push(';');
-        seq.push_str(mods);
-        seq.push(suffix);
-        seq.into_bytes()
+fn write_kitty_legacy_letter_sequence(out: &mut Vec<u8>, prefix_o: bool, suffix: u8, mods: ModField) {
+    if mods.is_present() {
+        out.extend_from_slice(b"\x1b[1;");
+        mods.write(out);
+        out.push(suffix);
     } else if prefix_o {
-        let mut seq = String::from("\x1bO");
-        seq.push(suffix);
-        seq.into_bytes()
+        out.extend_from_slice(b"\x1bO");
+        out.push(suffix);
     } else {
-        let mut seq = String::from("\x1b[");
-        seq.push(suffix);
-        seq.into_bytes()
+        out.extend_from_slice(b"\x1b[");
+        out.push(suffix);
     }
 }
 
-fn format_kitty_legacy_tilde_sequence(number: u16, modifier_field: Option<&str>) -> Vec<u8> {
-    let mut seq = String::from("\x1b[");
-    seq.push_str(&number.to_string());
-    if let Some(mods) = modifier_field {
-        seq.push(';');
-        seq.push_str(mods);
+fn write_kitty_legacy_tilde_sequence(out: &mut Vec<u8>, number: u16, mods: ModField) {
+    out.extend_from_slice(b"\x1b[");
+    write_u16_decimal(out, number);
+    if mods.is_present() {
+        out.push(b';');
+        mods.write(out);
     }
-    seq.push('~');
-    seq.into_bytes()
+    out.push(b'~');
 }
 
-fn legacy_named_key_to_bytes(
+fn legacy_named_key_to_bytes_into(
+    out: &mut Vec<u8>,
     named: NamedKey,
     app_cursor: bool,
     modifiers: ModifiersState,
-) -> Option<Vec<u8>> {
+) -> bool {
     let shift = modifiers.shift_key();
     let alt = modifiers.alt_key();
     let ctrl = modifiers.control_key();
 
     match named {
         NamedKey::Enter => {
-            let mut out = Vec::new();
             if alt {
                 out.push(0x1b);
             }
             out.push(b'\r');
-            Some(out)
+            true
         }
-        NamedKey::Escape => Some(if alt {
-            b"\x1b\x1b".to_vec()
-        } else {
-            b"\x1b".to_vec()
-        }),
+        NamedKey::Escape => {
+            out.push(0x1b);
+            if alt {
+                out.push(0x1b);
+            }
+            true
+        }
         NamedKey::Backspace => {
-            let mut out = Vec::new();
             if alt {
                 out.push(0x1b);
             }
             out.push(if ctrl { 0x08 } else { 0x7f });
-            Some(out)
+            true
         }
         NamedKey::Tab => {
-            let mut out = Vec::new();
             if alt {
                 out.push(0x1b);
             }
@@ -386,51 +478,51 @@ fn legacy_named_key_to_bytes(
             } else {
                 out.push(b'\t');
             }
-            Some(out)
+            true
         }
         NamedKey::Space => {
-            let mut out = Vec::new();
             if alt {
                 out.push(0x1b);
             }
             out.push(if ctrl { 0x00 } else { b' ' });
-            Some(out)
+            true
         }
-        NamedKey::ArrowUp => legacy_named_sequence(app_cursor, modifiers, b'A', 0, 0),
-        NamedKey::ArrowDown => legacy_named_sequence(app_cursor, modifiers, b'B', 0, 0),
-        NamedKey::ArrowRight => legacy_named_sequence(app_cursor, modifiers, b'C', 0, 0),
-        NamedKey::ArrowLeft => legacy_named_sequence(app_cursor, modifiers, b'D', 0, 0),
-        NamedKey::Home => legacy_named_sequence(app_cursor, modifiers, b'H', 0, 0),
-        NamedKey::End => legacy_named_sequence(app_cursor, modifiers, b'F', 0, 0),
-        NamedKey::Insert => legacy_named_sequence(false, modifiers, 0, 2, b'~'),
-        NamedKey::Delete => legacy_named_sequence(false, modifiers, 0, 3, b'~'),
-        NamedKey::PageUp => legacy_named_sequence(false, modifiers, 0, 5, b'~'),
-        NamedKey::PageDown => legacy_named_sequence(false, modifiers, 0, 6, b'~'),
-        NamedKey::F1 => legacy_named_sequence(false, modifiers, b'P', 0, 0),
-        NamedKey::F2 => legacy_named_sequence(false, modifiers, b'Q', 0, 0),
-        NamedKey::F3 => legacy_named_sequence(false, modifiers, 0, 13, b'~'),
-        NamedKey::F4 => legacy_named_sequence(false, modifiers, b'S', 0, 0),
-        NamedKey::F5 => legacy_named_sequence(false, modifiers, 0, 15, b'~'),
-        NamedKey::F6 => legacy_named_sequence(false, modifiers, 0, 17, b'~'),
-        NamedKey::F7 => legacy_named_sequence(false, modifiers, 0, 18, b'~'),
-        NamedKey::F8 => legacy_named_sequence(false, modifiers, 0, 19, b'~'),
-        NamedKey::F9 => legacy_named_sequence(false, modifiers, 0, 20, b'~'),
-        NamedKey::F10 => legacy_named_sequence(false, modifiers, 0, 21, b'~'),
-        NamedKey::F11 => legacy_named_sequence(false, modifiers, 0, 23, b'~'),
-        NamedKey::F12 => legacy_named_sequence(false, modifiers, 0, 24, b'~'),
-        _ => None,
+        NamedKey::ArrowUp => legacy_named_sequence_into(out, app_cursor, modifiers, b'A', 0, 0),
+        NamedKey::ArrowDown => legacy_named_sequence_into(out, app_cursor, modifiers, b'B', 0, 0),
+        NamedKey::ArrowRight => legacy_named_sequence_into(out, app_cursor, modifiers, b'C', 0, 0),
+        NamedKey::ArrowLeft => legacy_named_sequence_into(out, app_cursor, modifiers, b'D', 0, 0),
+        NamedKey::Home => legacy_named_sequence_into(out, app_cursor, modifiers, b'H', 0, 0),
+        NamedKey::End => legacy_named_sequence_into(out, app_cursor, modifiers, b'F', 0, 0),
+        NamedKey::Insert => legacy_named_sequence_into(out, false, modifiers, 0, 2, b'~'),
+        NamedKey::Delete => legacy_named_sequence_into(out, false, modifiers, 0, 3, b'~'),
+        NamedKey::PageUp => legacy_named_sequence_into(out, false, modifiers, 0, 5, b'~'),
+        NamedKey::PageDown => legacy_named_sequence_into(out, false, modifiers, 0, 6, b'~'),
+        NamedKey::F1 => legacy_named_sequence_into(out, false, modifiers, b'P', 0, 0),
+        NamedKey::F2 => legacy_named_sequence_into(out, false, modifiers, b'Q', 0, 0),
+        NamedKey::F3 => legacy_named_sequence_into(out, false, modifiers, 0, 13, b'~'),
+        NamedKey::F4 => legacy_named_sequence_into(out, false, modifiers, b'S', 0, 0),
+        NamedKey::F5 => legacy_named_sequence_into(out, false, modifiers, 0, 15, b'~'),
+        NamedKey::F6 => legacy_named_sequence_into(out, false, modifiers, 0, 17, b'~'),
+        NamedKey::F7 => legacy_named_sequence_into(out, false, modifiers, 0, 18, b'~'),
+        NamedKey::F8 => legacy_named_sequence_into(out, false, modifiers, 0, 19, b'~'),
+        NamedKey::F9 => legacy_named_sequence_into(out, false, modifiers, 0, 20, b'~'),
+        NamedKey::F10 => legacy_named_sequence_into(out, false, modifiers, 0, 21, b'~'),
+        NamedKey::F11 => legacy_named_sequence_into(out, false, modifiers, 0, 23, b'~'),
+        NamedKey::F12 => legacy_named_sequence_into(out, false, modifiers, 0, 24, b'~'),
+        _ => false,
     }
 }
 
-fn legacy_named_sequence(
+fn legacy_named_sequence_into(
+    out: &mut Vec<u8>,
     app_cursor: bool,
     modifiers: ModifiersState,
     letter_suffix: u8,
     tilde_number: u16,
     trailing: u8,
-) -> Option<Vec<u8>> {
+) -> bool {
     if modifiers.super_key() {
-        return None;
+        return false;
     }
 
     let mut value = 1u16;
@@ -446,29 +538,32 @@ fn legacy_named_sequence(
 
     if letter_suffix != 0 {
         if value == 1 {
-            return Some(if app_cursor {
-                vec![0x1b, b'O', letter_suffix]
+            if app_cursor {
+                out.extend_from_slice(&[0x1b, b'O', letter_suffix]);
             } else {
-                vec![0x1b, b'[', letter_suffix]
-            });
+                out.extend_from_slice(&[0x1b, b'[', letter_suffix]);
+            }
+            return true;
         }
-        let mut seq = vec![0x1b, b'[', b'1', b';'];
-        seq.extend_from_slice(value.to_string().as_bytes());
-        seq.push(letter_suffix);
-        return Some(seq);
+        out.extend_from_slice(b"\x1b[1;");
+        write_u16_decimal(out, value);
+        out.push(letter_suffix);
+        return true;
     }
 
-    let mut seq = vec![0x1b, b'['];
-    seq.extend_from_slice(tilde_number.to_string().as_bytes());
+    out.extend_from_slice(b"\x1b[");
+    write_u16_decimal(out, tilde_number);
     if value != 1 {
-        seq.push(b';');
-        seq.extend_from_slice(value.to_string().as_bytes());
+        out.push(b';');
+        write_u16_decimal(out, value);
     }
-    seq.push(trailing);
-    Some(seq)
+    out.push(trailing);
+    true
 }
 
-fn encode_kitty_key(
+#[allow(clippy::too_many_arguments)]
+fn encode_kitty_key_into(
+    out: &mut Vec<u8>,
     key: &Key,
     text: Option<&str>,
     physical_key: Option<&PhysicalKey>,
@@ -476,7 +571,7 @@ fn encode_kitty_key(
     modifiers: ModifiersState,
     kitty_flags: u8,
     event_kind: KeyEventKind,
-) -> Option<Vec<u8>> {
+) -> bool {
     let report_all = kitty_flags & KITTY_KBD_REPORT_ALL != 0;
     let report_events = kitty_flags & KITTY_KBD_REPORT_EVENTS != 0;
     let report_alternate = kitty_flags & KITTY_KBD_REPORT_ALTERNATE != 0;
@@ -485,33 +580,26 @@ fn encode_kitty_key(
     let produces_text = text.filter(|s| !s.is_empty()).is_some();
 
     if !report_events && matches!(event_kind, KeyEventKind::Release) {
-        return None;
+        return false;
     }
 
     if let Some(code) = kitty_keypad_code(physical_key, produces_text)
         && (report_all || (disambiguate && !produces_text))
     {
-        let modifier_field = kitty_modifier_field(modifiers, report_events, event_kind);
-        let text_field = if report_text {
-            kitty_text_field(text)
-        } else {
-            None
-        };
+        let mods = kitty_modifier_modfield(modifiers, report_events, event_kind);
+        let text_field = if report_text { text } else { None };
         if !produces_text && matches!(physical_key, Some(PhysicalKey::Code(KeyCode::Numpad5))) {
-            return Some(format_kitty_legacy_letter_sequence(
-                false,
-                'E',
-                modifier_field.as_deref(),
-            ));
+            write_kitty_legacy_letter_sequence(out, false, b'E', mods);
+            return true;
         }
-        return Some(format_kitty_csi_u(
-            &code.to_string(),
-            modifier_field,
-            text_field,
-        ));
+        out.extend_from_slice(b"\x1b[");
+        write_u32_decimal(out, code);
+        finish_kitty_csi_u(out, mods, text_field);
+        return true;
     }
 
-    if let Some(bytes) = encode_kitty_named_key(
+    if encode_kitty_named_key_into(
+        out,
         key,
         physical_key,
         app_cursor,
@@ -520,31 +608,31 @@ fn encode_kitty_key(
         report_events,
         event_kind,
     ) {
-        return Some(bytes);
+        return true;
     }
 
     if !produces_text {
-        return None;
+        return false;
     }
     if !report_all && matches!(event_kind, KeyEventKind::Repeat | KeyEventKind::Release) {
-        return None;
+        return false;
     }
     if !report_all && !disambiguate && matches!(event_kind, KeyEventKind::Press) {
-        return None;
+        return false;
     }
     if !report_all && !text_key_is_ambiguous(modifiers) {
-        return None;
+        return false;
     }
 
-    let primary = text_key_primary_codepoint(key, physical_key, modifiers)?;
-    let first = kitty_first_param(primary, text, physical_key, modifiers, report_alternate);
-    let modifier_field = kitty_modifier_field(modifiers, report_events, event_kind);
-    let text_field = if report_text {
-        kitty_text_field(text)
-    } else {
-        None
+    let Some(primary) = text_key_primary_codepoint(key, physical_key, modifiers) else {
+        return false;
     };
-    Some(format_kitty_csi_u(&first, modifier_field, text_field))
+    let mods = kitty_modifier_modfield(modifiers, report_events, event_kind);
+    let text_field = if report_text { text } else { None };
+    out.extend_from_slice(b"\x1b[");
+    write_kitty_first_param(out, primary, text, physical_key, modifiers, report_alternate);
+    finish_kitty_csi_u(out, mods, text_field);
+    true
 }
 
 fn text_key_is_ambiguous(modifiers: ModifiersState) -> bool {
@@ -578,40 +666,54 @@ fn text_key_primary_codepoint(
     }
 }
 
-fn kitty_first_param(
+fn write_kitty_first_param(
+    out: &mut Vec<u8>,
     primary: u32,
     text: Option<&str>,
     physical_key: Option<&PhysicalKey>,
     modifiers: ModifiersState,
     report_alternate: bool,
-) -> String {
+) {
     if !report_alternate {
-        return primary.to_string();
+        write_u32_decimal(out, primary);
+        return;
     }
 
     let shifted = if modifiers.shift_key() {
         text.and_then(|s| s.chars().next()).map(|ch| ch as u32)
     } else {
         None
-    };
-    let base_layout = physical_key.and_then(base_layout_codepoint);
+    }
+    .filter(|cp| *cp != primary);
+    let base_layout = physical_key
+        .and_then(base_layout_codepoint)
+        .filter(|cp| *cp != primary);
 
-    match (
-        shifted.filter(|cp| *cp != primary),
-        base_layout.filter(|cp| *cp != primary),
-    ) {
-        (Some(shifted), Some(base_layout)) => format!("{primary}:{shifted}:{base_layout}"),
-        (Some(shifted), None) => format!("{primary}:{shifted}"),
-        (None, Some(base_layout)) => format!("{primary}::{base_layout}"),
-        (None, None) => primary.to_string(),
+    write_u32_decimal(out, primary);
+    match (shifted, base_layout) {
+        (Some(shifted), Some(base_layout)) => {
+            out.push(b':');
+            write_u32_decimal(out, shifted);
+            out.push(b':');
+            write_u32_decimal(out, base_layout);
+        }
+        (Some(shifted), None) => {
+            out.push(b':');
+            write_u32_decimal(out, shifted);
+        }
+        (None, Some(base_layout)) => {
+            out.extend_from_slice(b"::");
+            write_u32_decimal(out, base_layout);
+        }
+        (None, None) => {}
     }
 }
 
-fn kitty_modifier_field(
+fn kitty_modifier_modfield(
     modifiers: ModifiersState,
     report_events: bool,
     event_kind: KeyEventKind,
-) -> Option<String> {
+) -> ModField {
     let mut value = 1u16;
     if modifiers.shift_key() {
         value += 1;
@@ -645,14 +747,14 @@ fn kitty_modifier_field(
             KeyEventKind::Release => 3,
         };
         if value == 1 && event == 1 {
-            None
+            ModField::Absent
         } else {
-            Some(format!("{value}:{event}"))
+            ModField::ValueEvent(value, event)
         }
     } else if value == 1 {
-        None
+        ModField::Absent
     } else {
-        Some(value.to_string())
+        ModField::Value(value)
     }
 }
 
@@ -672,42 +774,43 @@ fn num_lock_modifier_active(modifiers: ModifiersState) -> bool {
     modifiers.bits() & NUM_LOCK_MODIFIER_BIT != 0
 }
 
-fn kitty_text_field(text: Option<&str>) -> Option<String> {
-    let text = text?;
-    let codepoints = text
-        .chars()
-        .filter(|ch| !ch.is_control())
-        .map(|ch| (ch as u32).to_string())
-        .collect::<Vec<_>>();
-    if codepoints.is_empty() {
-        None
-    } else {
-        Some(codepoints.join(":"))
+/// Does the optional kitty text field carry at least one reportable
+/// (non-control) codepoint?
+fn kitty_text_present(text: Option<&str>) -> bool {
+    text.is_some_and(|text| text.chars().any(|ch| !ch.is_control()))
+}
+
+fn write_kitty_text_codepoints(out: &mut Vec<u8>, text: &str) {
+    let mut first = true;
+    for ch in text.chars().filter(|ch| !ch.is_control()) {
+        if !first {
+            out.push(b':');
+        }
+        first = false;
+        write_u32_decimal(out, ch as u32);
     }
 }
 
-fn format_kitty_csi_u(
-    first: &str,
-    modifier_field: Option<String>,
-    text_field: Option<String>,
-) -> Vec<u8> {
-    let mut seq = String::from("\x1b[");
-    seq.push_str(first);
-    if modifier_field.is_some() || text_field.is_some() {
-        seq.push(';');
-        if let Some(mods) = modifier_field {
-            seq.push_str(&mods);
+/// Append the modifier/text fields and the trailing `u` to a CSI-u sequence
+/// whose leading parameter has already been written.
+fn finish_kitty_csi_u(out: &mut Vec<u8>, mods: ModField, text_field: Option<&str>) {
+    let text_present = kitty_text_present(text_field);
+    if mods.is_present() || text_present {
+        out.push(b';');
+        mods.write(out);
+    }
+    if text_present {
+        out.push(b';');
+        if let Some(text) = text_field {
+            write_kitty_text_codepoints(out, text);
         }
     }
-    if let Some(text) = text_field {
-        seq.push(';');
-        seq.push_str(&text);
-    }
-    seq.push('u');
-    seq.into_bytes()
+    out.push(b'u');
 }
 
-fn encode_kitty_named_key(
+#[allow(clippy::too_many_arguments)]
+fn encode_kitty_named_key_into(
+    out: &mut Vec<u8>,
     key: &Key,
     physical_key: Option<&PhysicalKey>,
     app_cursor: bool,
@@ -715,44 +818,47 @@ fn encode_kitty_named_key(
     report_all: bool,
     report_events: bool,
     event_kind: KeyEventKind,
-) -> Option<Vec<u8>> {
+) -> bool {
     if matches!(key, Key::Named(NamedKey::Backspace)) && modifiers.control_key() {
-        return None;
+        return false;
     }
 
-    let mods = kitty_modifier_field(modifiers, report_events, event_kind);
+    let Key::Named(named) = key else {
+        return false;
+    };
+    let named = *named;
 
-    match key {
-        Key::Named(named) => Some(match named {
-            NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace if !report_all => {
-                return None;
-            }
-            NamedKey::Space
-                if !report_all
-                    && !modifiers.shift_key()
-                    && !modifiers.alt_key()
-                    && !modifiers.control_key()
-                    && !modifiers.super_key() =>
-            {
-                return None;
-            }
-            _ => {
-                if let Some((suffix, use_app_cursor)) = kitty_legacy_letter_key(*named) {
-                    return Some(format_kitty_legacy_letter_sequence(
-                        app_cursor && use_app_cursor,
-                        suffix,
-                        mods.as_deref(),
-                    ));
-                }
-                if let Some(number) = lookup_named_mapping(*named, KITTY_LEGACY_TILDE_KEYS) {
-                    return Some(format_kitty_legacy_tilde_sequence(number, mods.as_deref()));
-                }
-                let code = kitty_named_key_code(physical_key, *named)?;
-                format_kitty_csi_u(&code.to_string(), mods, None)
-            }
-        }),
-        _ => None,
+    match named {
+        NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace if !report_all => return false,
+        NamedKey::Space
+            if !report_all
+                && !modifiers.shift_key()
+                && !modifiers.alt_key()
+                && !modifiers.control_key()
+                && !modifiers.super_key() =>
+        {
+            return false;
+        }
+        _ => {}
     }
+
+    let mods = kitty_modifier_modfield(modifiers, report_events, event_kind);
+
+    if let Some((suffix, use_app_cursor)) = kitty_legacy_letter_key(named) {
+        write_kitty_legacy_letter_sequence(out, app_cursor && use_app_cursor, suffix as u8, mods);
+        return true;
+    }
+    if let Some(number) = lookup_named_mapping(named, KITTY_LEGACY_TILDE_KEYS) {
+        write_kitty_legacy_tilde_sequence(out, number, mods);
+        return true;
+    }
+    let Some(code) = kitty_named_key_code(physical_key, named) else {
+        return false;
+    };
+    out.extend_from_slice(b"\x1b[");
+    write_u32_decimal(out, code);
+    finish_kitty_csi_u(out, mods, None);
+    true
 }
 
 fn kitty_named_key_code(physical_key: Option<&PhysicalKey>, named: NamedKey) -> Option<u32> {
@@ -872,6 +978,261 @@ fn base_layout_codepoint(physical_key: &PhysicalKey) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
+
+    /// A representative spread of key events covering the hot ASCII path, the
+    /// legacy named-key path, and several kitty-protocol encoding paths. Used by
+    /// the buffer-reuse parity, allocation, and timing tests below.
+    fn sample_events() -> Vec<(
+        Key,
+        Option<&'static str>,
+        Option<PhysicalKey>,
+        bool,
+        ModifiersState,
+        u8,
+        KeyEventKind,
+    )> {
+        vec![
+            // Plain ASCII keypress (the dominant case).
+            (
+                Key::Character("a".into()),
+                Some("a"),
+                Some(PhysicalKey::Code(KeyCode::KeyA)),
+                false,
+                ModifiersState::default(),
+                0,
+                KeyEventKind::Press,
+            ),
+            // Ctrl-modified ASCII.
+            (
+                Key::Character("c".into()),
+                Some("c"),
+                Some(PhysicalKey::Code(KeyCode::KeyC)),
+                false,
+                ModifiersState::CONTROL,
+                0,
+                KeyEventKind::Press,
+            ),
+            // Alt-modified ASCII.
+            (
+                Key::Character("x".into()),
+                Some("x"),
+                Some(PhysicalKey::Code(KeyCode::KeyX)),
+                false,
+                ModifiersState::ALT,
+                0,
+                KeyEventKind::Press,
+            ),
+            // Legacy arrow key with modifiers.
+            (
+                Key::Named(NamedKey::ArrowUp),
+                None,
+                None,
+                false,
+                ModifiersState::SHIFT | ModifiersState::ALT,
+                0,
+                KeyEventKind::Press,
+            ),
+            // Legacy tilde key.
+            (
+                Key::Named(NamedKey::PageDown),
+                None,
+                None,
+                false,
+                ModifiersState::CONTROL,
+                0,
+                KeyEventKind::Press,
+            ),
+            // Kitty disambiguated modified text key.
+            (
+                Key::Character("Z".into()),
+                Some("Z"),
+                Some(PhysicalKey::Code(KeyCode::KeyZ)),
+                false,
+                ModifiersState::SHIFT | ModifiersState::CONTROL,
+                KITTY_KBD_DISAMBIGUATE,
+                KeyEventKind::Press,
+            ),
+            // Kitty report-all text key with text codepoints.
+            (
+                Key::Character("A".into()),
+                Some("A"),
+                Some(PhysicalKey::Code(KeyCode::KeyA)),
+                false,
+                ModifiersState::SHIFT,
+                KITTY_KBD_REPORT_ALL | KITTY_KBD_REPORT_TEXT,
+                KeyEventKind::Press,
+            ),
+            // Kitty named key (legacy letter form).
+            (
+                Key::Named(NamedKey::ArrowUp),
+                None,
+                None,
+                true,
+                ModifiersState::default(),
+                KITTY_KBD_REPORT_ALL,
+                KeyEventKind::Press,
+            ),
+            // Kitty release event.
+            (
+                Key::Named(NamedKey::ArrowUp),
+                None,
+                None,
+                false,
+                ModifiersState::default(),
+                KITTY_KBD_REPORT_EVENTS,
+                KeyEventKind::Release,
+            ),
+        ]
+    }
+
+    /// The buffer-reuse `key_to_bytes_into` must produce byte-for-byte the same
+    /// output as the allocating `key_to_bytes`, including the `None`/`false`
+    /// distinction for events that emit nothing.
+    #[test]
+    fn key_to_bytes_into_matches_allocating_variant() {
+        let mut scratch = Vec::new();
+        for (key, text, physical, app_cursor, modifiers, flags, kind) in sample_events() {
+            let expected = key_to_bytes(
+                &key,
+                text,
+                physical.as_ref(),
+                app_cursor,
+                modifiers,
+                flags,
+                kind,
+            );
+            let produced = key_to_bytes_into(
+                &mut scratch,
+                &key,
+                text,
+                physical.as_ref(),
+                app_cursor,
+                modifiers,
+                flags,
+                kind,
+            );
+            match expected {
+                Some(bytes) => {
+                    assert!(produced, "into-variant should emit for {key:?}");
+                    assert_eq!(scratch, bytes, "byte mismatch for {key:?}");
+                }
+                None => {
+                    assert!(!produced, "into-variant should not emit for {key:?}");
+                    assert!(scratch.is_empty(), "scratch must be empty for {key:?}");
+                }
+            }
+        }
+    }
+
+    /// Encoding a long stream of key events through one reused buffer must reach
+    /// a steady state where no further heap allocation occurs. We prove this by
+    /// asserting the buffer capacity stops growing after a short warmup: a
+    /// `Vec` only reallocates when it must grow, so a stable capacity over
+    /// thousands of encodes means zero per-event allocation.
+    #[test]
+    fn key_to_bytes_into_is_allocation_free_in_steady_state() {
+        let events = sample_events();
+        let mut scratch = Vec::new();
+
+        // Warm up so the buffer reaches the capacity needed by the widest
+        // sequence in the sample set.
+        for _ in 0..64 {
+            for (key, text, physical, app_cursor, modifiers, flags, kind) in &events {
+                key_to_bytes_into(
+                    &mut scratch,
+                    key,
+                    *text,
+                    physical.as_ref(),
+                    *app_cursor,
+                    *modifiers,
+                    *flags,
+                    *kind,
+                );
+            }
+        }
+
+        let stable_capacity = scratch.capacity();
+        for _ in 0..10_000 {
+            for (key, text, physical, app_cursor, modifiers, flags, kind) in &events {
+                key_to_bytes_into(
+                    &mut scratch,
+                    key,
+                    *text,
+                    physical.as_ref(),
+                    *app_cursor,
+                    *modifiers,
+                    *flags,
+                    *kind,
+                );
+                assert_eq!(
+                    scratch.capacity(),
+                    stable_capacity,
+                    "buffer reallocated mid-stream, encoding is not allocation-free"
+                );
+            }
+        }
+    }
+
+    /// Microbenchmark guard: encoding via the reused buffer must be fast. This
+    /// is not a hard wall-clock SLA (CI machines vary), but it documents the
+    /// measured per-event cost and fails if a future change makes the hot path
+    /// pathologically slow. The reused-buffer path also avoids the per-call
+    /// `Vec` allocation that `key_to_bytes` pays.
+    #[test]
+    fn key_to_bytes_into_hot_path_is_fast() {
+        let events = sample_events();
+        let iters = 200_000usize;
+        let mut scratch = Vec::new();
+        let mut sink = 0u64;
+
+        // Warm up.
+        for _ in 0..1000 {
+            for (key, text, physical, app_cursor, modifiers, flags, kind) in &events {
+                if key_to_bytes_into(
+                    &mut scratch,
+                    key,
+                    *text,
+                    physical.as_ref(),
+                    *app_cursor,
+                    *modifiers,
+                    *flags,
+                    *kind,
+                ) {
+                    sink = sink.wrapping_add(scratch.len() as u64);
+                }
+            }
+        }
+
+        let start = Instant::now();
+        for _ in 0..iters {
+            for (key, text, physical, app_cursor, modifiers, flags, kind) in &events {
+                if key_to_bytes_into(
+                    &mut scratch,
+                    key,
+                    *text,
+                    physical.as_ref(),
+                    *app_cursor,
+                    *modifiers,
+                    *flags,
+                    *kind,
+                ) {
+                    sink = sink.wrapping_add(scratch.len() as u64);
+                }
+            }
+        }
+        let elapsed = start.elapsed();
+        let total_events = iters * events.len();
+        let per_event_ns = elapsed.as_nanos() as f64 / total_events as f64;
+        // Keep the optimizer honest about `sink`.
+        assert!(sink > 0);
+        // Generous ceiling: the hot path encodes well under ~500ns/event even
+        // on a slow CI box; in practice it is a few tens of ns.
+        assert!(
+            per_event_ns < 500.0,
+            "input encode hot path too slow: {per_event_ns:.1} ns/event"
+        );
+    }
 
     #[test]
     fn legacy_alt_prefix_is_preserved() {

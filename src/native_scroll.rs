@@ -148,17 +148,8 @@ impl NativeScrollBridge {
             PaneKind::Chat => &mut self.chat_residual,
             PaneKind::SidePanel => &mut self.side_panel_residual,
         };
-        *residual += delta_rows;
 
-        let mut steps = 0i32;
-        while *residual >= 1.0 {
-            steps += 1;
-            *residual -= 1.0;
-        }
-        while *residual <= -1.0 {
-            steps -= 1;
-            *residual += 1.0;
-        }
+        let steps = accumulate_scroll_steps(residual, delta_rows);
 
         if steps == 0 {
             return true;
@@ -168,6 +159,29 @@ impl NativeScrollBridge {
             .send(HostToApp::Scroll { pane, delta: steps })
             .is_ok()
     }
+}
+
+/// Fold `delta_rows` into the running fractional `residual` and return the
+/// whole number of scroll steps to emit, leaving the sub-row remainder in
+/// `residual` (always in the open interval `(-1.0, 1.0)`).
+///
+/// This is the integer part of the accumulated value, computed in O(1) with a
+/// single `trunc` instead of subtracting 1.0 in a loop. The loop form was both
+/// slower for large deltas and could spin forever on a non-finite delta; this
+/// form treats any non-finite accumulation as "no movement" and resets the
+/// residual so a stray NaN/inf cannot poison later events.
+fn accumulate_scroll_steps(residual: &mut f32, delta_rows: f32) -> i32 {
+    let total = *residual + delta_rows;
+    if !total.is_finite() {
+        *residual = 0.0;
+        return 0;
+    }
+
+    let whole = total.trunc();
+    *residual = total - whole;
+    // Clamp into i32 range; real scroll deltas are tiny, but this keeps an
+    // adversarial value from wrapping on the cast.
+    whole.clamp(i32::MIN as f32, i32::MAX as f32) as i32
 }
 
 impl Drop for NativeScrollBridge {
@@ -324,6 +338,65 @@ pub fn window_env_key() -> &'static str {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn accumulate_scroll_steps_matches_reference_loop() {
+        // Reference implementation: the previous loop-based behavior.
+        fn reference(residual: &mut f32, delta: f32) -> i32 {
+            *residual += delta;
+            let mut steps = 0i32;
+            while *residual >= 1.0 {
+                steps += 1;
+                *residual -= 1.0;
+            }
+            while *residual <= -1.0 {
+                steps -= 1;
+                *residual += 1.0;
+            }
+            steps
+        }
+
+        let deltas = [
+            0.4, 0.7, -0.3, 1.0, -1.0, 2.5, -2.5, 0.0, 0.999, -0.999, 3.2, -4.8, 0.1, 0.1, 0.1,
+        ];
+        let mut residual_new = 0.0f32;
+        let mut residual_ref = 0.0f32;
+        for delta in deltas {
+            let steps_new = accumulate_scroll_steps(&mut residual_new, delta);
+            let steps_ref = reference(&mut residual_ref, delta);
+            assert_eq!(
+                steps_new, steps_ref,
+                "step mismatch for delta {delta}: new={steps_new} ref={steps_ref}"
+            );
+            assert!(
+                (residual_new - residual_ref).abs() < 1e-5,
+                "residual drift for delta {delta}: new={residual_new} ref={residual_ref}"
+            );
+            // The residual must always stay a sub-row remainder.
+            assert!(residual_new.abs() < 1.0);
+        }
+    }
+
+    #[test]
+    fn accumulate_scroll_steps_handles_large_delta_in_constant_time() {
+        // The old loop would spin a million times for this; the closed form
+        // returns immediately. Also confirms the big jump is reported exactly.
+        let mut residual = 0.0f32;
+        let steps = accumulate_scroll_steps(&mut residual, 1_000_000.0);
+        assert_eq!(steps, 1_000_000);
+        assert!(residual.abs() < 1.0);
+    }
+
+    #[test]
+    fn accumulate_scroll_steps_rejects_non_finite_delta() {
+        let mut residual = 0.5f32;
+        assert_eq!(accumulate_scroll_steps(&mut residual, f32::NAN), 0);
+        assert_eq!(residual, 0.0, "non-finite delta must reset residual");
+
+        let mut residual = 0.5f32;
+        assert_eq!(accumulate_scroll_steps(&mut residual, f32::INFINITY), 0);
+        assert_eq!(residual, 0.0);
+    }
 
     #[test]
     fn pane_hit_testing_uses_cell_rect() {

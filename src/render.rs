@@ -870,6 +870,51 @@ mod tests {
     }
 
     #[test]
+    fn full_redraw_fast_path_preserves_custom_and_inverse_backgrounds() {
+        // The full-redraw background pass skips cells that resolve to base_bg
+        // (the buffer is pre-cleared to it). This guards that custom-bg, inverse,
+        // and default cells all still produce the correct background after the
+        // fast-path skip is applied.
+        let config = AppConfig::default();
+        let cols = 3u16;
+        let rows = 1u16;
+        let mut atlas = new_atlas(&config);
+        let mut terminal = Terminal::new(cols, rows);
+        terminal.cursor_visible = false;
+
+        // col 0: default background (should stay base_bg, skipped by fast path).
+        // col 1: explicit RGB background.
+        let mut custom = crate::grid::Cell::BLANK;
+        custom.ch = ' ' as u32;
+        custom.bg = crate::grid::COLOR_FLAG_RGB | 0x11_22_33;
+        terminal.grid.set_cell(0, 1, custom);
+        // col 2: inverse attribute swaps fg/bg, so its background becomes base_fg.
+        let mut inverse = crate::grid::Cell::BLANK;
+        inverse.ch = ' ' as u32;
+        inverse.attrs = crate::grid::ATTR_INVERSE;
+        terminal.grid.set_cell(0, 2, inverse);
+
+        let mut renderer = OffscreenRenderer::new(cols, rows, &atlas);
+        renderer.render(&mut terminal, &mut atlas, &config);
+
+        let base_bg = config.style.background.as_u32_rgb();
+        let base_fg = config.style.foreground.as_u32_rgb();
+        let cw = atlas.cell_width;
+
+        // Sample the top-left pixel of each cell's background.
+        assert_eq!(renderer.pixels[0], base_bg, "default cell should be base_bg");
+        assert_eq!(
+            renderer.pixels[cw], 0x11_22_33,
+            "custom-bg cell should keep its explicit background"
+        );
+        assert_eq!(
+            renderer.pixels[2 * cw],
+            base_fg,
+            "inverse cell background should become base_fg"
+        );
+    }
+
+    #[test]
     fn fish_startup_transcript_replay_matches_full_redraw() {
         replay_chunks_match_full_redraw(80, 24, FISH_STARTUP_TRANSCRIPT, |terminal, _| {
             for row in 0..24 {

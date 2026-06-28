@@ -1784,6 +1784,28 @@ fn handterm_cache_dir() -> Option<std::path::PathBuf> {
     dirs::cache_dir().map(|dir| dir.join("handterm"))
 }
 
+/// Atomically replace a cache file's contents.
+///
+/// The font caches live in a shared directory (`~/Library/Caches/handterm` on
+/// macOS) and several handterm processes can run concurrently. A plain
+/// `fs::write` truncates the file and writes in place, so a concurrent reader
+/// can observe a torn/empty file. Writing to a unique temp file and renaming it
+/// over the target makes each update observably all-or-nothing.
+fn atomic_write_cache(cache: &std::path::Path, content: &str) -> std::io::Result<()> {
+    if let Some(parent) = cache.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = cache.with_extension(format!("tmp.{}", std::process::id()));
+    std::fs::write(&tmp, content)?;
+    match std::fs::rename(&tmp, cache) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(err)
+        }
+    }
+}
+
 fn font_cache_path_in(cache_dir: &std::path::Path) -> std::path::PathBuf {
     cache_dir.join("font_path")
 }
@@ -1853,7 +1875,7 @@ fn save_cached_emoji_font_paths_to(
         content.push_str(path);
         content.push('\n');
     }
-    std::fs::write(cache, content)
+    atomic_write_cache(cache, &content)
 }
 
 fn save_cached_emoji_font_paths(paths: &[String]) {
@@ -1936,7 +1958,7 @@ fn save_cached_cell_width_to(
     lines.push(format!("{key}\t{width}"));
     let mut content = lines.join("\n");
     content.push('\n');
-    std::fs::write(cache, content)
+    atomic_write_cache(cache, &content)
 }
 
 fn save_cached_cell_width(path: &str, font_size_pt: f64, dpi: u32, signature: &str, width: usize) {
@@ -2040,7 +2062,7 @@ fn save_cached_font_path_to(
     lines.push(format!("{family}={path}"));
     let mut content = lines.join("\n");
     content.push('\n');
-    std::fs::write(cache, content)
+    atomic_write_cache(cache, &content)
 }
 
 fn save_cached_font_path(family: &str, path: &str) {
@@ -2085,7 +2107,7 @@ fn save_cached_font_metrics_to(
     lines.push(entry.trim_end().to_string());
     let mut content = lines.join("\n");
     content.push('\n');
-    std::fs::write(cache, content)
+    atomic_write_cache(cache, &content)
 }
 
 fn save_cached_font_metrics(

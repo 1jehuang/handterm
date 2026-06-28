@@ -951,7 +951,9 @@ impl Grid {
             }
             let idx = self.cell_index_at(self.cursor_row, self.cursor_col);
             self.cells[idx] = Cell::BLANK;
-            self.graphemes[idx] = None;
+            if self.has_graphemes {
+                self.graphemes[idx] = None;
+            }
             self.cursor_col = 0;
             if self.cursor_row + 1 >= self.scroll_bottom {
                 self.scroll_up();
@@ -960,36 +962,40 @@ impl Grid {
             }
         }
 
+        // Materialize the shared style once and write the whole 24-byte Cell in
+        // one store instead of eight separate field assignments.
+        let mut cell = Cell {
+            ch,
+            fg: self.current_fg,
+            bg: self.current_bg,
+            underline_color: self.current_underline_color,
+            hyperlink_id: self.current_hyperlink_id,
+            attrs: self.current_attrs,
+            flags: if width == 2 { FLAG_WIDE } else { 0 },
+            underline_style: self.current_underline_style,
+            _pad: [0; 3],
+        };
+
         let idx = self.cell_index_at(self.cursor_row, self.cursor_col);
-        let cell = &mut self.cells[idx];
-        cell.ch = ch;
-        cell.fg = self.current_fg;
-        cell.bg = self.current_bg;
-        cell.attrs = self.current_attrs;
-        cell.underline_color = self.current_underline_color;
-        cell.underline_style = self.current_underline_style;
-        cell.hyperlink_id = self.current_hyperlink_id;
-        cell.flags = if width == 2 { FLAG_WIDE } else { 0 };
+        self.cells[idx] = cell;
         if grapheme.is_some() {
             self.has_graphemes = true;
+            self.graphemes[idx] = grapheme;
+        } else if self.has_graphemes {
+            self.graphemes[idx] = None;
         }
-        self.graphemes[idx] = grapheme;
         self.mark_dirty(idx);
 
         self.cursor_col += 1;
 
         if width == 2 && self.cursor_col < self.cols {
             let idx2 = self.cell_index_at(self.cursor_row, self.cursor_col);
-            let cell2 = &mut self.cells[idx2];
-            cell2.ch = 0;
-            cell2.fg = self.current_fg;
-            cell2.bg = self.current_bg;
-            cell2.attrs = self.current_attrs;
-            cell2.underline_color = self.current_underline_color;
-            cell2.underline_style = self.current_underline_style;
-            cell2.hyperlink_id = self.current_hyperlink_id;
-            cell2.flags = FLAG_WIDE_CONT;
-            self.graphemes[idx2] = None;
+            cell.ch = 0;
+            cell.flags = FLAG_WIDE_CONT;
+            self.cells[idx2] = cell;
+            if self.has_graphemes {
+                self.graphemes[idx2] = None;
+            }
             self.mark_dirty(idx2);
             self.cursor_col += 1;
         }

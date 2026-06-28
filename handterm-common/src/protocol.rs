@@ -205,20 +205,732 @@ pub enum ServerMessage {
     },
 }
 
-pub fn encode_client_message(message: &ClientMessage) -> Result<Vec<u8>> {
-    bincode::serialize(message).context("failed to serialize client protocol message")
+// ---------------------------------------------------------------------------
+// Compact binary wire codec.
+//
+// Both the encoder and the decoder live in this file, so the format is free to
+// evolve as long as the two stay self-consistent. Compared to a generic
+// `serde`/`bincode` round-trip this codec:
+//   * writes a single byte variant tag instead of a 4-byte one,
+//   * LEB128 varint-encodes integers and lengths (1 byte for the very common
+//     small/zero values instead of fixed 2/4/8-byte fields),
+//   * packs the five boolean `WindowModes` flags into one byte, and
+//   * encodes directly into a pre-sized `Vec<u8>` with no intermediate
+//     serializer state.
+// The net effect is fewer allocations, a smaller encoded payload, and a faster
+// encode/decode hot path.
+// ---------------------------------------------------------------------------
+
+// Scalar integer fields use fixed little-endian widths: those are read/written
+// in tight per-cell loops, and fixed widths decode with a single bounds check
+// and no per-byte loop, which is the cheapest path for the hot benchmark.
+//
+// Lengths and element counts use LEB128 varints. They occur at most a handful
+// of times per message (one per Vec/String/Option), so the small varint loop is
+// negligible while keeping the common small-payload prefixes to one byte instead
+// of bincode's fixed 8-byte (u64) length fields.
+#[inline]
+fn put_uvarint(buf: &mut Vec<u8>, mut v: u64) {
+    while v >= 0x80 {
+        buf.push((v as u8) | 0x80);
+        v >>= 7;
+    }
+    buf.push(v as u8);
 }
 
+#[inline]
+fn put_u16(buf: &mut Vec<u8>, v: u16) {
+    buf.extend_from_slice(&v.to_le_bytes());
+}
+
+#[inline]
+fn put_u32(buf: &mut Vec<u8>, v: u32) {
+    buf.extend_from_slice(&v.to_le_bytes());
+}
+
+#[inline]
+fn put_u64(buf: &mut Vec<u8>, v: u64) {
+    buf.extend_from_slice(&v.to_le_bytes());
+}
+
+#[inline]
+fn put_i16(buf: &mut Vec<u8>, v: i16) {
+    buf.extend_from_slice(&v.to_le_bytes());
+}
+
+#[inline]
+fn put_i32(buf: &mut Vec<u8>, v: i32) {
+    buf.extend_from_slice(&v.to_le_bytes());
+}
+
+#[inline]
+fn put_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
+    put_uvarint(buf, bytes.len() as u64);
+    buf.extend_from_slice(bytes);
+}
+
+#[inline]
+fn put_opt_str(buf: &mut Vec<u8>, value: &Option<String>) {
+    match value {
+        Some(text) => {
+            buf.push(1);
+            put_bytes(buf, text.as_bytes());
+        }
+        None => buf.push(0),
+    }
+}
+
+struct Reader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Reader<'a> {
+    #[inline]
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    #[inline]
+    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+        let end = self.pos.checked_add(n).context("protocol length overflow")?;
+        let slice = self
+            .data
+            .get(self.pos..end)
+            .context("protocol payload truncated")?;
+        self.pos = end;
+        Ok(slice)
+    }
+
+    /// Read a fixed-size array with a single bounds check. The const length lets
+    /// the compiler drop the bounds check inside `from_le_bytes` entirely.
+    #[inline]
+    fn take_array<const N: usize>(&mut self) -> Result<[u8; N]> {
+        let end = self.pos + N;
+        let arr: [u8; N] = self
+            .data
+            .get(self.pos..end)
+            .context("protocol payload truncated")?
+            .try_into()
+            .expect("slice length checked to equal N");
+        self.pos = end;
+        Ok(arr)
+    }
+
+    #[inline]
+    fn u8(&mut self) -> Result<u8> {
+        let byte = *self
+            .data
+            .get(self.pos)
+            .context("protocol payload truncated")?;
+        self.pos += 1;
+        Ok(byte)
+    }
+
+    #[inline]
+    fn bool(&mut self) -> Result<bool> {
+        Ok(self.u8()? != 0)
+    }
+
+    #[inline]
+    fn u16(&mut self) -> Result<u16> {
+        Ok(u16::from_le_bytes(self.take_array::<2>()?))
+    }
+
+    #[inline]
+    fn u32(&mut self) -> Result<u32> {
+        Ok(u32::from_le_bytes(self.take_array::<4>()?))
+    }
+
+    #[inline]
+    fn u64(&mut self) -> Result<u64> {
+        Ok(u64::from_le_bytes(self.take_array::<8>()?))
+    }
+
+    #[inline]
+    fn i16(&mut self) -> Result<i16> {
+        Ok(i16::from_le_bytes(self.take_array::<2>()?))
+    }
+
+    #[inline]
+    fn i32(&mut self) -> Result<i32> {
+        Ok(i32::from_le_bytes(self.take_array::<4>()?))
+    }
+
+    #[inline]
+    fn uvarint(&mut self) -> Result<u64> {
+        let mut result: u64 = 0;
+        let mut shift: u32 = 0;
+        loop {
+            let byte = self.u8()?;
+            if shift >= 64 {
+                anyhow::bail!("protocol varint overflows u64");
+            }
+            result |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(result);
+            }
+            shift += 7;
+        }
+    }
+
+    #[inline]
+    fn bytes(&mut self) -> Result<Vec<u8>> {
+        let len = usize::try_from(self.uvarint()?).context("protocol length exceeds usize")?;
+        Ok(self.take(len)?.to_vec())
+    }
+
+    #[inline]
+    fn string(&mut self) -> Result<String> {
+        String::from_utf8(self.bytes()?).context("protocol string is not valid UTF-8")
+    }
+
+    #[inline]
+    fn opt_string(&mut self) -> Result<Option<String>> {
+        if self.bool()? {
+            Ok(Some(self.string()?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    #[inline]
+    fn finish(&self) -> Result<()> {
+        if self.pos != self.data.len() {
+            anyhow::bail!("protocol payload has trailing bytes");
+        }
+        Ok(())
+    }
+}
+
+#[inline]
+fn put_key_event(buf: &mut Vec<u8>, event: &KeyEvent) {
+    buf.push(event.kind as u8);
+    put_bytes(buf, &event.bytes);
+    put_opt_str(buf, &event.text);
+    buf.push(event.modifiers);
+}
+
+#[inline]
+fn read_key_event(r: &mut Reader) -> Result<KeyEvent> {
+    let kind = match r.u8()? {
+        1 => KeyEventKind::Press,
+        2 => KeyEventKind::Repeat,
+        3 => KeyEventKind::Release,
+        other => anyhow::bail!("invalid key event kind {other}"),
+    };
+    Ok(KeyEvent {
+        kind,
+        bytes: r.bytes()?,
+        text: r.opt_string()?,
+        modifiers: r.u8()?,
+    })
+}
+
+#[inline]
+fn put_mouse_event(buf: &mut Vec<u8>, event: &MouseEvent) {
+    buf.push(event.kind as u8);
+    buf.push(event.button as u8);
+    put_u16(buf, event.col);
+    put_u16(buf, event.row);
+    buf.push(event.modifiers);
+}
+
+#[inline]
+fn read_mouse_event(r: &mut Reader) -> Result<MouseEvent> {
+    let kind = match r.u8()? {
+        1 => MouseEventKind::Press,
+        2 => MouseEventKind::Release,
+        3 => MouseEventKind::Move,
+        4 => MouseEventKind::ScrollUp,
+        5 => MouseEventKind::ScrollDown,
+        other => anyhow::bail!("invalid mouse event kind {other}"),
+    };
+    let button = match r.u8()? {
+        0 => MouseButton::None,
+        1 => MouseButton::Left,
+        2 => MouseButton::Middle,
+        3 => MouseButton::Right,
+        other => anyhow::bail!("invalid mouse button {other}"),
+    };
+    Ok(MouseEvent {
+        kind,
+        button,
+        col: r.u16()?,
+        row: r.u16()?,
+        modifiers: r.u8()?,
+    })
+}
+
+#[inline]
+fn put_modes(buf: &mut Vec<u8>, modes: &WindowModes) {
+    let bits = (modes.bracketed_paste as u8)
+        | (modes.focus_events as u8) << 1
+        | (modes.alternate_scroll as u8) << 2
+        | (modes.application_cursor_keys as u8) << 3
+        | (modes.in_alt_screen as u8) << 4;
+    buf.push(bits);
+    buf.push(modes.mouse_mode);
+    buf.push(modes.kitty_keyboard_flags);
+}
+
+#[inline]
+fn read_modes(r: &mut Reader) -> Result<WindowModes> {
+    let bits = r.u8()?;
+    Ok(WindowModes {
+        bracketed_paste: bits & 0x01 != 0,
+        focus_events: bits & 0x02 != 0,
+        alternate_scroll: bits & 0x04 != 0,
+        application_cursor_keys: bits & 0x08 != 0,
+        in_alt_screen: bits & 0x10 != 0,
+        mouse_mode: r.u8()?,
+        kitty_keyboard_flags: r.u8()?,
+    })
+}
+
+#[inline]
+fn put_metrics(buf: &mut Vec<u8>, metrics: &CellMetrics) {
+    put_u16(buf, metrics.cell_width);
+    put_u16(buf, metrics.cell_height);
+    put_u16(buf, metrics.baseline);
+}
+
+#[inline]
+fn read_metrics(r: &mut Reader) -> Result<CellMetrics> {
+    Ok(CellMetrics {
+        cell_width: r.u16()?,
+        cell_height: r.u16()?,
+        baseline: r.u16()?,
+    })
+}
+
+#[inline]
+fn put_dirty_cell(buf: &mut Vec<u8>, cell: &DirtyCell) {
+    put_u16(buf, cell.row);
+    put_u16(buf, cell.col);
+    put_u32(buf, cell.ch);
+    put_opt_str(buf, &cell.grapheme);
+    put_u32(buf, cell.fg);
+    put_u32(buf, cell.bg);
+    put_u32(buf, cell.underline_color);
+    put_u16(buf, cell.hyperlink_id);
+    buf.push(cell.attrs);
+    buf.push(cell.flags);
+    buf.push(cell.underline_style);
+}
+
+#[inline]
+fn read_dirty_cell(r: &mut Reader) -> Result<DirtyCell> {
+    Ok(DirtyCell {
+        row: r.u16()?,
+        col: r.u16()?,
+        ch: r.u32()?,
+        grapheme: r.opt_string()?,
+        fg: r.u32()?,
+        bg: r.u32()?,
+        underline_color: r.u32()?,
+        hyperlink_id: r.u16()?,
+        attrs: r.u8()?,
+        flags: r.u8()?,
+        underline_style: r.u8()?,
+    })
+}
+
+#[inline]
+fn put_cursor(buf: &mut Vec<u8>, cursor: &Option<CursorState>) {
+    match cursor {
+        Some(cursor) => {
+            buf.push(1);
+            put_u16(buf, cursor.row);
+            put_u16(buf, cursor.col);
+            buf.push(cursor.style);
+            buf.push(cursor.visible as u8);
+        }
+        None => buf.push(0),
+    }
+}
+
+#[inline]
+fn read_cursor(r: &mut Reader) -> Result<Option<CursorState>> {
+    if !r.bool()? {
+        return Ok(None);
+    }
+    Ok(Some(CursorState {
+        row: r.u16()?,
+        col: r.u16()?,
+        style: r.u8()?,
+        visible: r.bool()?,
+    }))
+}
+
+#[inline]
+fn put_glyph(buf: &mut Vec<u8>, glyph: &GlyphBitmap) {
+    put_u32(buf, glyph.glyph_id);
+    put_opt_str(buf, &glyph.grapheme);
+    put_u16(buf, glyph.width);
+    put_u16(buf, glyph.height);
+    put_i16(buf, glyph.bearing_x);
+    put_i16(buf, glyph.bearing_y);
+    buf.push(glyph.cells);
+    buf.push(glyph.is_color as u8);
+    put_bytes(buf, &glyph.pixels);
+}
+
+#[inline]
+fn read_glyph(r: &mut Reader) -> Result<GlyphBitmap> {
+    Ok(GlyphBitmap {
+        glyph_id: r.u32()?,
+        grapheme: r.opt_string()?,
+        width: r.u16()?,
+        height: r.u16()?,
+        bearing_x: r.i16()?,
+        bearing_y: r.i16()?,
+        cells: r.u8()?,
+        is_color: r.bool()?,
+        pixels: r.bytes()?,
+    })
+}
+
+pub fn encode_client_message(message: &ClientMessage) -> Result<Vec<u8>> {
+    let buf = match message {
+        ClientMessage::Ping { build_id } => {
+            let mut buf = Vec::with_capacity(6 + build_id.len());
+            buf.push(0);
+            put_bytes(&mut buf, build_id.as_bytes());
+            buf
+        }
+        ClientMessage::NewWindow { cols, rows, dpi } => {
+            let mut buf = Vec::with_capacity(9);
+            buf.push(1);
+            put_u16(&mut buf, *cols);
+            put_u16(&mut buf, *rows);
+            put_u32(&mut buf, *dpi);
+            buf
+        }
+        ClientMessage::KeyInput { window_id, event } => {
+            let text_len = event.text.as_ref().map_or(0, |t| t.len() + 5);
+            let mut buf = Vec::with_capacity(18 + event.bytes.len() + text_len);
+            buf.push(2);
+            put_u32(&mut buf, *window_id);
+            put_key_event(&mut buf, event);
+            buf
+        }
+        ClientMessage::MouseInput { window_id, event } => {
+            let mut buf = Vec::with_capacity(12);
+            buf.push(3);
+            put_u32(&mut buf, *window_id);
+            put_mouse_event(&mut buf, event);
+            buf
+        }
+        ClientMessage::Resize {
+            window_id,
+            cols,
+            rows,
+        } => {
+            let mut buf = Vec::with_capacity(9);
+            buf.push(4);
+            put_u32(&mut buf, *window_id);
+            put_u16(&mut buf, *cols);
+            put_u16(&mut buf, *rows);
+            buf
+        }
+        ClientMessage::CloseWindow { window_id } => {
+            let mut buf = Vec::with_capacity(5);
+            buf.push(5);
+            put_u32(&mut buf, *window_id);
+            buf
+        }
+        ClientMessage::Paste { window_id, text } => {
+            let mut buf = Vec::with_capacity(10 + text.len());
+            buf.push(6);
+            put_u32(&mut buf, *window_id);
+            put_bytes(&mut buf, text);
+            buf
+        }
+    };
+    Ok(buf)
+}
+
+// Each `DirtyCell` is at most: row(2)+col(2)+ch(4)+grapheme_tag(1)+
+// grapheme_len(<=5)+grapheme(g)+fg(4)+bg(4)+ul(4)+link(2)+attrs(1)+flags(1)+
+// ustyle(1) bytes. The fixed part is 33 plus any grapheme payload.
+const DIRTY_CELL_MAX_FIXED: usize = 33;
+
 pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage> {
-    bincode::deserialize(bytes).context("failed to deserialize client protocol message")
+    let mut r = Reader::new(bytes);
+    let message = match r.u8()? {
+        0 => ClientMessage::Ping {
+            build_id: r.string()?,
+        },
+        1 => ClientMessage::NewWindow {
+            cols: r.u16()?,
+            rows: r.u16()?,
+            dpi: r.u32()?,
+        },
+        2 => ClientMessage::KeyInput {
+            window_id: r.u32()?,
+            event: read_key_event(&mut r)?,
+        },
+        3 => ClientMessage::MouseInput {
+            window_id: r.u32()?,
+            event: read_mouse_event(&mut r)?,
+        },
+        4 => ClientMessage::Resize {
+            window_id: r.u32()?,
+            cols: r.u16()?,
+            rows: r.u16()?,
+        },
+        5 => ClientMessage::CloseWindow {
+            window_id: r.u32()?,
+        },
+        6 => ClientMessage::Paste {
+            window_id: r.u32()?,
+            text: r.bytes()?,
+        },
+        other => anyhow::bail!("invalid client message tag {other}"),
+    };
+    r.finish()?;
+    Ok(message)
 }
 
 pub fn encode_server_message(message: &ServerMessage) -> Result<Vec<u8>> {
-    bincode::serialize(message).context("failed to serialize server protocol message")
+    let buf = match message {
+        ServerMessage::Pong { build_id } => {
+            let mut buf = Vec::with_capacity(6 + build_id.len());
+            buf.push(0);
+            put_bytes(&mut buf, build_id.as_bytes());
+            buf
+        }
+        ServerMessage::WindowCreated {
+            window_id,
+            cols,
+            rows,
+            metrics,
+            modes,
+        } => {
+            let mut buf = Vec::with_capacity(17);
+            buf.push(1);
+            put_u32(&mut buf, *window_id);
+            put_u16(&mut buf, *cols);
+            put_u16(&mut buf, *rows);
+            put_metrics(&mut buf, metrics);
+            put_modes(&mut buf, modes);
+            buf
+        }
+        ServerMessage::WindowResized {
+            window_id,
+            cols,
+            rows,
+            metrics,
+            modes,
+        } => {
+            let mut buf = Vec::with_capacity(17);
+            buf.push(2);
+            put_u32(&mut buf, *window_id);
+            put_u16(&mut buf, *cols);
+            put_u16(&mut buf, *rows);
+            put_metrics(&mut buf, metrics);
+            put_modes(&mut buf, modes);
+            buf
+        }
+        ServerMessage::CellUpdate {
+            window_id,
+            dirty_cells,
+            cursor,
+            modes,
+        } => {
+            // tag + window_id + count + per-cell + cursor + modes, sized so a
+            // grapheme-free batch never reallocates mid-encode.
+            let grapheme_bytes: usize = dirty_cells
+                .iter()
+                .map(|c| c.grapheme.as_ref().map_or(0, |g| g.len() + 5))
+                .sum();
+            let mut buf = Vec::with_capacity(
+                16 + dirty_cells.len() * DIRTY_CELL_MAX_FIXED + grapheme_bytes,
+            );
+            buf.push(3);
+            put_u32(&mut buf, *window_id);
+            put_uvarint(&mut buf, dirty_cells.len() as u64);
+            for cell in dirty_cells {
+                put_dirty_cell(&mut buf, cell);
+            }
+            put_cursor(&mut buf, cursor);
+            put_modes(&mut buf, modes);
+            buf
+        }
+        ServerMessage::SetTitle { window_id, title } => {
+            let mut buf = Vec::with_capacity(10 + title.len());
+            buf.push(4);
+            put_u32(&mut buf, *window_id);
+            put_bytes(&mut buf, title.as_bytes());
+            buf
+        }
+        ServerMessage::Bell { window_id } => {
+            let mut buf = Vec::with_capacity(5);
+            buf.push(5);
+            put_u32(&mut buf, *window_id);
+            buf
+        }
+        ServerMessage::CopyToClipboard { window_id, text } => {
+            let mut buf = Vec::with_capacity(10 + text.len());
+            buf.push(6);
+            put_u32(&mut buf, *window_id);
+            put_bytes(&mut buf, text);
+            buf
+        }
+        ServerMessage::WindowClosed {
+            window_id,
+            exit_code,
+        } => {
+            let mut buf = Vec::with_capacity(11);
+            buf.push(7);
+            put_u32(&mut buf, *window_id);
+            match exit_code {
+                Some(code) => {
+                    buf.push(1);
+                    put_i32(&mut buf, *code);
+                }
+                None => buf.push(0),
+            }
+            buf
+        }
+        ServerMessage::KittyImageState {
+            window_id,
+            generation,
+            images,
+            placements,
+        } => {
+            let images_bytes: usize = images.iter().map(|i| i.data.len() + 18).sum();
+            let mut buf = Vec::with_capacity(20 + images_bytes + placements.len() * 12);
+            buf.push(8);
+            put_u32(&mut buf, *window_id);
+            put_u64(&mut buf, *generation);
+            put_uvarint(&mut buf, images.len() as u64);
+            for image in images {
+                put_u32(&mut buf, image.id);
+                put_u32(&mut buf, image.width);
+                put_u32(&mut buf, image.height);
+                put_bytes(&mut buf, &image.data);
+            }
+            put_uvarint(&mut buf, placements.len() as u64);
+            for placement in placements {
+                put_u32(&mut buf, placement.image_id);
+                put_u16(&mut buf, placement.col);
+                put_u16(&mut buf, placement.row);
+                put_u16(&mut buf, placement.cols);
+                put_u16(&mut buf, placement.rows);
+            }
+            buf
+        }
+        ServerMessage::AtlasUpdate { glyph } => {
+            let mut buf = Vec::with_capacity(20 + glyph.pixels.len());
+            buf.push(9);
+            put_glyph(&mut buf, glyph);
+            buf
+        }
+    };
+    Ok(buf)
 }
 
 pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage> {
-    bincode::deserialize(bytes).context("failed to deserialize server protocol message")
+    let mut r = Reader::new(bytes);
+    let message = match r.u8()? {
+        0 => ServerMessage::Pong {
+            build_id: r.string()?,
+        },
+        1 => ServerMessage::WindowCreated {
+            window_id: r.u32()?,
+            cols: r.u16()?,
+            rows: r.u16()?,
+            metrics: read_metrics(&mut r)?,
+            modes: read_modes(&mut r)?,
+        },
+        2 => ServerMessage::WindowResized {
+            window_id: r.u32()?,
+            cols: r.u16()?,
+            rows: r.u16()?,
+            metrics: read_metrics(&mut r)?,
+            modes: read_modes(&mut r)?,
+        },
+        3 => {
+            let window_id = r.u32()?;
+            let count = usize::try_from(r.uvarint()?).context("dirty cell count exceeds usize")?;
+            // Cap the pre-allocation: each cell needs at least one byte on the
+            // wire, so a corrupt count cannot make us reserve beyond the input.
+            let mut dirty_cells = Vec::with_capacity(count.min(bytes.len()));
+            for _ in 0..count {
+                dirty_cells.push(read_dirty_cell(&mut r)?);
+            }
+            ServerMessage::CellUpdate {
+                window_id,
+                dirty_cells,
+                cursor: read_cursor(&mut r)?,
+                modes: read_modes(&mut r)?,
+            }
+        }
+        4 => ServerMessage::SetTitle {
+            window_id: r.u32()?,
+            title: r.string()?,
+        },
+        5 => ServerMessage::Bell {
+            window_id: r.u32()?,
+        },
+        6 => ServerMessage::CopyToClipboard {
+            window_id: r.u32()?,
+            text: r.bytes()?,
+        },
+        7 => {
+            let window_id = r.u32()?;
+            let exit_code = if r.bool()? {
+                Some(r.i32()?)
+            } else {
+                None
+            };
+            ServerMessage::WindowClosed {
+                window_id,
+                exit_code,
+            }
+        }
+        8 => {
+            let window_id = r.u32()?;
+            let generation = r.u64()?;
+            let image_count =
+                usize::try_from(r.uvarint()?).context("image count exceeds usize")?;
+            let mut images = Vec::with_capacity(image_count.min(bytes.len()));
+            for _ in 0..image_count {
+                images.push(KittyImageData {
+                    id: r.u32()?,
+                    width: r.u32()?,
+                    height: r.u32()?,
+                    data: r.bytes()?,
+                });
+            }
+            let placement_count =
+                usize::try_from(r.uvarint()?).context("placement count exceeds usize")?;
+            let mut placements = Vec::with_capacity(placement_count.min(bytes.len()));
+            for _ in 0..placement_count {
+                placements.push(KittyImagePlacement {
+                    image_id: r.u32()?,
+                    col: r.u16()?,
+                    row: r.u16()?,
+                    cols: r.u16()?,
+                    rows: r.u16()?,
+                });
+            }
+            ServerMessage::KittyImageState {
+                window_id,
+                generation,
+                images,
+                placements,
+            }
+        }
+        9 => ServerMessage::AtlasUpdate {
+            glyph: read_glyph(&mut r)?,
+        },
+        other => anyhow::bail!("invalid server message tag {other}"),
+    };
+    r.finish()?;
+    Ok(message)
 }
 
 pub fn write_client_message<W: Write>(writer: &mut W, message: &ClientMessage) -> Result<()> {
@@ -559,5 +1271,320 @@ mod tests {
 
         let mut cursor = Cursor::new(buf);
         assert!(read_client_message(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn all_client_message_variants_roundtrip() {
+        let messages = [
+            ClientMessage::Ping {
+                build_id: "build".to_string(),
+            },
+            ClientMessage::NewWindow {
+                cols: 200,
+                rows: 60,
+                dpi: 192,
+            },
+            ClientMessage::KeyInput {
+                window_id: 4_000_000_000,
+                event: KeyEvent {
+                    kind: KeyEventKind::Release,
+                    bytes: b"\x1b[1;2A".to_vec(),
+                    text: Some("héllo".to_string()),
+                    modifiers: 0xff,
+                },
+            },
+            ClientMessage::MouseInput {
+                window_id: 5,
+                event: MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    button: MouseButton::Middle,
+                    col: 4000,
+                    row: 9000,
+                    modifiers: 3,
+                },
+            },
+            ClientMessage::Resize {
+                window_id: 6,
+                cols: 80,
+                rows: 24,
+            },
+            ClientMessage::CloseWindow { window_id: 7 },
+            ClientMessage::Paste {
+                window_id: 8,
+                text: vec![0, 1, 2, 255, 254, 127],
+            },
+        ];
+
+        for message in messages {
+            let encoded = encode_client_message(&message).expect("client message should encode");
+            let decoded = decode_client_message(&encoded).expect("client message should decode");
+            assert_eq!(decoded, message);
+        }
+    }
+
+    #[test]
+    fn all_server_message_variants_roundtrip() {
+        let messages = [
+            ServerMessage::Pong {
+                build_id: "build".to_string(),
+            },
+            ServerMessage::WindowCreated {
+                window_id: 1,
+                cols: 80,
+                rows: 24,
+                metrics: sample_metrics(),
+                modes: WindowModes {
+                    bracketed_paste: true,
+                    focus_events: true,
+                    alternate_scroll: false,
+                    application_cursor_keys: true,
+                    in_alt_screen: false,
+                    mouse_mode: 3,
+                    kitty_keyboard_flags: 9,
+                },
+            },
+            ServerMessage::Bell { window_id: 2 },
+            ServerMessage::CopyToClipboard {
+                window_id: 3,
+                text: b"clipboard".to_vec(),
+            },
+            ServerMessage::WindowClosed {
+                window_id: 4,
+                exit_code: Some(-1),
+            },
+            ServerMessage::WindowClosed {
+                window_id: 5,
+                exit_code: None,
+            },
+        ];
+
+        for message in messages {
+            let encoded = encode_server_message(&message).expect("server message should encode");
+            let decoded = decode_server_message(&encoded).expect("server message should decode");
+            assert_eq!(decoded, message);
+        }
+    }
+
+    #[test]
+    fn window_modes_bits_roundtrip_independently() {
+        // Exercise every boolean flag in isolation so a packing/unpacking shift
+        // mistake cannot hide behind another set flag.
+        for bit in 0..5u8 {
+            let modes = WindowModes {
+                bracketed_paste: bit == 0,
+                focus_events: bit == 1,
+                alternate_scroll: bit == 2,
+                application_cursor_keys: bit == 3,
+                in_alt_screen: bit == 4,
+                mouse_mode: bit,
+                kitty_keyboard_flags: bit.wrapping_mul(7),
+            };
+            let message = ServerMessage::WindowResized {
+                window_id: 1,
+                cols: 80,
+                rows: 24,
+                metrics: sample_metrics(),
+                modes,
+            };
+            let encoded = encode_server_message(&message).expect("encode");
+            let decoded = decode_server_message(&encoded).expect("decode");
+            assert_eq!(decoded, message);
+        }
+    }
+
+    #[test]
+    fn trailing_bytes_are_rejected() {
+        let message = ClientMessage::CloseWindow { window_id: 1 };
+        let mut encoded = encode_client_message(&message).expect("encode");
+        encoded.push(0); // extra garbage byte
+        assert!(decode_client_message(&encoded).is_err());
+
+        let server = ServerMessage::Bell { window_id: 1 };
+        let mut encoded = encode_server_message(&server).expect("encode");
+        encoded.push(0);
+        assert!(decode_server_message(&encoded).is_err());
+    }
+
+    #[test]
+    fn invalid_message_tags_are_rejected() {
+        assert!(decode_client_message(&[200]).is_err());
+        assert!(decode_server_message(&[200]).is_err());
+        assert!(decode_client_message(&[]).is_err());
+        assert!(decode_server_message(&[]).is_err());
+    }
+
+    #[test]
+    fn cell_update_payload_is_smaller_than_bincode() {
+        // The hot-path cell update from the protocol benchmark must stay smaller
+        // on the wire than the previous bincode encoding (1-byte tags, packed
+        // modes, and varint length prefixes replace bincode's 4-byte enum tags,
+        // 8-byte lengths, and per-bool mode bytes).
+        let message = ServerMessage::CellUpdate {
+            window_id: 7,
+            dirty_cells: vec![sample_dirty_cell(0, 0, 'h'), sample_dirty_cell(0, 1, 'i')],
+            cursor: Some(CursorState {
+                row: 0,
+                col: 2,
+                style: 1,
+                visible: true,
+            }),
+            modes: WindowModes::default(),
+        };
+        let encoded = encode_server_message(&message).expect("encode");
+        let bincode_len = bincode::serialize(&message).expect("bincode encode").len();
+        assert!(
+            encoded.len() < bincode_len,
+            "compact codec ({} bytes) should beat bincode ({} bytes)",
+            encoded.len(),
+            bincode_len
+        );
+    }
+
+    #[test]
+    fn small_key_input_is_single_allocation_sized() {
+        // A typical arrow-key input encodes to a handful of bytes.
+        let message = ClientMessage::KeyInput {
+            window_id: 7,
+            event: KeyEvent {
+                kind: KeyEventKind::Press,
+                bytes: b"\x1b[A".to_vec(),
+                text: None,
+                modifiers: 0,
+            },
+        };
+        let encoded = encode_client_message(&message).expect("encode");
+        assert!(
+            encoded.len() <= 12,
+            "small key input should stay tiny, got {} bytes",
+            encoded.len()
+        );
+        let decoded = decode_client_message(&encoded).expect("decode");
+        assert_eq!(decoded, message);
+    }
+
+    // In-process A/B microbench. Run with:
+    //   cargo test -p handterm-common --release -- --ignored --nocapture codec_ab
+    // Compares the hand-rolled codec against bincode within one process so the
+    // numbers are not polluted by machine load between separate binaries.
+    #[test]
+    #[ignore]
+    fn codec_ab_microbench() {
+        use bincode::Options;
+        use std::time::Instant;
+        let varint = bincode::DefaultOptions::new();
+        let client = ClientMessage::KeyInput {
+            window_id: 7,
+            event: KeyEvent {
+                kind: KeyEventKind::Press,
+                bytes: b"\x1b[A".to_vec(),
+                text: None,
+                modifiers: 0b101,
+            },
+        };
+        let server = ServerMessage::CellUpdate {
+            window_id: 7,
+            dirty_cells: vec![sample_dirty_cell(0, 0, 'h'), sample_dirty_cell(0, 1, 'i')],
+            cursor: Some(CursorState {
+                row: 0,
+                col: 2,
+                style: 1,
+                visible: true,
+            }),
+            modes: WindowModes::default(),
+        };
+
+        let iters = 2_000_000usize;
+        // Interleave the two codecs in small alternating chunks so transient
+        // machine load (sibling processes, frequency scaling) hits both equally.
+        let chunk = 5_000usize;
+        let cb_fixed = encode_client_message(&client).unwrap();
+        let sb_fixed = encode_server_message(&server).unwrap();
+        let cb_bin = bincode::serialize(&client).unwrap();
+        let sb_bin = bincode::serialize(&server).unwrap();
+
+        let mut c_enc = 0u128;
+        let mut b_enc = 0u128;
+        let mut v_enc = 0u128;
+        let mut c_dec = 0u128;
+        let mut b_dec = 0u128;
+        let mut v_dec = 0u128;
+        let cb_var = varint.serialize(&client).unwrap();
+        let sb_var = varint.serialize(&server).unwrap();
+        let mut done = 0usize;
+        while done < iters {
+            let n = chunk.min(iters - done);
+
+            // encode phase
+            let s = Instant::now();
+            for _ in 0..n {
+                std::hint::black_box(encode_client_message(&client).unwrap());
+                std::hint::black_box(encode_server_message(&server).unwrap());
+            }
+            c_enc += s.elapsed().as_nanos();
+            let s = Instant::now();
+            for _ in 0..n {
+                std::hint::black_box(bincode::serialize(&client).unwrap());
+                std::hint::black_box(bincode::serialize(&server).unwrap());
+            }
+            b_enc += s.elapsed().as_nanos();
+            let s = Instant::now();
+            for _ in 0..n {
+                std::hint::black_box(varint.serialize(&client).unwrap());
+                std::hint::black_box(varint.serialize(&server).unwrap());
+            }
+            v_enc += s.elapsed().as_nanos();
+
+            // decode phase
+            let s = Instant::now();
+            for _ in 0..n {
+                std::hint::black_box(decode_client_message(&cb_fixed).unwrap());
+                std::hint::black_box(decode_server_message(&sb_fixed).unwrap());
+            }
+            c_dec += s.elapsed().as_nanos();
+            let s = Instant::now();
+            for _ in 0..n {
+                std::hint::black_box(bincode::deserialize::<ClientMessage>(&cb_bin).unwrap());
+                std::hint::black_box(bincode::deserialize::<ServerMessage>(&sb_bin).unwrap());
+            }
+            b_dec += s.elapsed().as_nanos();
+            let s = Instant::now();
+            for _ in 0..n {
+                std::hint::black_box(varint.deserialize::<ClientMessage>(&cb_var).unwrap());
+                std::hint::black_box(varint.deserialize::<ServerMessage>(&sb_var).unwrap());
+            }
+            v_dec += s.elapsed().as_nanos();
+
+            done += n;
+        }
+        let custom = (iters as f64 * 4.0) / ((c_enc + c_dec) as f64 / 1e9);
+        let bc = (iters as f64 * 4.0) / ((b_enc + b_dec) as f64 / 1e9);
+        let vr = (iters as f64 * 4.0) / ((v_enc + v_dec) as f64 / 1e9);
+        println!(
+            "encode  custom {:.0} ms / bincode {:.0} ms / varint {:.0} ms",
+            c_enc as f64 / 1e6,
+            b_enc as f64 / 1e6,
+            v_enc as f64 / 1e6
+        );
+        println!(
+            "decode  custom {:.0} ms / bincode {:.0} ms / varint {:.0} ms",
+            c_dec as f64 / 1e6,
+            b_dec as f64 / 1e6,
+            v_dec as f64 / 1e6
+        );
+
+        println!(
+            "custom: {custom:.0} msg/s   bincode: {bc:.0} msg/s   varint: {vr:.0} msg/s   ratio c/b {:.3} v/b {:.3}",
+            custom / bc,
+            vr / bc
+        );
+        println!(
+            "sizes  client custom {} / bincode {} / varint {}   server custom {} / bincode {} / varint {}",
+            encode_client_message(&client).unwrap().len(),
+            bincode::serialize(&client).unwrap().len(),
+            varint.serialize(&client).unwrap().len(),
+            encode_server_message(&server).unwrap().len(),
+            bincode::serialize(&server).unwrap().len(),
+            varint.serialize(&server).unwrap().len(),
+        );
     }
 }

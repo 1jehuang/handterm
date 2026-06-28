@@ -48,6 +48,27 @@ enum GpuAppEvent {
 const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 const HOT_MODE_DURATION: Duration = Duration::from_millis(160);
 
+/// Convert a winit scale factor into the integer DPI value the font/atlas stack
+/// expects (96 DPI per 1.0 scale). Uses the same truncating conversion the GPU
+/// host has always used so atlas-cache keys stay identical to prior behavior.
+fn dpi_from_scale_factor(scale_factor: f64) -> u32 {
+    (96.0 * scale_factor).max(1.0) as u32
+}
+
+/// Pick a usable display scale factor from the available monitor handles,
+/// preferring the primary monitor. Returns `None` when no monitor reports a
+/// positive, finite scale (e.g. a headless event loop), in which case the
+/// caller falls back to probing via a hidden window.
+fn monitor_scale_factor(
+    primary: Option<f64>,
+    available: impl IntoIterator<Item = f64>,
+) -> Option<f64> {
+    let usable = |scale: &f64| scale.is_finite() && *scale > 0.0;
+    primary
+        .filter(usable)
+        .or_else(|| available.into_iter().find(usable))
+}
+
 pub fn run(config: AppConfig, startup_command: Option<String>) -> Result<()> {
     let shared_init_task = Some(GpuApp::spawn_shared_init_task());
     let event_loop = EventLoop::<GpuAppEvent>::with_user_event()
@@ -354,15 +375,27 @@ impl GpuApp {
             && let Some(winit_id) = self.window_ids.get(&id)
             && let Some(state) = self.windows.get(winit_id)
         {
-            return (96.0 * state.renderer.window.scale_factor()) as u32;
+            return dpi_from_scale_factor(state.renderer.window.scale_factor());
         }
         if let Some(state) = self.windows.values().next() {
-            return (96.0 * state.renderer.window.scale_factor()) as u32;
+            return dpi_from_scale_factor(state.renderer.window.scale_factor());
+        }
+        // First window: read the display scale factor directly from a monitor
+        // handle instead of creating (and immediately destroying) a throwaway
+        // probe window. On macOS this resolves to `NSScreen.backingScaleFactor`
+        // without any compositor window round-trip, which removes ~20ms from
+        // first-window startup. Fall back to a probe window only if no monitor
+        // is reported (e.g. headless without a display).
+        if let Some(scale) = monitor_scale_factor(
+            event_loop.primary_monitor().map(|m| m.scale_factor()),
+            event_loop.available_monitors().map(|m| m.scale_factor()),
+        ) {
+            return dpi_from_scale_factor(scale);
         }
         let probe_window = event_loop
             .create_window(winit::window::Window::default_attributes().with_visible(false))
             .expect("probe window should succeed");
-        let dpi = (96.0 * probe_window.scale_factor()) as u32;
+        let dpi = dpi_from_scale_factor(probe_window.scale_factor());
         drop(probe_window);
         dpi
     }
@@ -937,6 +970,45 @@ mod tests {
         );
 
         assert!(delta_rows >= 1.0);
+    }
+
+    #[test]
+    fn dpi_from_scale_factor_matches_96_dpi_convention() {
+        assert_eq!(dpi_from_scale_factor(1.0), 96);
+        assert_eq!(dpi_from_scale_factor(2.0), 192);
+        assert_eq!(dpi_from_scale_factor(1.5), 144);
+        // Fractional scales truncate, matching the host's historical behavior so
+        // the atlas-cache key for a given display does not shift.
+        assert_eq!(dpi_from_scale_factor(2.0 + 1.0 / 96.0), 193);
+        // Degenerate scales never collapse to zero DPI.
+        assert_eq!(dpi_from_scale_factor(0.0), 1);
+    }
+
+    #[test]
+    fn monitor_scale_factor_prefers_primary_when_usable() {
+        assert_eq!(
+            monitor_scale_factor(Some(2.0), vec![1.0, 3.0]),
+            Some(2.0),
+            "primary monitor scale should win"
+        );
+    }
+
+    #[test]
+    fn monitor_scale_factor_falls_back_to_first_usable_available() {
+        // No/invalid primary -> first finite, positive available scale is used.
+        assert_eq!(monitor_scale_factor(None, vec![1.5, 2.0]), Some(1.5));
+        assert_eq!(monitor_scale_factor(Some(0.0), vec![2.0]), Some(2.0));
+        assert_eq!(
+            monitor_scale_factor(Some(f64::NAN), vec![0.0, -1.0, 1.25]),
+            Some(1.25)
+        );
+    }
+
+    #[test]
+    fn monitor_scale_factor_returns_none_when_no_display() {
+        // Headless: nothing usable -> caller falls back to a probe window.
+        assert_eq!(monitor_scale_factor(None, Vec::<f64>::new()), None);
+        assert_eq!(monitor_scale_factor(Some(-1.0), vec![0.0]), None);
     }
 }
 

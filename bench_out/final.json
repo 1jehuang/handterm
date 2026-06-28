@@ -1,124 +1,124 @@
 {
   "label": "final",
-  "timestamp": "2026-06-28T08:32:05.271161Z",
+  "timestamp": "2026-06-28T08:35:40.285234Z",
   "metrics": {
     "memcpy_mb_s": {
-      "value": 14605.0,
-      "median": 14524.0,
+      "value": 19013.0,
+      "median": 17547.0,
       "n": 5,
       "better": "max"
     },
     "byte_scan_mb_s": {
-      "value": 4978.0,
-      "median": 4761.0,
+      "value": 7510.0,
+      "median": 6423.0,
       "n": 5,
       "better": "max"
     },
     "parser_ascii_mb_s": {
-      "value": 583.0,
-      "median": 575.0,
+      "value": 900.0,
+      "median": 793.0,
       "n": 5,
       "better": "max"
     },
     "parser_sgr_mb_s": {
-      "value": 386.0,
-      "median": 370.0,
+      "value": 592.0,
+      "median": 521.0,
       "n": 5,
       "better": "max"
     },
     "parser_mixed_mb_s": {
-      "value": 351.0,
-      "median": 345.0,
+      "value": 581.0,
+      "median": 491.0,
       "n": 5,
       "better": "max"
     },
     "grid_ascii_mb_s": {
-      "value": 196.4,
-      "median": 192.5,
+      "value": 320.3,
+      "median": 272.2,
       "n": 5,
       "better": "max"
     },
     "grid_utf8_mb_s": {
-      "value": 141.6,
-      "median": 138.4,
+      "value": 235.0,
+      "median": 197.4,
       "n": 5,
       "better": "max"
     },
     "grid_sgr_mb_s": {
-      "value": 172.1,
-      "median": 169.3,
+      "value": 288.3,
+      "median": 241.2,
       "n": 5,
       "better": "max"
     },
     "terminal_ascii_mb_s": {
-      "value": 171.7,
-      "median": 166.6,
+      "value": 289.8,
+      "median": 242.8,
       "n": 5,
       "better": "max"
     },
     "terminal_sgr_mb_s": {
-      "value": 145.7,
-      "median": 138.8,
+      "value": 233.3,
+      "median": 200.5,
       "n": 5,
       "better": "max"
     },
     "terminal_mixed_mb_s": {
-      "value": 156.9,
-      "median": 146.0,
+      "value": 258.1,
+      "median": 220.9,
       "n": 5,
       "better": "max"
     },
     "gpu_cell_fill_mcells_s": {
-      "value": 139.1,
-      "median": 130.5,
+      "value": 213.3,
+      "median": 183.8,
       "n": 5,
       "better": "max"
     },
     "gpu_text_batch_mcells_s": {
-      "value": 50.4,
-      "median": 50.1,
+      "value": 81.2,
+      "median": 69.1,
       "n": 5,
       "better": "max"
     },
     "gpu_prompt_fps": {
-      "value": 21977.0,
-      "median": 21763.0,
+      "value": 35668.0,
+      "median": 30809.0,
       "n": 5,
       "better": "max"
     },
     "gpu_tui_fps": {
-      "value": 169432.0,
-      "median": 160782.0,
+      "value": 260737.0,
+      "median": 222552.0,
       "n": 5,
       "better": "max"
     },
     "cpu_full_redraw_fps": {
-      "value": 901.0,
-      "median": 886.0,
+      "value": 1398.0,
+      "median": 1200.0,
       "n": 5,
       "better": "max"
     },
     "cpu_incremental_fps": {
-      "value": 90183.0,
-      "median": 82073.0,
+      "value": 141164.0,
+      "median": 122883.0,
       "n": 5,
       "better": "max"
     },
     "cpu_prompt_fps": {
-      "value": 10291.0,
-      "median": 10040.0,
+      "value": 16272.0,
+      "median": 13662.0,
       "n": 5,
       "better": "max"
     },
     "cpu_tui_fps": {
-      "value": 65111.0,
-      "median": 63628.0,
+      "value": 113245.0,
+      "median": 91695.0,
       "n": 5,
       "better": "max"
     },
     "protocol_msg_s": {
-      "value": 13565452.0,
-      "median": 12095555.0,
+      "value": 21244108.0,
+      "median": 17535530.0,
       "n": 5,
       "better": "max"
     },
@@ -129,8 +129,8 @@
       "better": "min"
     },
     "cell_write_ns": {
-      "value": 5.4,
-      "median": 5.4,
+      "value": 3.4,
+      "median": 4.0,
       "n": 5,
       "better": "min"
     },

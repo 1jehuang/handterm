@@ -1097,8 +1097,18 @@ impl Grid {
         let start = phys * self.cols;
         let end = start + self.cols;
         self.cells[start..end].fill(Cell::BLANK);
-        self.graphemes[start..end].fill(None);
+        self.clear_graphemes(start, end);
         self.mark_dirty_range(start, self.cols);
+    }
+
+    /// Reset the grapheme slots in `start..end` to `None`. When the grid has
+    /// never stored a grapheme cluster the slots are already `None`, so this is
+    /// a no-op and we skip touching the parallel array entirely.
+    #[inline(always)]
+    fn clear_graphemes(&mut self, start: usize, end: usize) {
+        if self.has_graphemes {
+            self.graphemes[start..end].fill(None);
+        }
     }
 
     pub fn erase_line_right(&mut self) {
@@ -1110,7 +1120,7 @@ impl Grid {
         let end = phys * self.cols + self.cols;
         let len = end - start;
         self.cells[start..end].fill(Cell::BLANK);
-        self.graphemes[start..end].fill(None);
+        self.clear_graphemes(start, end);
         self.mark_dirty_range(start, len);
     }
 
@@ -1124,7 +1134,7 @@ impl Grid {
         let actual_end = end.min(start + self.cols);
         let len = actual_end - start;
         self.cells[start..actual_end].fill(Cell::BLANK);
-        self.graphemes[start..actual_end].fill(None);
+        self.clear_graphemes(start, actual_end);
         self.mark_dirty_range(start, len);
     }
 
@@ -1141,7 +1151,7 @@ impl Grid {
         let end = (start + n).min(phys * self.cols + self.cols);
         let len = end - start;
         self.cells[start..end].fill(Cell::BLANK);
-        self.graphemes[start..end].fill(None);
+        self.clear_graphemes(start, end);
         self.mark_dirty_range(start, len);
     }
 
@@ -1170,10 +1180,12 @@ impl Grid {
         let move_count = self.cols - col - n;
         if move_count > 0 {
             self.cells.copy_within(src..src + move_count, dest);
-            clone_optional_slice(&mut self.graphemes, src, dest, move_count);
+            if self.has_graphemes {
+                clone_optional_slice(&mut self.graphemes, src, dest, move_count);
+            }
         }
         self.cells[src..src + n].fill(Cell::BLANK);
-        self.graphemes[src..src + n].fill(None);
+        self.clear_graphemes(src, src + n);
         self.mark_dirty_range(row_start + col, self.cols - col);
     }
 
@@ -1190,11 +1202,13 @@ impl Grid {
         let move_count = self.cols - col - n;
         if move_count > 0 {
             self.cells.copy_within(src..src + move_count, dest);
-            clone_optional_slice(&mut self.graphemes, src, dest, move_count);
+            if self.has_graphemes {
+                clone_optional_slice(&mut self.graphemes, src, dest, move_count);
+            }
         }
         let blank_start = row_start + self.cols - n;
         self.cells[blank_start..row_start + self.cols].fill(Cell::BLANK);
-        self.graphemes[blank_start..row_start + self.cols].fill(None);
+        self.clear_graphemes(blank_start, row_start + self.cols);
         self.mark_dirty_range(row_start + col, self.cols - col);
     }
 

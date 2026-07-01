@@ -297,6 +297,7 @@ impl HandtermApp {
             "handterm",
         )
         .with_transparent(false)
+        .with_decorations(self.config.window.decorations)
         .with_inner_size(Size::Logical(LogicalSize::new(width, height)))
     }
 

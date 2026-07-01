@@ -655,6 +655,7 @@ pub fn create_window_attributes_for_metrics(
     let inner = PhysicalSize::new(width.round().max(1.0) as u32, height.round().max(1.0) as u32);
     let attrs = crate::platform::with_app_id(Window::default_attributes().with_title(title), "handterm")
         .with_transparent(transparency_requested(config.style.background_opacity))
+        .with_decorations(config.window.decorations)
         .with_inner_size(Size::Physical(inner));
 
     // On macOS, AppKit otherwise grows a freshly created window to fill the

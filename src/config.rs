@@ -82,6 +82,9 @@ pub struct WindowConfig {
     pub rows: u16,
     pub remember_window_size: bool,
     pub confirm_os_window_close: bool,
+    /// Draw the OS titlebar/window chrome (close/minimize/zoom buttons).
+    /// Off by default for a clean, tiling-WM-friendly look.
+    pub decorations: bool,
 }
 
 impl Default for WindowConfig {
@@ -91,6 +94,7 @@ impl Default for WindowConfig {
             rows: 24,
             remember_window_size: false,
             confirm_os_window_close: false,
+            decorations: false,
         }
     }
 }

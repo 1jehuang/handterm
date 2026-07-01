@@ -73,3 +73,31 @@ pub fn with_app_id(attrs: WindowAttributes, _app_id: &str) -> WindowAttributes {
         attrs
     }
 }
+
+/// Apply the "no window chrome" look for `window.decorations = false`.
+///
+/// On macOS a fully undecorated window loses the standard rounded-corner
+/// window shape and shadow, so instead of dropping decorations we keep the
+/// system frame and hide the titlebar: transparent titlebar, hidden
+/// traffic-light buttons, and a fullsize content view. This preserves the
+/// native rounded corners while showing no chrome.
+///
+/// On other platforms this simply disables decorations.
+pub fn with_decorations(attrs: WindowAttributes, decorations: bool) -> WindowAttributes {
+    if decorations {
+        return attrs;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::WindowAttributesExtMacOS;
+        attrs
+            .with_titlebar_transparent(true)
+            .with_title_hidden(true)
+            .with_titlebar_buttons_hidden(true)
+            .with_fullsize_content_view(true)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        attrs.with_decorations(false)
+    }
+}

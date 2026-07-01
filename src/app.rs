@@ -292,13 +292,13 @@ impl HandtermApp {
         let width = cols as f64 * cell_width as f64;
         let height = rows as f64 * cell_height as f64;
 
-        crate::platform::with_app_id(
+        let attrs = crate::platform::with_app_id(
             Window::default_attributes().with_title("handterm [cpu host]"),
             "handterm",
         )
         .with_transparent(false)
-        .with_decorations(self.config.window.decorations)
-        .with_inner_size(Size::Logical(LogicalSize::new(width, height)))
+        .with_inner_size(Size::Logical(LogicalSize::new(width, height)));
+        crate::platform::with_decorations(attrs, self.config.window.decorations)
     }
 
     fn open_window(

@@ -85,6 +85,10 @@ pub struct WindowConfig {
     /// Draw the OS titlebar/window chrome (close/minimize/zoom buttons).
     /// Off by default for a clean, tiling-WM-friendly look.
     pub decorations: bool,
+    /// Blank padding between the window edge and the cell grid, in points
+    /// (scaled by display DPI). Keeps the first row/column clear of rounded
+    /// window corners. Matches ghostty's window-padding default of 2.
+    pub padding: f32,
 }
 
 impl Default for WindowConfig {
@@ -95,7 +99,16 @@ impl Default for WindowConfig {
             remember_window_size: false,
             confirm_os_window_close: false,
             decorations: false,
+            padding: 2.0,
         }
+    }
+}
+
+impl WindowConfig {
+    /// Padding in physical pixels for a display of the given DPI
+    /// (96 = 1x scale).
+    pub fn padding_px(&self, dpi: u32) -> u32 {
+        (self.padding.max(0.0) * dpi as f32 / 96.0).round() as u32
     }
 }
 

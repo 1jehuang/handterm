@@ -82,6 +82,10 @@ struct RasterizedGlyph {
 }
 
 impl GlyphAtlas {
+    pub fn dpi(&self) -> u32 {
+        self.dpi
+    }
+
     pub fn new(font_size_pt: f64) -> Result<Self> {
         Self::new_with_dpi(font_size_pt, 96)
     }

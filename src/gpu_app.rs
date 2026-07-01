@@ -482,6 +482,7 @@ impl GpuApp {
                     &self.config,
                     cell_width,
                     cell_height,
+                    dpi,
                     "handterm [gpu host]",
                 ))
                 .context("window creation should succeed")?,
@@ -1072,8 +1073,11 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                 match event {
                     WindowEvent::Resized(size) => {
                         if size.width > 0 && size.height > 0 {
-                            let new_cols = (size.width as usize / atlas.cell_width.max(1)) as u16;
-                            let new_rows = (size.height as usize / atlas.cell_height.max(1)) as u16;
+                            let pad2 = 2 * self.config.window.padding_px(atlas.dpi()) as usize;
+                            let new_cols = ((size.width as usize).saturating_sub(pad2)
+                                / atlas.cell_width.max(1)) as u16;
+                            let new_rows = ((size.height as usize).saturating_sub(pad2)
+                                / atlas.cell_height.max(1)) as u16;
                             let new_cols = new_cols.max(1);
                             let new_rows = new_rows.max(1);
 
@@ -1084,6 +1088,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                                 size.height,
                                 new_cols,
                                 new_rows,
+                                self.config.window.padding_px(atlas.dpi()),
                             );
 
                             if new_cols != state.terminal.cols || new_rows != state.terminal.rows {
@@ -1294,9 +1299,14 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                     WindowEvent::CursorMoved { position, .. } => {
                         let cw = atlas.cell_width.max(1);
                         let ch = atlas.cell_height.max(1);
-                        state.mouse_col = position.x as usize / cw;
-                        state.mouse_row =
-                            Self::mouse_row_for_position(state, position.y, ch, &self.config);
+                        let pad = self.config.window.padding_px(atlas.dpi()) as f64;
+                        state.mouse_col = (position.x - pad).max(0.0) as usize / cw;
+                        state.mouse_row = Self::mouse_row_for_position(
+                            state,
+                            (position.y - pad).max(0.0),
+                            ch,
+                            &self.config,
+                        );
 
                         if state.selecting {
                             if let Some(ref mut sel) = state.terminal.grid.selection {

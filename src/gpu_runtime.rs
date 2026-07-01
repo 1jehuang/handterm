@@ -24,7 +24,7 @@ struct Uniforms {
     screen_size: [f32; 2],
     cell_size: [f32; 2],
     atlas_size: [f32; 2],
-    _pad: [f32; 2],
+    grid_offset: [f32; 2],
 }
 
 const ATLAS_WIDTH: u32 = 2048;
@@ -274,7 +274,7 @@ struct Uniforms {
     screen_size: vec2<f32>,
     cell_size: vec2<f32>,
     atlas_size: vec2<f32>,
-    _pad: vec2<f32>,
+    grid_offset: vec2<f32>,
 };
 
 struct CellInstance {
@@ -311,7 +311,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, instance: CellInstance) -> VertexOutp
     );
     let corner = corners[vi];
 
-    let pixel_pos = instance.pos + corner * instance.size;
+    let pixel_pos = uniforms.grid_offset + instance.pos + corner * instance.size;
     let ndc = vec2<f32>(
         pixel_pos.x / uniforms.screen_size.x * 2.0 - 1.0,
         1.0 - pixel_pos.y / uniforms.screen_size.y * 2.0,
@@ -409,7 +409,7 @@ struct Uniforms {
     screen_size: vec2<f32>,
     cell_size: vec2<f32>,
     atlas_size: vec2<f32>,
-    _pad: vec2<f32>,
+    grid_offset: vec2<f32>,
 };
 
 struct ImageInstance {
@@ -435,7 +435,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, instance: ImageInstance) -> VertexOut
         vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
     );
     let corner = corners[vi];
-    let pixel_pos = instance.pos + corner * instance.size;
+    let pixel_pos = uniforms.grid_offset + instance.pos + corner * instance.size;
     let ndc = vec2<f32>(
         pixel_pos.x / uniforms.screen_size.x * 2.0 - 1.0,
         1.0 - pixel_pos.y / uniforms.screen_size.y * 2.0,
@@ -631,13 +631,20 @@ pub fn create_window_attributes(
     atlas: &GlyphAtlas,
     title: &str,
 ) -> WindowAttributes {
-    create_window_attributes_for_metrics(config, atlas.cell_width, atlas.cell_height, title)
+    create_window_attributes_for_metrics(
+        config,
+        atlas.cell_width,
+        atlas.cell_height,
+        atlas.dpi(),
+        title,
+    )
 }
 
 pub fn create_window_attributes_for_metrics(
     config: &AppConfig,
     cell_width: usize,
     cell_height: usize,
+    dpi: u32,
     title: &str,
 ) -> WindowAttributes {
     // `cell_width`/`cell_height` are already in *physical* pixels: they come
@@ -649,8 +656,11 @@ pub fn create_window_attributes_for_metrics(
     // Mac an 80x24 grid produced a 4x-too-large surface. On scale-factor-1
     // platforms (typical Linux) logical and physical coincide, so the bug was
     // invisible there and only inflated macOS per-window footprint.
-    let width = config.window.columns as f64 * cell_width as f64;
-    let height = config.window.rows as f64 * cell_height as f64;
+    // Blank padding (physical px) surrounds the cell grid on all sides so
+    // glyphs are not clipped by rounded window corners (see WindowConfig).
+    let pad = 2.0 * config.window.padding_px(dpi) as f64;
+    let width = config.window.columns as f64 * cell_width as f64 + pad;
+    let height = config.window.rows as f64 * cell_height as f64 + pad;
 
     let inner = PhysicalSize::new(width.round().max(1.0) as u32, height.round().max(1.0) as u32);
     let attrs = crate::platform::with_app_id(Window::default_attributes().with_title(title), "handterm")
@@ -938,11 +948,12 @@ pub fn create_surface_state_for_window_with_shared_profiled_with_defaults(
     let atlas_state = shared.atlas.lock().expect("shared atlas lock poisoned");
     let atlas_texture_create = step_start.elapsed();
 
+    let pad = config.window.padding_px(atlas.dpi()) as f32;
     let uniforms = Uniforms {
         screen_size: [size.width as f32, size.height as f32],
         cell_size: [atlas.cell_width as f32, atlas.cell_height as f32],
         atlas_size: [ATLAS_WIDTH as f32, ATLAS_HEIGHT as f32],
-        _pad: [0.0; 2],
+        grid_offset: [pad, pad],
     };
 
     let step_start = Instant::now();
@@ -1056,6 +1067,7 @@ pub fn resize_surface_state(
     height: u32,
     cols: u16,
     rows: u16,
+    padding_px: u32,
 ) {
     if width == 0 || height == 0 {
         return;
@@ -1115,11 +1127,12 @@ pub fn resize_surface_state(
             .reserve(needed_images.saturating_sub(state.image_instances.capacity()));
     }
 
+    let pad = padding_px as f32;
     let uniforms = Uniforms {
         screen_size: [width as f32, height as f32],
         cell_size: [atlas.cell_width as f32, atlas.cell_height as f32],
         atlas_size: [ATLAS_WIDTH as f32, ATLAS_HEIGHT as f32],
-        _pad: [0.0; 2],
+        grid_offset: [pad, pad],
     };
     state
         .shared
@@ -2646,13 +2659,19 @@ mod tests {
         let cell_width = 18;
         let cell_height = 33;
 
-        let attrs = create_window_attributes_for_metrics(&config, cell_width, cell_height, "t");
+        let attrs = create_window_attributes_for_metrics(&config, cell_width, cell_height, 96, "t");
         let inner = attrs.inner_size.expect("inner size should be set");
+
+        // The requested size is the cell grid plus the blank window padding on
+        // each side (physical px, DPI-scaled; 96 dpi here so pad = padding pt).
+        let pad2 = 2 * config.window.padding_px(96);
+        let expect_w = (80 * cell_width) as u32 + pad2;
+        let expect_h = (24 * cell_height) as u32 + pad2;
 
         match inner {
             Size::Physical(size) => {
-                assert_eq!(size.width, (80 * cell_width) as u32);
-                assert_eq!(size.height, (24 * cell_height) as u32);
+                assert_eq!(size.width, expect_w);
+                assert_eq!(size.height, expect_h);
             }
             Size::Logical(other) => panic!("expected physical inner size, got logical {other:?}"),
         }
@@ -2661,8 +2680,8 @@ mod tests {
         // the Metal drawable surface (and thus per-window IOSurface memory)
         // stays proportional to the grid rather than the grid times scale^2.
         let physical: winit::dpi::PhysicalSize<u32> = inner.to_physical(2.0);
-        assert_eq!(physical.width, (80 * cell_width) as u32);
-        assert_eq!(physical.height, (24 * cell_height) as u32);
+        assert_eq!(physical.width, expect_w);
+        assert_eq!(physical.height, expect_h);
     }
 
     #[cfg(target_os = "macos")]
@@ -2679,14 +2698,15 @@ mod tests {
         let cell_width = 18;
         let cell_height = 33;
 
-        let attrs = create_window_attributes_for_metrics(&config, cell_width, cell_height, "t");
+        let attrs = create_window_attributes_for_metrics(&config, cell_width, cell_height, 96, "t");
         let max = attrs
             .max_inner_size
             .expect("max inner size should be set on macOS");
+        let pad2 = 2 * config.window.padding_px(96);
         match max {
             Size::Physical(size) => {
-                assert_eq!(size.width, (80 * cell_width) as u32);
-                assert_eq!(size.height, (24 * cell_height) as u32);
+                assert_eq!(size.width, (80 * cell_width) as u32 + pad2);
+                assert_eq!(size.height, (24 * cell_height) as u32 + pad2);
             }
             Size::Logical(other) => panic!("expected physical max inner size, got {other:?}"),
         }

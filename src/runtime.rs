@@ -4,8 +4,6 @@ use crate::backend::{Backend, resolve_backend};
 use crate::cli::{Cli, Command};
 #[cfg(feature = "cli")]
 use crate::config::AppConfig;
-#[cfg(feature = "cli")]
-use crate::daemon_mode::{run_client_only_command, run_server_only_command};
 #[cfg(feature = "standalone")]
 use crate::metrics::{format_bench_results, run_quick_bench};
 #[cfg(feature = "cli")]
@@ -90,8 +88,6 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
         Some(Command::OpenWindow { to, cols, rows }) => {
             open_window_in_existing_host(backend, to, cols, rows)
         }
-        Some(Command::ServerOnly { socket }) => run_server_only_command(socket, &config),
-        Some(Command::ClientOnly { socket }) => run_client_only_command(backend, socket, config),
         Some(Command::Remote { to, cmd, args }) => {
             let socket_path = match to {
                 Some(path) => path,

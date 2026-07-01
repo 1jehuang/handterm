@@ -5,16 +5,8 @@ pub mod backend;
 pub mod build_info;
 #[cfg(feature = "cli")]
 pub mod cli;
-#[cfg(feature = "daemon-client")]
-#[allow(dead_code)]
-pub mod client;
 pub mod color;
 pub mod config;
-#[cfg(feature = "daemon-server")]
-pub mod daemon;
-pub mod daemon_mode;
-#[cfg(feature = "daemon-server")]
-mod daemon_stack;
 pub mod fd_watcher;
 #[allow(dead_code)]
 pub mod font;
@@ -38,25 +30,16 @@ pub mod metrics;
 pub mod native_scroll;
 pub mod platform;
 pub mod profiling;
-#[cfg(any(feature = "standalone", feature = "daemon-server"))]
+#[cfg(feature = "standalone")]
 pub mod pty;
-pub mod remote;
-#[cfg(all(feature = "cpu", feature = "daemon-client"))]
-pub mod remote_app;
-#[cfg(all(feature = "gpu", feature = "daemon-client"))]
-pub mod remote_gpu_app;
 pub mod render;
 pub mod runtime;
-#[cfg(feature = "daemon-server")]
-#[allow(dead_code)]
-pub mod server;
 #[cfg(feature = "standalone")]
 pub mod standalone_support;
 pub mod visual;
 #[cfg(feature = "standalone")]
 pub mod workloads;
 
-pub use daemon_mode::print_daemon_mode_deprecation;
 pub use handterm_common::grid;
 pub use handterm_common::parser;
 pub use handterm_common::protocol;

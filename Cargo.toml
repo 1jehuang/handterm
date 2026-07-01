@@ -11,10 +11,6 @@ repository = "https://github.com/1jehuang/handterm"
 members = [
     ".",
     "handterm-common",
-    "handterm-server",
-    "handterm-client",
-    "handterm-client-cpu",
-    "handterm-client-gpu",
 ]
 resolver = "2"
 
@@ -45,14 +41,12 @@ winit = { version = "0.30.9", default-features = false, features = ["wayland", "
 winit = { version = "0.30.9", default-features = false, features = ["rwh_06"] }
 
 [features]
-default = ["cpu", "gpu", "local-fonts", "ligatures", "standalone", "daemon-client", "daemon-server", "cli"]
+default = ["cpu", "gpu", "local-fonts", "ligatures", "standalone", "cli"]
 cpu = ["dep:softbuffer"]
 gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
 local-fonts = ["dep:freetype-rs", "dep:fontconfig"]
 ligatures = ["dep:rustybuzz", "local-fonts"]
 standalone = []
-daemon-client = []
-daemon-server = []
 cli = []
 
 [dev-dependencies]

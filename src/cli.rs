@@ -5,9 +5,7 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(name = "handterm")]
 #[command(author, version, about = "Wayland-native terminal focused on speed")]
-#[command(
-    after_help = "Recommended path: the default single-process host architecture.\nDaemon mode is still supported, but is soft-deprecated and no longer recommended for normal local use."
-)]
+#[command(after_help = "handterm uses a single-process host architecture: repeated launches reuse\nthe running host and open another window in the same process.")]
 pub struct Cli {
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
@@ -47,18 +45,6 @@ pub enum Command {
         /// Override rows for the new window
         #[arg(long)]
         rows: Option<u16>,
-    },
-    /// DEPRECATED: run only the daemon/server process
-    ServerOnly {
-        /// Socket path to bind (default: $XDG_RUNTIME_DIR/handterm-server.sock)
-        #[arg(long)]
-        socket: Option<PathBuf>,
-    },
-    /// DEPRECATED: run a window frontend connected to a running handterm server
-    ClientOnly {
-        /// Socket path to connect (default: $XDG_RUNTIME_DIR/handterm-server.sock)
-        #[arg(long)]
-        socket: Option<PathBuf>,
     },
     /// Send a command to a running handterm instance
     #[command(name = "@")]

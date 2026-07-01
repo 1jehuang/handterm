@@ -30,11 +30,12 @@ All measurements below refer to the **current host-based handterm architecture**
 
 ### What the numbers mean now
 
-Handterm currently has three relevant local architectures:
+Handterm currently has two local architectures:
 
 1. **CPU host** — one process, many CPU-rendered windows
 2. **GPU host** — one process, many GPU-rendered windows
-3. **daemon mode** — server plus separate thin clients (**still implemented, but soft-deprecated for normal local use** and no longer the best local low-RAM path)
+
+(An earlier daemon/thin-client mode was removed after profiling showed the single-process host was the better local low-RAM path.)
 
 ### Current measured memory
 
@@ -44,7 +45,6 @@ Handterm currently has three relevant local architectures:
 |-------|-------------:|----------------:|
 | handterm CPU host | ~37 MB | ~20 MB |
 | **handterm GPU host** | **~61 MB** | **~1-2 MB** |
-| handterm daemon server-only | ~4.4 MB | N/A |
 
 The current best local low-RAM path is the **shared-GPU host**. It pays a large fixed first-window cost once, then scales cheaply for additional windows.
 
@@ -137,9 +137,8 @@ foot's high VSZ is from mmap'd font files and Wayland protocol buffers; most is 
 | foot --server + footclient | 25 MB (server) + 1.6 MB | +1.6 MB |
 | handterm CPU host | ~37 MB | ~20 MB |
 | **handterm GPU host** | **~61 MB** | **~1-2 MB** |
-| handterm daemon mode | ~4.4 MB server-only | current clients still too heavy |
 
-Handterm still has a daemon/thin-client implementation, but it is now **soft-deprecated** for normal local use. After profiling both approaches, the most promising low-RAM local architecture is the **shared-GPU single-process host**. In current live measurements, the first GPU host window pays the full GPU/runtime cost once, and each additional window adds only about **1-2 MB RSS**.
+Handterm previously had a daemon/thin-client implementation, but it has been **removed**. After profiling both approaches, the most promising low-RAM local architecture is the **shared-GPU single-process host**. In current live measurements, the first GPU host window pays the full GPU/runtime cost once, and each additional window adds only about **1-2 MB RSS**.
 
 Measured shared-GPU host scaling on this machine/session:
 
@@ -164,7 +163,7 @@ That puts the incremental cost in roughly the **1-2 MB/window** range after the 
 | Ligatures | ✅ | ✅ | - | ✅ | ✅ |
 | Sixel graphics | - | ✅ | - | - | ✅ |
 | Kitty image protocol | partial* | - | - | ✅ | ✅ |
-| Daemon mode | ✅ | ✅ | - | - | - |
+| Daemon mode | - | ✅ | - | - | - |
 | Single-process multi-window host | ✅ | - | - | ✅ | ✅ |
 | Tabs | - | - | - | ✅ | ✅ |
 | Splits/panes | - | - | - | ✅ | ✅ |
@@ -404,7 +403,7 @@ sync_to_monitor = true
 
 `scrollback.scrollbar` controls a thin right-edge overlay scrollbar. It is enabled by default and does not consume a terminal column.
 
-This currently applies to the standalone/shared-GPU host path. CPU rendering still uses whole-row scrollback presentation, and remote thin clients do not yet have a protocol for server-owned smooth scrollback surfaces.
+This currently applies to the standalone/shared-GPU host path. CPU rendering still uses whole-row scrollback presentation.
 
 ## Architecture
 
@@ -437,7 +436,7 @@ handterm-common/
   src/
     grid.rs       Cell storage / scrollback
     parser.rs     VT parser
-    protocol.rs   daemon protocol types
+    protocol.rs   window/terminal sync protocol types
     terminal.rs   terminal state machine
 
 src/
@@ -448,9 +447,6 @@ src/
   frontend.rs     shared scheduling/input helpers
   pty.rs          PTY spawn and I/O
   ipc.rs          host IPC server
-  daemon.rs       daemon/server runtime
-  remote_app.rs   CPU thin client
-  remote_gpu_app.rs GPU thin client
 ```
 
 ## Development
@@ -466,7 +462,7 @@ cargo run -- print-config
 
 See [OPTIMIZATION.md](OPTIMIZATION.md) for the full performance roadmap.
 
-**Architecture status:** the default and recommended path is the single-process host architecture. Daemon/thin-client mode remains available for compatibility and experimentation, but is soft-deprecated.
+**Architecture status:** handterm is a single-process host architecture. The earlier daemon/thin-client mode was removed after the host path proved better for normal local use.
 
 | Phase | Goal | Status |
 |-------|------|--------|
@@ -474,8 +470,7 @@ See [OPTIMIZATION.md](OPTIMIZATION.md) for the full performance roadmap.
 | GPU rendering | wgpu backend with instanced shaders | ✅ |
 | Single-process CPU host | Shared-process multi-window CPU runtime | ✅ |
 | Shared-GPU host | Low-overhead multi-window GPU runtime | ✅ |
-| Server/client mode | Daemon architecture like foot --server | ✅ implemented, soft-deprecated |
-| Workspace split | Thin client/server/common Cargo packages | ✅ foundation implemented |
+| Server/client mode | Daemon architecture like foot --server | removed (host path won) |
 | Startup/per-window polish | Push toward theoretical window-overhead floor | in progress |
 
 **Current best path:** shared-GPU host at roughly **~1-2 MB per extra window** after the first window. The remaining work is shaving startup cost and pushing the incremental slope down further.

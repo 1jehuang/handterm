@@ -699,6 +699,8 @@ impl GlyphAtlas {
 
     fn rasterize_grapheme_fallback(&mut self, grapheme: &str) -> Option<RasterizedGlyph> {
         let ch = grapheme.chars().find(|ch| !ch.is_control())? as u32;
+        // Only the local-fonts fallback chain below sizes glyphs by grapheme span.
+        #[cfg(feature = "local-fonts")]
         let span_cells = grapheme_span_cells(grapheme);
 
         let glyph = procedural_glyph(ch, self.cell_width, self.cell_height, self.baseline);

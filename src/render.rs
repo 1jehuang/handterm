@@ -96,7 +96,8 @@ pub fn render_terminal_to_buffer(
 
     for row in 0..grid.rows {
         let row_dirty = full_redraw || grid.row_has_dirty_cells(row);
-        if !row_dirty && !(show_cursor && row == cursor_row) {
+        let row_has_cursor = show_cursor && row == cursor_row;
+        if !row_dirty && !row_has_cursor {
             continue;
         }
         for col in 0..grid.cols {
@@ -307,7 +308,8 @@ pub fn render_terminal_to_buffer(
     {
         for row in 0..grid.rows {
             let row_dirty = full_redraw || grid.row_has_dirty_cells(row);
-            if !row_dirty && !(show_cursor && row == cursor_row) {
+            let row_has_cursor = show_cursor && row == cursor_row;
+            if !row_dirty && !row_has_cursor {
                 continue;
             }
             for col in 0..grid.cols {

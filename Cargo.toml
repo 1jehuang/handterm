@@ -53,7 +53,14 @@ gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
 local-fonts = ["dep:freetype-rs", "dep:fontconfig"]
 ligatures = ["dep:rustybuzz", "local-fonts"]
 standalone = []
-cli = []
+cli = ["standalone"]
+
+# The binary entry point requires the CLI (src/main.rs calls handterm::run_cli),
+# so skip building it for feature combos without `cli`.
+[[bin]]
+name = "handterm"
+path = "src/main.rs"
+required-features = ["cli"]
 
 [dev-dependencies]
 assert_cmd = "2.0.16"

@@ -86,7 +86,6 @@ pub(crate) struct FrameBatchStyle {
     pub base_fg: u32,
     pub base_bg: u32,
     pub base_fg_f: [f32; 4],
-    pub background_alpha: f32,
     pub cell_w: f32,
     pub cell_h: f32,
     pub viewport_offset_y: f32,
@@ -272,10 +271,11 @@ pub(crate) fn build_cell_instances(
 
     // A background quad is only emitted for cells whose resolved background
     // differs from the frame background. In that case the colour is always the
-    // opaque resolved background (the `background_alpha` blend only ever applies
-    // to the default background, which by definition is suppressed here), so we
-    // resolve the colour lazily inside this branch and skip the whole struct for
-    // the common default-background cell.
+    // opaque resolved background (the window-opacity blend only ever applies
+    // to the default background via the render pass clear colour, which by
+    // definition is suppressed here), so we resolve the colour lazily inside
+    // this branch and skip the whole struct for the common default-background
+    // cell.
     let bg_instance = if colors.bg != style.base_bg {
         Some(CellInstance {
             pos: [base_x, base_y],
@@ -566,7 +566,6 @@ mod tests {
             base_fg: AppConfig::default().style.foreground.as_u32_rgb(),
             base_bg: AppConfig::default().style.background.as_u32_rgb(),
             base_fg_f: rgb_to_f32(AppConfig::default().style.foreground.as_u32_rgb()),
-            background_alpha: 1.0,
             cell_w: 8.0,
             cell_h: 16.0,
             viewport_offset_y: 0.0,
@@ -645,11 +644,7 @@ mod tests {
             let size = [style.cell_w * ci.cells as f32, style.cell_h];
 
             if colors.bg != style.base_bg {
-                expected_bg.push((
-                    pos,
-                    size,
-                    rgb_to_f32_alpha(colors.bg, style.background_alpha),
-                ));
+                expected_bg.push((pos, size, rgb_to_f32(colors.bg)));
             }
 
             let mut expected_flags = 0u32;
@@ -898,7 +893,6 @@ mod tests {
             base_fg: config.style.foreground.as_u32_rgb(),
             base_bg: config.style.background.as_u32_rgb(),
             base_fg_f: rgb_to_f32(config.style.foreground.as_u32_rgb()),
-            background_alpha: 1.0,
             cell_w: atlas.cell_width as f32,
             cell_h: atlas.cell_height as f32,
             viewport_offset_y: 0.0,
@@ -1127,7 +1121,6 @@ mod tests {
                 base_fg: 0xffffff,
                 base_bg: 0x000000,
                 base_fg_f: [1.0, 1.0, 1.0, 1.0],
-                background_alpha: 1.0,
                 cell_w: 8.0,
                 cell_h: 16.0,
                 viewport_offset_y: 0.0,
@@ -1164,7 +1157,6 @@ mod tests {
                 base_fg: 0xffffff,
                 base_bg: 0x000000,
                 base_fg_f: [0.25, 0.5, 0.75, 1.0],
-                background_alpha: 1.0,
                 cell_w: 8.0,
                 cell_h: 16.0,
                 viewport_offset_y: 0.0,
@@ -1204,7 +1196,6 @@ mod tests {
                 base_fg: 0xffffff,
                 base_bg: 0x000000,
                 base_fg_f: [1.0, 1.0, 1.0, 1.0],
-                background_alpha: 1.0,
                 cell_w: 8.0,
                 cell_h: 16.0,
                 viewport_offset_y: 0.0,
@@ -1306,7 +1297,6 @@ mod tests {
                 base_fg: 0xffffff,
                 base_bg: 0x000000,
                 base_fg_f: [1.0, 1.0, 1.0, 1.0],
-                background_alpha: 1.0,
                 cell_w: 8.0,
                 cell_h: 16.0,
                 viewport_offset_y: 0.0,
@@ -1355,7 +1345,6 @@ mod tests {
                 base_fg: 0xffffff,
                 base_bg: 0x000000,
                 base_fg_f: [1.0, 1.0, 1.0, 1.0],
-                background_alpha: 1.0,
                 cell_w: 8.0,
                 cell_h: 16.0,
                 viewport_offset_y: 0.0,
@@ -1394,7 +1383,6 @@ mod tests {
                 base_fg: 0xffffff,
                 base_bg: 0x000000,
                 base_fg_f: [1.0, 1.0, 1.0, 1.0],
-                background_alpha: 1.0,
                 cell_w: 8.0,
                 cell_h: 16.0,
                 viewport_offset_y: 0.0,
@@ -1417,6 +1405,9 @@ mod tests {
 
     #[test]
     fn explicit_background_instances_stay_opaque_with_window_opacity() {
+        // Window opacity is applied via the render pass clear colour, never to
+        // per-cell background quads: an explicit cell background must always
+        // come out fully opaque.
         let mut cell = crate::grid::Cell::BLANK;
         cell.bg = 0x112233;
         let ci = CellInfo {
@@ -1437,7 +1428,6 @@ mod tests {
                 base_fg: 0xffffff,
                 base_bg: 0x000000,
                 base_fg_f: [1.0, 1.0, 1.0, 1.0],
-                background_alpha: 0.9,
                 cell_w: 8.0,
                 cell_h: 16.0,
                 viewport_offset_y: 0.0,

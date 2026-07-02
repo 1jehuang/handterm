@@ -413,7 +413,12 @@ fn kitty_legacy_letter_key(named: NamedKey) -> Option<(char, bool)> {
         })
 }
 
-fn write_kitty_legacy_letter_sequence(out: &mut Vec<u8>, prefix_o: bool, suffix: u8, mods: ModField) {
+fn write_kitty_legacy_letter_sequence(
+    out: &mut Vec<u8>,
+    prefix_o: bool,
+    suffix: u8,
+    mods: ModField,
+) {
     if mods.is_present() {
         out.extend_from_slice(b"\x1b[1;");
         mods.write(out);
@@ -630,7 +635,14 @@ fn encode_kitty_key_into(
     let mods = kitty_modifier_modfield(modifiers, report_events, event_kind);
     let text_field = if report_text { text } else { None };
     out.extend_from_slice(b"\x1b[");
-    write_kitty_first_param(out, primary, text, physical_key, modifiers, report_alternate);
+    write_kitty_first_param(
+        out,
+        primary,
+        text,
+        physical_key,
+        modifiers,
+        report_alternate,
+    );
     finish_kitty_csi_u(out, mods, text_field);
     true
 }

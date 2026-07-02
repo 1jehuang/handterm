@@ -1075,9 +1075,11 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                         if size.width > 0 && size.height > 0 {
                             let pad2 = 2 * self.config.window.padding_px(atlas.dpi()) as usize;
                             let new_cols = ((size.width as usize).saturating_sub(pad2)
-                                / atlas.cell_width.max(1)) as u16;
+                                / atlas.cell_width.max(1))
+                                as u16;
                             let new_rows = ((size.height as usize).saturating_sub(pad2)
-                                / atlas.cell_height.max(1)) as u16;
+                                / atlas.cell_height.max(1))
+                                as u16;
                             let new_cols = new_cols.max(1);
                             let new_rows = new_rows.max(1);
 

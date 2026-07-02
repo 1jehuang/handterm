@@ -902,7 +902,10 @@ mod tests {
         let cw = atlas.cell_width;
 
         // Sample the top-left pixel of each cell's background.
-        assert_eq!(renderer.pixels[0], base_bg, "default cell should be base_bg");
+        assert_eq!(
+            renderer.pixels[0], base_bg,
+            "default cell should be base_bg"
+        );
         assert_eq!(
             renderer.pixels[cw], 0x11_22_33,
             "custom-bg cell should keep its explicit background"

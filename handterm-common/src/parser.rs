@@ -480,7 +480,10 @@ mod tests {
         assert_eq!(p.advance(b'0'), Action::Nop);
         assert_eq!(p.advance(b';'), Action::Nop);
         assert_eq!(p.advance(b'x'), Action::Nop);
-        assert_eq!(p.advance(0x07), Action::OscDispatch(Box::new(b"0;x".to_vec())));
+        assert_eq!(
+            p.advance(0x07),
+            Action::OscDispatch(Box::new(b"0;x".to_vec()))
+        );
         assert_eq!(p.advance(b'A'), Action::Print(b'A'));
     }
 
@@ -493,7 +496,10 @@ mod tests {
         assert_eq!(p.advance(b';'), Action::Nop);
         assert_eq!(p.advance(b'x'), Action::Nop);
         assert_eq!(p.advance(0x1b), Action::Nop);
-        assert_eq!(p.advance(b'\\'), Action::OscDispatch(Box::new(b"0;x".to_vec())));
+        assert_eq!(
+            p.advance(b'\\'),
+            Action::OscDispatch(Box::new(b"0;x".to_vec()))
+        );
     }
 
     #[test]
@@ -506,7 +512,10 @@ mod tests {
         assert_eq!(p.advance(b'1'), Action::Nop);
         assert_eq!(p.advance(b'2'), Action::Nop);
         assert_eq!(p.advance(0x1b), Action::Nop);
-        assert_eq!(p.advance(b'\\'), Action::DcsDispatch(Box::new(b"+q12".to_vec())));
+        assert_eq!(
+            p.advance(b'\\'),
+            Action::DcsDispatch(Box::new(b"+q12".to_vec()))
+        );
     }
 
     #[test]

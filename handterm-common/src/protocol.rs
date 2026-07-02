@@ -293,7 +293,10 @@ impl<'a> Reader<'a> {
 
     #[inline]
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        let end = self.pos.checked_add(n).context("protocol length overflow")?;
+        let end = self
+            .pos
+            .checked_add(n)
+            .context("protocol length overflow")?;
         let slice = self
             .data
             .get(self.pos..end)
@@ -745,9 +748,8 @@ pub fn encode_server_message(message: &ServerMessage) -> Result<Vec<u8>> {
                 .iter()
                 .map(|c| c.grapheme.as_ref().map_or(0, |g| g.len() + 5))
                 .sum();
-            let mut buf = Vec::with_capacity(
-                16 + dirty_cells.len() * DIRTY_CELL_MAX_FIXED + grapheme_bytes,
-            );
+            let mut buf =
+                Vec::with_capacity(16 + dirty_cells.len() * DIRTY_CELL_MAX_FIXED + grapheme_bytes);
             buf.push(3);
             put_u32(&mut buf, *window_id);
             put_uvarint(&mut buf, dirty_cells.len() as u64);
@@ -881,11 +883,7 @@ pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage> {
         },
         7 => {
             let window_id = r.u32()?;
-            let exit_code = if r.bool()? {
-                Some(r.i32()?)
-            } else {
-                None
-            };
+            let exit_code = if r.bool()? { Some(r.i32()?) } else { None };
             ServerMessage::WindowClosed {
                 window_id,
                 exit_code,
@@ -894,8 +892,7 @@ pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage> {
         8 => {
             let window_id = r.u32()?;
             let generation = r.u64()?;
-            let image_count =
-                usize::try_from(r.uvarint()?).context("image count exceeds usize")?;
+            let image_count = usize::try_from(r.uvarint()?).context("image count exceeds usize")?;
             let mut images = Vec::with_capacity(image_count.min(bytes.len()));
             for _ in 0..image_count {
                 images.push(KittyImageData {

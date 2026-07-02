@@ -905,7 +905,8 @@ impl Grid {
 
         if self.has_graphemes {
             if self.scrollback_graphemes.len() < self.scrollback.len() {
-                self.scrollback_graphemes.resize(self.scrollback.len(), None);
+                self.scrollback_graphemes
+                    .resize(self.scrollback.len(), None);
             }
             for col in 0..cols {
                 self.scrollback_graphemes[dest + col] = self.graphemes[row_start + col].clone();
@@ -1705,7 +1706,10 @@ mod tests {
             let line = format!("hi{}\r\n", (b'a' + (i % 26)) as char);
             g.write_bytes(line.as_bytes());
         }
-        assert!(!g.has_graphemes, "ASCII-only grid should not latch graphemes");
+        assert!(
+            !g.has_graphemes,
+            "ASCII-only grid should not latch graphemes"
+        );
         assert_eq!(
             g.scrollback_graphemes_capacity(),
             0,

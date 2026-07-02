@@ -5,7 +5,9 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(name = "handterm")]
 #[command(author, version, about = "Wayland-native terminal focused on speed")]
-#[command(after_help = "handterm uses a single-process host architecture: repeated launches reuse\nthe running host and open another window in the same process.")]
+#[command(
+    after_help = "handterm uses a single-process host architecture: repeated launches reuse\nthe running host and open another window in the same process."
+)]
 pub struct Cli {
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,

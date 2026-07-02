@@ -303,7 +303,9 @@ pub(crate) fn build_cell_instances(
         } else {
             rgb_to_f32(deco_rgb)
         };
-        let glyph_width = glyph_entry.map(|entry| entry.width as f32).unwrap_or(span_w);
+        let glyph_width = glyph_entry
+            .map(|entry| entry.width as f32)
+            .unwrap_or(span_w);
         Some(CellInstance {
             pos: [base_x - glyph_left_pad, base_y - glyph_top_pad],
             size: [

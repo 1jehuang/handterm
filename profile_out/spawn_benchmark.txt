@@ -1,5 +1,0 @@
-backend=gpu count=20
-window=2 startup_ms=74 rss_kb=82888
-window=10 startup_ms=58 rss_kb=122044
-window=20 startup_ms=116 rss_kb=221128
-cpu_time_ms=10860 rss_delta_kb=147308

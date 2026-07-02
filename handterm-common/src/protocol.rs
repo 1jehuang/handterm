@@ -1233,6 +1233,251 @@ mod tests {
     }
 
     #[test]
+    fn truncated_server_messages_fail_to_decode() {
+        let message = ServerMessage::CellUpdate {
+            window_id: 1,
+            dirty_cells: vec![sample_dirty_cell(0, 0, 'x')],
+            cursor: Some(CursorState {
+                row: 0,
+                col: 1,
+                style: 2,
+                visible: true,
+            }),
+            modes: WindowModes::default(),
+        };
+        let encoded = encode_server_message(&message).expect("cell update should encode");
+
+        for len in 0..encoded.len() {
+            assert!(
+                decode_server_message(&encoded[..len]).is_err(),
+                "truncated server message of length {len} should fail"
+            );
+        }
+    }
+
+    #[test]
+    fn integer_boundary_values_roundtrip() {
+        // Every fixed-width integer field at its extremes; a byte-order or
+        // width mistake in the codec cannot survive max values.
+        let message = ServerMessage::CellUpdate {
+            window_id: u32::MAX,
+            dirty_cells: vec![DirtyCell {
+                row: u16::MAX,
+                col: u16::MAX,
+                ch: u32::MAX,
+                grapheme: None,
+                fg: u32::MAX,
+                bg: 0,
+                underline_color: u32::MAX,
+                hyperlink_id: u16::MAX,
+                attrs: u8::MAX,
+                flags: u8::MAX,
+                underline_style: u8::MAX,
+            }],
+            cursor: Some(CursorState {
+                row: u16::MAX,
+                col: u16::MAX,
+                style: u8::MAX,
+                visible: false,
+            }),
+            modes: WindowModes {
+                bracketed_paste: true,
+                focus_events: true,
+                alternate_scroll: true,
+                application_cursor_keys: true,
+                in_alt_screen: true,
+                mouse_mode: u8::MAX,
+                kitty_keyboard_flags: u8::MAX,
+            },
+        };
+        let encoded = encode_server_message(&message).expect("encode");
+        assert_eq!(decode_server_message(&encoded).expect("decode"), message);
+
+        // Signed and 64-bit extremes.
+        for exit_code in [Some(i32::MIN), Some(i32::MAX), Some(0), None] {
+            let message = ServerMessage::WindowClosed {
+                window_id: 0,
+                exit_code,
+            };
+            let encoded = encode_server_message(&message).expect("encode");
+            assert_eq!(decode_server_message(&encoded).expect("decode"), message);
+        }
+
+        let message = ServerMessage::KittyImageState {
+            window_id: 0,
+            generation: u64::MAX,
+            images: vec![],
+            placements: vec![],
+        };
+        let encoded = encode_server_message(&message).expect("encode");
+        assert_eq!(decode_server_message(&encoded).expect("decode"), message);
+
+        let message = ServerMessage::AtlasUpdate {
+            glyph: GlyphBitmap {
+                glyph_id: u32::MAX,
+                grapheme: None,
+                width: u16::MAX,
+                height: 0,
+                bearing_x: i16::MIN,
+                bearing_y: i16::MAX,
+                cells: u8::MAX,
+                is_color: false,
+                pixels: vec![],
+            },
+        };
+        let encoded = encode_server_message(&message).expect("encode");
+        assert_eq!(decode_server_message(&encoded).expect("decode"), message);
+    }
+
+    #[test]
+    fn empty_collections_and_strings_roundtrip() {
+        let messages = [
+            ServerMessage::CellUpdate {
+                window_id: 1,
+                dirty_cells: vec![],
+                cursor: None,
+                modes: WindowModes::default(),
+            },
+            ServerMessage::SetTitle {
+                window_id: 1,
+                title: String::new(),
+            },
+            ServerMessage::CopyToClipboard {
+                window_id: 1,
+                text: vec![],
+            },
+        ];
+        for message in messages {
+            let encoded = encode_server_message(&message).expect("encode");
+            assert_eq!(decode_server_message(&encoded).expect("decode"), message);
+        }
+
+        let messages = [
+            ClientMessage::Ping {
+                build_id: String::new(),
+            },
+            ClientMessage::Paste {
+                window_id: 1,
+                text: vec![],
+            },
+            ClientMessage::KeyInput {
+                window_id: 1,
+                event: KeyEvent {
+                    kind: KeyEventKind::Repeat,
+                    bytes: vec![],
+                    text: Some(String::new()),
+                    modifiers: 0,
+                },
+            },
+        ];
+        for message in messages {
+            let encoded = encode_client_message(&message).expect("encode");
+            assert_eq!(decode_client_message(&encoded).expect("decode"), message);
+        }
+    }
+
+    #[test]
+    fn varint_length_prefixes_roundtrip_across_width_boundaries() {
+        // Payload lengths straddling the 1-byte/2-byte varint boundary (127,
+        // 128) and the 2-byte/3-byte boundary (16383, 16384).
+        for len in [0usize, 1, 127, 128, 16383, 16384] {
+            let message = ClientMessage::Paste {
+                window_id: 1,
+                text: vec![0xab; len],
+            };
+            let encoded = encode_client_message(&message).expect("encode");
+            assert_eq!(
+                decode_client_message(&encoded).expect("decode"),
+                message,
+                "length {len} should roundtrip"
+            );
+        }
+    }
+
+    #[test]
+    fn overlong_varint_is_rejected() {
+        // A varint with continuation bits past the 64-bit capacity must fail
+        // instead of looping or overflowing. Tag 0 = Ping, then the build_id
+        // length as 11 continuation bytes.
+        let mut bytes = vec![0u8];
+        bytes.extend_from_slice(&[0xff; 10]);
+        bytes.push(0x01);
+        assert!(decode_client_message(&bytes).is_err());
+    }
+
+    #[test]
+    fn corrupt_length_prefix_does_not_panic_or_overallocate() {
+        // Claim a gigantic dirty-cell count with no payload behind it: the
+        // decoder must error out, not reserve memory for the declared count.
+        let mut bytes = vec![3u8]; // CellUpdate tag
+        put_u32(&mut bytes, 1); // window_id
+        put_uvarint(&mut bytes, u64::MAX); // absurd cell count
+        assert!(decode_server_message(&bytes).is_err());
+
+        // Same for a huge byte-length prefix in Paste.
+        let mut bytes = vec![6u8]; // Paste tag
+        put_u32(&mut bytes, 1);
+        put_uvarint(&mut bytes, u64::MAX);
+        assert!(decode_client_message(&bytes).is_err());
+    }
+
+    #[test]
+    fn invalid_enum_bytes_are_rejected() {
+        // Corrupt the key event kind byte (offset: tag 1 + window_id 4).
+        let encoded = encode_client_message(&ClientMessage::KeyInput {
+            window_id: 1,
+            event: KeyEvent {
+                kind: KeyEventKind::Press,
+                bytes: vec![b'a'],
+                text: None,
+                modifiers: 0,
+            },
+        })
+        .expect("encode");
+        let mut corrupt = encoded.clone();
+        corrupt[5] = 0;
+        assert!(decode_client_message(&corrupt).is_err());
+        let mut corrupt = encoded;
+        corrupt[5] = 4;
+        assert!(decode_client_message(&corrupt).is_err());
+
+        // Corrupt mouse kind and button bytes.
+        let encoded = encode_client_message(&ClientMessage::MouseInput {
+            window_id: 1,
+            event: MouseEvent {
+                kind: MouseEventKind::Press,
+                button: MouseButton::Left,
+                col: 0,
+                row: 0,
+                modifiers: 0,
+            },
+        })
+        .expect("encode");
+        let mut corrupt = encoded.clone();
+        corrupt[5] = 6; // kind out of range
+        assert!(decode_client_message(&corrupt).is_err());
+        let mut corrupt = encoded;
+        corrupt[6] = 4; // button out of range
+        assert!(decode_client_message(&corrupt).is_err());
+    }
+
+    #[test]
+    fn non_utf8_string_payload_is_rejected() {
+        let encoded = encode_server_message(&ServerMessage::SetTitle {
+            window_id: 1,
+            title: "abcd".to_string(),
+        })
+        .expect("encode");
+        // Title bytes start after tag(1) + window_id(4) + len varint(1).
+        let mut corrupt = encoded;
+        corrupt[6] = 0xff;
+        assert!(
+            decode_server_message(&corrupt).is_err(),
+            "invalid UTF-8 in a String field must be rejected"
+        );
+    }
+
+    #[test]
     fn framed_client_messages_roundtrip() {
         let message = ClientMessage::Paste {
             window_id: 3,

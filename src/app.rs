@@ -233,22 +233,22 @@ impl HandtermApp {
         self.start_ipc_watcher();
     }
 
-    fn resolve_dpi(&self, event_loop: &ActiveEventLoop) -> u32 {
+    fn resolve_dpi(&self, event_loop: &ActiveEventLoop) -> Result<u32> {
         if let Some(id) = self.focused_window
             && let Some(winit_id) = self.window_ids.get(&id)
             && let Some(state) = self.windows.get(winit_id)
         {
-            return (96.0 * state.window.scale_factor()) as u32;
+            return Ok((96.0 * state.window.scale_factor()) as u32);
         }
         if let Some(state) = self.windows.values().next() {
-            return (96.0 * state.window.scale_factor()) as u32;
+            return Ok((96.0 * state.window.scale_factor()) as u32);
         }
         let probe_window = event_loop
             .create_window(Window::default_attributes().with_visible(false))
-            .expect("probe window should succeed");
+            .context("failed to create invisible probe window while resolving display dpi")?;
         let dpi = (96.0 * probe_window.scale_factor()) as u32;
         drop(probe_window);
-        dpi
+        Ok(dpi)
     }
 
     fn ensure_atlas(&mut self, dpi: u32) -> Result<()> {
@@ -318,7 +318,7 @@ impl HandtermApp {
         let cols = cols.unwrap_or(self.config.window.columns).max(1);
         let rows = rows.unwrap_or(self.config.window.rows).max(1);
         let before_dpi = Instant::now();
-        let dpi = self.resolve_dpi(event_loop);
+        let dpi = self.resolve_dpi(event_loop)?;
         let dpi_ms = before_dpi.elapsed();
         let before_bootstrap = Instant::now();
         let bootstrap = bootstrap_font_metrics_with_family_dpi(
@@ -723,9 +723,13 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                 };
 
                 let (cell_width, cell_height) = {
-                    let atlas = atlas_cache
-                        .get(&state.dpi)
-                        .expect("atlas should exist for window dpi");
+                    let Some(atlas) = atlas_cache.get(&state.dpi) else {
+                        eprintln!(
+                            "handterm cpu host: no glyph atlas cached for dpi {}; dropping window event",
+                            state.dpi
+                        );
+                        return;
+                    };
                     (atlas.cell_width.max(1), atlas.cell_height.max(1))
                 };
 
@@ -734,10 +738,9 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                         if let (Some(width), Some(height)) =
                             (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
                         {
-                            state
-                                .surface
-                                .resize(width, height)
-                                .expect("surface resize should succeed");
+                            state.surface.resize(width, height).expect(
+                                "softbuffer surface resize failed while handling window resize",
+                            );
                             state.surface_size = (width.get(), height.get());
                             state.last_visual_state = None;
                             state.last_presented_signature = None;
@@ -1073,10 +1076,19 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                         }
                     }
                     WindowEvent::RedrawRequested => {
-                        let atlas = atlas_cache
-                            .get_mut(&state.dpi)
-                            .expect("atlas should exist for redraw");
-                        render_grid(state, atlas, config).expect("frame render should succeed");
+                        let Some(atlas) = atlas_cache.get_mut(&state.dpi) else {
+                            eprintln!(
+                                "handterm cpu host: no glyph atlas cached for dpi {}; skipping redraw",
+                                state.dpi
+                            );
+                            return;
+                        };
+                        if let Err(err) = render_grid(state, atlas, config) {
+                            eprintln!(
+                                "handterm cpu host: frame render failed, skipping frame: {err:#}"
+                            );
+                            return;
+                        }
                         state.startup_timing.mark_present(Instant::now());
                         if state.startup_timing.emit_if_ready("cpu host", state.id)
                             && let Some(started) = state.cpu_time_started

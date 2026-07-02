@@ -368,15 +368,15 @@ impl GpuApp {
         }
     }
 
-    fn resolve_dpi(&self, event_loop: &ActiveEventLoop) -> u32 {
+    fn resolve_dpi(&self, event_loop: &ActiveEventLoop) -> Result<u32> {
         if let Some(id) = self.focused_window
             && let Some(winit_id) = self.window_ids.get(&id)
             && let Some(state) = self.windows.get(winit_id)
         {
-            return dpi_from_scale_factor(state.renderer.window.scale_factor());
+            return Ok(dpi_from_scale_factor(state.renderer.window.scale_factor()));
         }
         if let Some(state) = self.windows.values().next() {
-            return dpi_from_scale_factor(state.renderer.window.scale_factor());
+            return Ok(dpi_from_scale_factor(state.renderer.window.scale_factor()));
         }
         // First window: read the display scale factor directly from a monitor
         // handle instead of creating (and immediately destroying) a throwaway
@@ -388,14 +388,14 @@ impl GpuApp {
             event_loop.primary_monitor().map(|m| m.scale_factor()),
             event_loop.available_monitors().map(|m| m.scale_factor()),
         ) {
-            return dpi_from_scale_factor(scale);
+            return Ok(dpi_from_scale_factor(scale));
         }
         let probe_window = event_loop
             .create_window(winit::window::Window::default_attributes().with_visible(false))
-            .expect("probe window should succeed");
+            .context("failed to create invisible probe window while resolving display dpi")?;
         let dpi = dpi_from_scale_factor(probe_window.scale_factor());
         drop(probe_window);
-        dpi
+        Ok(dpi)
     }
 
     fn ensure_atlas(&mut self, dpi: u32) -> Result<()> {
@@ -446,7 +446,7 @@ impl GpuApp {
                 .or_else(|| Some(Self::spawn_shared_init_task()))
         };
         let before_dpi = Instant::now();
-        let dpi = self.resolve_dpi(event_loop);
+        let dpi = self.resolve_dpi(event_loop)?;
         let dpi_ms = before_dpi.elapsed();
         let atlas_cached = self.atlas_cache.contains_key(&dpi);
         let before_bootstrap = Instant::now();
@@ -990,9 +990,13 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                 let Some(state) = windows.get_mut(&window_id) else {
                     return;
                 };
-                let atlas = atlas_cache
-                    .get_mut(&state.dpi)
-                    .expect("atlas should exist for window dpi");
+                let Some(atlas) = atlas_cache.get_mut(&state.dpi) else {
+                    eprintln!(
+                        "handterm gpu host: no glyph atlas cached for dpi {}; dropping window event",
+                        state.dpi
+                    );
+                    return;
+                };
 
                 match event {
                     WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {

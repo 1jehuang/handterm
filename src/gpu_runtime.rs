@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
-use winit::dpi::{PhysicalSize, Size};
+use winit::dpi::{PhysicalPosition, PhysicalSize, Size};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{ImePurpose, Window, WindowAttributes};
 
@@ -441,6 +441,8 @@ pub fn create_window_attributes(
     config: &AppConfig,
     atlas: &GlyphAtlas,
     title: &str,
+    spawn_monitor: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
+    cascade_index: usize,
 ) -> WindowAttributes {
     create_window_attributes_for_metrics(
         config,
@@ -448,6 +450,8 @@ pub fn create_window_attributes(
         atlas.cell_height,
         atlas.dpi(),
         title,
+        spawn_monitor,
+        cascade_index,
     )
 }
 
@@ -457,6 +461,8 @@ pub fn create_window_attributes_for_metrics(
     cell_height: usize,
     dpi: u32,
     title: &str,
+    spawn_monitor: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
+    cascade_index: usize,
 ) -> WindowAttributes {
     // `cell_width`/`cell_height` are already in *physical* pixels: they come
     // from rasterizing the font at the display DPI (`font_size_pt * dpi / 72`).
@@ -482,6 +488,18 @@ pub fn create_window_attributes_for_metrics(
             .with_transparent(transparency_requested(config.style.background_opacity))
             .with_inner_size(Size::Physical(inner));
     let attrs = crate::platform::with_decorations(attrs, config.window.decorations);
+    // Spawn position policy (config `window.position`): centered by default,
+    // cascading extra windows. Wayland ignores position hints; macOS/X11
+    // honor them.
+    let attrs = crate::platform::with_initial_position(
+        attrs,
+        crate::platform::initial_window_position(
+            config.window.position,
+            inner,
+            spawn_monitor,
+            cascade_index,
+        ),
+    );
 
     // On macOS, AppKit otherwise grows a freshly created window to fill the
     // display it lands on (observed: an 80x24 request settling at the full
@@ -638,7 +656,13 @@ pub fn create_surface_state_with_shared_profiled_with_defaults(
     let step_start = Instant::now();
     let window = Arc::new(
         event_loop
-            .create_window(create_window_attributes(config, atlas, title))
+            .create_window(create_window_attributes(
+                config,
+                atlas,
+                title,
+                crate::platform::spawn_monitor_geometry(event_loop),
+                0,
+            ))
             .context("window creation should succeed")?,
     );
     let window_create = step_start.elapsed();

@@ -827,7 +827,8 @@ fn window_inner_size_is_requested_in_physical_pixels() {
     let cell_width = 18;
     let cell_height = 33;
 
-    let attrs = create_window_attributes_for_metrics(&config, cell_width, cell_height, 96, "t");
+    let attrs =
+        create_window_attributes_for_metrics(&config, cell_width, cell_height, 96, "t", None, 0);
     let inner = attrs.inner_size.expect("inner size should be set");
 
     // The requested size is the cell grid plus the blank window padding on
@@ -866,7 +867,8 @@ fn window_max_inner_size_is_clamped_to_grid_on_macos() {
     let cell_width = 18;
     let cell_height = 33;
 
-    let attrs = create_window_attributes_for_metrics(&config, cell_width, cell_height, 96, "t");
+    let attrs =
+        create_window_attributes_for_metrics(&config, cell_width, cell_height, 96, "t", None, 0);
     let max = attrs
         .max_inner_size
         .expect("max inner size should be set on macOS");

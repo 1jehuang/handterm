@@ -89,17 +89,52 @@ pub struct WindowConfig {
     /// (scaled by display DPI). Keeps the first row/column clear of rounded
     /// window corners. Matches ghostty's window-padding default of 2.
     pub padding: f32,
+    /// Where a new window spawns: "center" (centered on the primary
+    /// monitor, extra windows cascade), "auto" (let the OS place it), or an
+    /// explicit `[x, y]` top-left offset from the primary monitor origin in
+    /// physical pixels.
+    pub position: WindowPosition,
+}
+
+/// Initial window placement policy. Serialized as either a preset string
+/// (`"center"`, `"auto"`) or a two-element `[x, y]` array of physical pixel
+/// offsets from the primary monitor origin.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum WindowPosition {
+    Preset(WindowPositionPreset),
+    Fixed(i32, i32),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WindowPositionPreset {
+    /// Let the OS choose the spawn position (winit default behavior).
+    Auto,
+    /// Center the window on the primary monitor; additional windows are
+    /// offset slightly so they do not stack exactly on top of each other.
+    Center,
+}
+
+impl Default for WindowPosition {
+    fn default() -> Self {
+        Self::Preset(WindowPositionPreset::Center)
+    }
 }
 
 impl Default for WindowConfig {
     fn default() -> Self {
         Self {
-            columns: 80,
-            rows: 24,
+            // A comfortable working size: wide enough for split panes and
+            // long log lines, tall enough for real work, while still leaving
+            // generous margins when centered on a 1080p-and-up display.
+            columns: 120,
+            rows: 32,
             remember_window_size: false,
             confirm_os_window_close: false,
             decorations: false,
             padding: 2.0,
+            position: WindowPosition::default(),
         }
     }
 }
@@ -187,8 +222,12 @@ mod tests {
         assert_eq!(cfg.style.font_size, 11.0);
         assert_eq!(cfg.style.background_opacity, 0.9);
         assert_eq!(cfg.style.background_blur, 20);
-        assert_eq!(cfg.window.columns, 80);
-        assert_eq!(cfg.window.rows, 24);
+        assert_eq!(cfg.window.columns, 120);
+        assert_eq!(cfg.window.rows, 32);
+        assert_eq!(
+            cfg.window.position,
+            WindowPosition::Preset(WindowPositionPreset::Center)
+        );
         assert_eq!(cfg.scrollback.lines, 10_000);
         assert!(cfg.scrollback.smooth);
         assert_eq!(cfg.scrollback.smooth_speed, 3.0);
@@ -209,10 +248,68 @@ mod tests {
         assert_eq!(cfg.style.background.to_string(), "#111111");
         assert_eq!(cfg.style.foreground.to_string(), "#cdd6f4");
         assert_eq!(cfg.window.columns, 100);
-        assert_eq!(cfg.window.rows, 24);
+        assert_eq!(cfg.window.rows, 32);
         assert!(cfg.scrollback.smooth);
         assert_eq!(cfg.scrollback.smooth_speed, 3.0);
         assert!(cfg.scrollback.scrollbar);
+    }
+
+    #[test]
+    fn parses_window_position_presets_and_fixed_offsets() {
+        let center: AppConfig = toml::from_str(
+            r##"
+            [window]
+            position = "center"
+        "##,
+        )
+        .expect("center should parse");
+        assert_eq!(
+            center.window.position,
+            WindowPosition::Preset(WindowPositionPreset::Center)
+        );
+
+        let auto: AppConfig = toml::from_str(
+            r##"
+            [window]
+            position = "auto"
+        "##,
+        )
+        .expect("auto should parse");
+        assert_eq!(
+            auto.window.position,
+            WindowPosition::Preset(WindowPositionPreset::Auto)
+        );
+
+        let fixed: AppConfig = toml::from_str(
+            r##"
+            [window]
+            position = [100, -50]
+        "##,
+        )
+        .expect("fixed offsets should parse");
+        assert_eq!(fixed.window.position, WindowPosition::Fixed(100, -50));
+    }
+
+    #[test]
+    fn rejects_malformed_window_position() {
+        assert!(
+            toml::from_str::<AppConfig>(
+                r##"
+            [window]
+            position = "upper-left"
+        "##,
+            )
+            .is_err()
+        );
+        assert!(
+            toml::from_str::<AppConfig>(
+                r##"
+            [window]
+            position = [1, 2, 3]
+        "##,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -349,7 +446,7 @@ mod tests {
         let cfg: AppConfig = toml::from_str(raw).expect("unknown keys should not fail parsing");
         assert_eq!(cfg.style.background.to_string(), "#222222");
         // The misspelled key is ignored; the real field keeps its default.
-        assert_eq!(cfg.window.columns, 80);
+        assert_eq!(cfg.window.columns, 120);
     }
 
     #[test]
@@ -373,6 +470,7 @@ mod tests {
                 confirm_os_window_close: true,
                 decorations: true,
                 padding: 4.5,
+                position: WindowPosition::Fixed(120, 60),
             },
             performance: PerformanceConfig {
                 repaint_delay_ms: 8,

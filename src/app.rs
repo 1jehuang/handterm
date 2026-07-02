@@ -284,6 +284,7 @@ impl HandtermApp {
 
     fn create_window_attributes(
         &self,
+        event_loop: &ActiveEventLoop,
         cell_width: usize,
         cell_height: usize,
         cols: u16,
@@ -298,7 +299,30 @@ impl HandtermApp {
         )
         .with_transparent(false)
         .with_inner_size(Size::Logical(LogicalSize::new(width, height)));
-        crate::platform::with_decorations(attrs, self.config.window.decorations)
+        let attrs = crate::platform::with_decorations(attrs, self.config.window.decorations);
+        // Spawn position policy (config `window.position`). The CPU backend
+        // requests a logical size, so convert to physical pixels for the
+        // placement math using the spawn monitor's scale factor.
+        let spawn_monitor = crate::platform::spawn_monitor_geometry(event_loop);
+        let scale = event_loop
+            .primary_monitor()
+            .or_else(|| event_loop.available_monitors().next())
+            .map(|monitor| monitor.scale_factor())
+            .filter(|scale| scale.is_finite() && *scale > 0.0)
+            .unwrap_or(1.0);
+        let physical = winit::dpi::PhysicalSize::new(
+            (width * scale).round().max(1.0) as u32,
+            (height * scale).round().max(1.0) as u32,
+        );
+        crate::platform::with_initial_position(
+            attrs,
+            crate::platform::initial_window_position(
+                self.config.window.position,
+                physical,
+                spawn_monitor,
+                self.windows.len(),
+            ),
+        )
     }
 
     fn open_window(
@@ -342,7 +366,13 @@ impl HandtermApp {
         let before_window = Instant::now();
         let window = Arc::new(
             event_loop
-                .create_window(self.create_window_attributes(cell_width, cell_height, cols, rows))
+                .create_window(self.create_window_attributes(
+                    event_loop,
+                    cell_width,
+                    cell_height,
+                    cols,
+                    rows,
+                ))
                 .context("window creation should succeed")?,
         );
         let window_ms = before_window.elapsed();

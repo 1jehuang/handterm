@@ -482,6 +482,8 @@ impl GpuApp {
                     cell_height,
                     dpi,
                     "handterm [gpu host]",
+                    crate::platform::spawn_monitor_geometry(event_loop),
+                    existing_windows,
                 ))
                 .context("window creation should succeed")?,
         );

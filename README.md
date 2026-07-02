@@ -382,8 +382,12 @@ cursor = "#f5e0dc"
 background_opacity = 0.9
 
 [window]
-columns = 80
-rows = 24
+columns = 120
+rows = 32
+# Spawn position: "center" (default; centered on the primary monitor, extra
+# windows cascade), "auto" (OS decides), or [x, y] physical-pixel offsets
+# from the monitor origin. Wayland compositors ignore position hints.
+position = "center"
 
 [scrollback]
 lines = 10000

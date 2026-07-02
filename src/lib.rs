@@ -1,4 +1,6 @@
-#[cfg_attr(feature = "gpu", allow(dead_code))]
+// `app::run`'s only caller is the CLI runtime (runtime.rs), so without `cli`
+// the module compiles but is unreachable.
+#[cfg_attr(not(feature = "cli"), allow(dead_code))]
 #[cfg(all(feature = "cpu", feature = "standalone"))]
 pub mod app;
 pub mod backend;

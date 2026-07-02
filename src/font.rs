@@ -1001,6 +1001,12 @@ fn rasterize_fallback_at_current_strike(
     cell_height: usize,
     span_cells: usize,
 ) -> Option<RasterizedGlyph> {
+    // The face must actually map this codepoint. `load_char` on an unmapped
+    // codepoint silently loads glyph 0 (the `.notdef` box), which would make
+    // every fallback face claim coverage for everything and paint tofu boxes
+    // instead of letting the next fallback (or fontconfig lookup) resolve a
+    // real glyph.
+    face.get_char_index(ch as usize)?;
     let glyph = rasterize_char(face, ch, LoadFlag::RENDER | LoadFlag::COLOR)?;
     Some(normalize_fixed_size_glyph(
         face,
@@ -2892,6 +2898,18 @@ mod tests {
             .chars()
             .map(|(charcode, _)| charcode as u32)
             .filter(|&ch| should_try_emoji_fallback(ch))
+            // Variation selectors (U+FE00-FE0F) and ZWJ are default-ignorable:
+            // they modify the preceding cluster and have no visible glyph of
+            // their own. Lone regional indicators (U+1F1E6-1F1FF) only carry
+            // artwork as flag *pairs* in color emoji fonts. The atlas
+            // correctly refuses to resolve all of these to a standalone
+            // raster (previously they only "resolved" by rasterizing another
+            // font's .notdef box, which painted tofu).
+            .filter(|&ch| {
+                !(0xFE00..=0xFE0F).contains(&ch)
+                    && ch != 0x200D
+                    && !(0x1F1E6..=0x1F1FF).contains(&ch)
+            })
             .take(512)
             .collect();
 

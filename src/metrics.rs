@@ -17,6 +17,8 @@ use crate::pty::PtyChild;
 #[cfg(feature = "cpu")]
 use crate::render::OffscreenRenderer;
 use crate::terminal::Terminal;
+// Only the cpu/gpu transcript-replay benches drive these workloads.
+#[cfg(any(feature = "cpu", feature = "gpu"))]
 use crate::workloads::{
     EMOJI_AND_SHADE_TRANSCRIPT, STARSHIP_PROMPT_TRANSCRIPT, TUI_HELP_WITH_IMAGE_TRANSCRIPT,
 };

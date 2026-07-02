@@ -4,7 +4,7 @@ use crate::backend::{Backend, resolve_backend};
 use crate::cli::{Cli, Command};
 #[cfg(feature = "cli")]
 use crate::config::AppConfig;
-#[cfg(feature = "standalone")]
+#[cfg(all(feature = "cli", feature = "standalone"))]
 use crate::metrics::{format_bench_results, run_quick_bench};
 #[cfg(feature = "cli")]
 use anyhow::Result;

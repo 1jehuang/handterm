@@ -6,9 +6,12 @@ pub(crate) const FISH_STARTUP_TRANSCRIPT: &[&[u8]] = &[
     b"\x1bP+q71756572792d6f732d6e616d65\x1b\\\x1b[?1049l\x1b[0c",
 ];
 
+// Outside tests, only the cpu/gpu replay benches in metrics.rs consume these.
+#[cfg_attr(not(any(test, feature = "cpu", feature = "gpu")), allow(dead_code))]
 pub(crate) const STARSHIP_PROMPT_PREFIX_TRANSCRIPT: &[&[u8]] =
     &[b"\x1b[J\n", b"\x1b[38;2;243;139;168m\xee\x82\xb6"];
 
+#[cfg_attr(not(any(test, feature = "cpu", feature = "gpu")), allow(dead_code))]
 pub(crate) const STARSHIP_PROMPT_FINAL_CHUNK: &[u8] = &[
     0x1b, 0x5b, 0x34, 0x38, 0x3b, 0x32, 0x3b, 0x32, 0x34, 0x33, 0x3b, 0x31, 0x33, 0x39, 0x3b, 0x31,
     0x36, 0x38, 0x3b, 0x33, 0x38, 0x3b, 0x32, 0x3b, 0x31, 0x37, 0x3b, 0x31, 0x37, 0x3b, 0x32, 0x37,
@@ -16,6 +19,7 @@ pub(crate) const STARSHIP_PROMPT_FINAL_CHUNK: &[u8] = &[
     0x20,
 ];
 
+#[cfg_attr(not(any(test, feature = "cpu", feature = "gpu")), allow(dead_code))]
 pub(crate) const STARSHIP_PROMPT_TRANSCRIPT: &[&[u8]] = &[
     STARSHIP_PROMPT_PREFIX_TRANSCRIPT[0],
     STARSHIP_PROMPT_PREFIX_TRANSCRIPT[1],
@@ -32,6 +36,7 @@ pub(crate) const TUI_HELP_OVERLAY_TRANSCRIPT: &[&[u8]] = &[
     b"\x1b[38;5;39mcommands\x1b[0m\r\nopen close save\r\n",
 ];
 
+#[cfg_attr(not(any(test, feature = "cpu", feature = "gpu")), allow(dead_code))]
 pub(crate) const TUI_HELP_WITH_IMAGE_TRANSCRIPT: &[&[u8]] = &[
     b"\x1b[?1049h",
     b"jcode boot\r\nloading modules\r\nready\r\n",
@@ -41,6 +46,7 @@ pub(crate) const TUI_HELP_WITH_IMAGE_TRANSCRIPT: &[&[u8]] = &[
     b"\x1b[38;5;39mcommands\x1b[0m\r\nopen close save\r\n",
 ];
 
+#[cfg_attr(not(any(test, feature = "cpu", feature = "gpu")), allow(dead_code))]
 pub(crate) const EMOJI_AND_SHADE_TRANSCRIPT: &[&[u8]] = &[
     "status ".as_bytes(),
     "❤️".as_bytes(),

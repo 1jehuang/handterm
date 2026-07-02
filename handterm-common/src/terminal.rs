@@ -885,49 +885,43 @@ impl Terminal {
                 27 => self.grid.set_inverse(false),
                 29 => self.grid.set_strikethrough(false),
                 30..=37 => self.grid.set_fg((params[i] - 30) as u32),
-                38 => {
-                    if i + 1 < params.len() {
-                        if params[i + 1] == 5 && i + 2 < params.len() {
-                            self.grid.set_fg(params[i + 2] as u32);
-                            i += 2;
-                        } else if params[i + 1] == 2 && i + 4 < params.len() {
-                            let r = params[i + 2] as u8;
-                            let g = params[i + 3] as u8;
-                            let b = params[i + 4] as u8;
-                            self.grid.set_fg_rgb(r, g, b);
-                            i += 4;
-                        }
+                38 if i + 1 < params.len() => {
+                    if params[i + 1] == 5 && i + 2 < params.len() {
+                        self.grid.set_fg(params[i + 2] as u32);
+                        i += 2;
+                    } else if params[i + 1] == 2 && i + 4 < params.len() {
+                        let r = params[i + 2] as u8;
+                        let g = params[i + 3] as u8;
+                        let b = params[i + 4] as u8;
+                        self.grid.set_fg_rgb(r, g, b);
+                        i += 4;
                     }
                 }
                 39 => self.grid.set_fg(0),
                 40..=47 => self.grid.set_bg((params[i] - 40) as u32),
-                48 => {
-                    if i + 1 < params.len() {
-                        if params[i + 1] == 5 && i + 2 < params.len() {
-                            self.grid.set_bg(params[i + 2] as u32);
-                            i += 2;
-                        } else if params[i + 1] == 2 && i + 4 < params.len() {
-                            let r = params[i + 2] as u8;
-                            let g = params[i + 3] as u8;
-                            let b = params[i + 4] as u8;
-                            self.grid.set_bg_rgb(r, g, b);
-                            i += 4;
-                        }
+                48 if i + 1 < params.len() => {
+                    if params[i + 1] == 5 && i + 2 < params.len() {
+                        self.grid.set_bg(params[i + 2] as u32);
+                        i += 2;
+                    } else if params[i + 1] == 2 && i + 4 < params.len() {
+                        let r = params[i + 2] as u8;
+                        let g = params[i + 3] as u8;
+                        let b = params[i + 4] as u8;
+                        self.grid.set_bg_rgb(r, g, b);
+                        i += 4;
                     }
                 }
                 49 => self.grid.set_bg(0),
-                58 => {
-                    if i + 1 < params.len() {
-                        if params[i + 1] == 5 && i + 2 < params.len() {
-                            self.grid.set_underline_color(params[i + 2] as u32);
-                            i += 2;
-                        } else if params[i + 1] == 2 && i + 4 < params.len() {
-                            let r = params[i + 2] as u8;
-                            let g = params[i + 3] as u8;
-                            let b = params[i + 4] as u8;
-                            self.grid.set_underline_color_rgb(r, g, b);
-                            i += 4;
-                        }
+                58 if i + 1 < params.len() => {
+                    if params[i + 1] == 5 && i + 2 < params.len() {
+                        self.grid.set_underline_color(params[i + 2] as u32);
+                        i += 2;
+                    } else if params[i + 1] == 2 && i + 4 < params.len() {
+                        let r = params[i + 2] as u8;
+                        let g = params[i + 3] as u8;
+                        let b = params[i + 4] as u8;
+                        self.grid.set_underline_color_rgb(r, g, b);
+                        i += 4;
                     }
                 }
                 59 => self.grid.reset_underline_color(),
@@ -977,17 +971,13 @@ impl Terminal {
                     }
                 }
                 b"1" => {}
-                b"10" => {
-                    if payload == b"?" {
-                        self.response_buf
-                            .extend_from_slice(b"\x1b]10;rgb:cd/d6/f4\x1b\\");
-                    }
+                b"10" if payload == b"?" => {
+                    self.response_buf
+                        .extend_from_slice(b"\x1b]10;rgb:cd/d6/f4\x1b\\");
                 }
-                b"11" => {
-                    if payload == b"?" {
-                        self.response_buf
-                            .extend_from_slice(b"\x1b]11;rgb:00/00/00\x1b\\");
-                    }
+                b"11" if payload == b"?" => {
+                    self.response_buf
+                        .extend_from_slice(b"\x1b]11;rgb:00/00/00\x1b\\");
                 }
                 b"52" => {
                     if let Some(semi2) = payload.iter().position(|&b| b == b';') {

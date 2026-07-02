@@ -995,6 +995,9 @@ mod tests {
     /// A representative spread of key events covering the hot ASCII path, the
     /// legacy named-key path, and several kitty-protocol encoding paths. Used by
     /// the buffer-reuse parity, allocation, and timing tests below.
+    // Test-only helper: the tuple mirrors `key_event_bytes_into` parameters
+    // positionally, which reads better at the call sites than a named struct.
+    #[allow(clippy::type_complexity)]
     fn sample_events() -> Vec<(
         Key,
         Option<&'static str>,

@@ -142,31 +142,27 @@ fn bytes_need_grapheme_clusters(bytes: &[u8]) -> bool {
                     return true;
                 }
             }
-            0xEF if i + 2 < bytes.len() => {
-                if bytes[i + 1] == 0xB8
-                    && (matches!(bytes[i + 2], 0x8E | 0x8F)
-                        || (0xA0..=0xAF).contains(&bytes[i + 2]))
-                {
+            0xEF if i + 2 < bytes.len()
+                && bytes[i + 1] == 0xB8
+                && (matches!(bytes[i + 2], 0x8E | 0x8F)
+                    || (0xA0..=0xAF).contains(&bytes[i + 2])) =>
+            {
+                return true;
+            }
+            0xF0 if i + 3 < bytes.len() && bytes[i + 1] == 0x9F => {
+                if bytes[i + 2] == 0x87 {
+                    return true;
+                }
+                if bytes[i + 2] == 0x8F && (0xBB..=0xBF).contains(&bytes[i + 3]) {
                     return true;
                 }
             }
-            0xF0 if i + 3 < bytes.len() => {
-                if bytes[i + 1] == 0x9F {
-                    if bytes[i + 2] == 0x87 {
-                        return true;
-                    }
-                    if bytes[i + 2] == 0x8F && (0xBB..=0xBF).contains(&bytes[i + 3]) {
-                        return true;
-                    }
-                }
-            }
-            0xF3 if i + 3 < bytes.len() => {
-                if bytes[i + 1] == 0xA0
-                    && bytes[i + 2] == 0x81
-                    && (0x81..=0xBF).contains(&bytes[i + 3])
-                {
-                    return true;
-                }
+            0xF3 if i + 3 < bytes.len()
+                && bytes[i + 1] == 0xA0
+                && bytes[i + 2] == 0x81
+                && (0x81..=0xBF).contains(&bytes[i + 3]) =>
+            {
+                return true;
             }
             _ => {}
         }
@@ -916,9 +912,18 @@ impl Grid {
 
     pub fn put_char(&mut self, ch: u32) {
         let width = if let Some(c) = char::from_u32(ch) {
-            unicode_width::UnicodeWidthChar::width(c)
-                .unwrap_or(1)
-                .clamp(1, 2)
+            match unicode_width::UnicodeWidthChar::width(c) {
+                Some(0) => {
+                    // Zero-width codepoint (combining mark, variation
+                    // selector, ZWJ, keycap combiner, ...): it modifies the
+                    // previously written cell instead of occupying its own.
+                    let mut buf = [0u8; 4];
+                    self.merge_zero_width_into_previous_cell(c.encode_utf8(&mut buf));
+                    return;
+                }
+                Some(w) => w.clamp(1, 2),
+                None => 1,
+            }
         } else {
             1
         };
@@ -926,17 +931,99 @@ impl Grid {
     }
 
     pub fn put_grapheme(&mut self, grapheme: &str) {
+        let measured = unicode_width::UnicodeWidthStr::width(grapheme);
+        if measured == 0 {
+            // A zero-width cluster (e.g. a lone combining mark, or a
+            // `VS16 + U+20E3` keycap fragment split from its base by chunked
+            // input) attaches to the previously written cell.
+            self.merge_zero_width_into_previous_cell(grapheme);
+            return;
+        }
         let ch = grapheme
             .chars()
             .next()
             .map(|c| c as u32)
             .unwrap_or(b' ' as u32);
-        let width = unicode_width::UnicodeWidthStr::width(grapheme).clamp(1, 2);
+        let width = measured.clamp(1, 2);
         self.put_cluster_parts(
             ch,
             width,
             needs_grapheme_storage(grapheme).then(|| grapheme.into()),
         );
+    }
+
+    /// Appends a zero-width codepoint/cluster to the most recently written
+    /// cell, forming (or extending) a grapheme cluster there. If the merged
+    /// cluster gains emoji presentation and becomes wide (e.g. `U+2764` +
+    /// `VS16`), the cell is widened in place when the next column is
+    /// available.
+    fn merge_zero_width_into_previous_cell(&mut self, zero_width: &str) {
+        if self.cursor_row >= self.rows || self.cols == 0 {
+            return;
+        }
+
+        // The most recently written cell: with a pending wrap the cursor
+        // still points at it; otherwise it is the cell left of the cursor.
+        let mut col = if self.pending_wrap {
+            self.cursor_col
+        } else if self.cursor_col > 0 {
+            self.cursor_col - 1
+        } else {
+            // Nothing on this row to attach to; drop the mark.
+            return;
+        };
+
+        let mut idx = self.cell_index_at(self.cursor_row, col);
+        // Attach to the head of a wide pair, not its continuation.
+        if self.cells[idx].flags & FLAG_WIDE_CONT != 0 && col > 0 {
+            col -= 1;
+            idx -= 1;
+        }
+
+        let existing = if self.has_graphemes {
+            self.graphemes[idx].as_deref()
+        } else {
+            None
+        };
+        let mut merged = match existing {
+            Some(cluster) => String::from(cluster),
+            None => match char::from_u32(self.cells[idx].ch) {
+                Some(base) => String::from(base),
+                None => return,
+            },
+        };
+        merged.push_str(zero_width);
+
+        // Re-measure: a variation selector can upgrade a narrow text-style
+        // glyph to a wide emoji-presentation cluster.
+        let new_width = unicode_width::UnicodeWidthStr::width(merged.as_str()).clamp(1, 2);
+        self.has_graphemes = true;
+        self.graphemes[idx] = Some(merged.into_boxed_str());
+        self.mark_dirty(idx);
+
+        if new_width == 2
+            && self.cells[idx].flags & FLAG_WIDE == 0
+            && !self.pending_wrap
+            && col + 1 < self.cols
+        {
+            self.cells[idx].flags |= FLAG_WIDE;
+            let mut cont = self.cells[idx];
+            cont.ch = 0;
+            cont.flags = FLAG_WIDE_CONT;
+            let idx2 = idx + 1;
+            self.cells[idx2] = cont;
+            self.graphemes[idx2] = None;
+            self.mark_dirty(idx2);
+            // Step the cursor past the new continuation cell when it was
+            // sitting immediately after the head.
+            if self.cursor_col == col + 1 {
+                self.cursor_col += 1;
+                if self.cursor_col >= self.cols {
+                    self.pending_wrap = true;
+                    self.cursor_col = self.cols - 1;
+                }
+            }
+        }
     }
 
     fn put_cluster_parts(&mut self, ch: u32, width: usize, grapheme: Option<Box<str>>) {

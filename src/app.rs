@@ -758,46 +758,42 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                     WindowEvent::ModifiersChanged(new_modifiers) => {
                         state.modifiers = new_modifiers;
                     }
-                    WindowEvent::Ime(Ime::Commit(text)) => {
-                        if !text.is_empty() {
-                            let ime_commit_text = crate::frontend::normalize_ime_dedupe_text(&text)
-                                .unwrap_or_else(|| text.clone());
-                            crate::frontend::trace_input(format!(
-                                "cpu ime-commit raw={:?} normalized={:?}",
-                                text, ime_commit_text
-                            ));
-                            if should_skip_ime_commit_after_key_event(
-                                &mut state.recent_text_key_event,
-                                &ime_commit_text,
-                                Instant::now(),
-                            ) {
-                                crate::frontend::trace_input(
-                                    "cpu ime-commit skipped after key-event dedupe",
-                                );
-                                return;
-                            }
-                            state.pending_ime_commit = Some(ime_commit_text);
-                            let _ = state.pty.write_all(text.as_bytes());
-                            if state.terminal.grid.scroll_offset > 0 {
-                                state.terminal.grid.scroll_offset = 0;
-                                state.terminal.grid.all_dirty = true;
-                            }
-                            state.terminal.grid.selection = None;
-                            let changed = drain_pty(state) > 0;
-                            let work = classify_redraw_work(&state.terminal, changed);
-                            let should_redraw_now = if *focused_window == Some(state.id) {
-                                state.scheduler.mark_redraw_needed();
-                                true
-                            } else {
-                                state.scheduler.mark_io_processed(
-                                    Instant::now(),
-                                    FRAME_INTERVAL,
-                                    work,
-                                )
-                            };
-                            if should_redraw_now {
-                                state.window.request_redraw();
-                            }
+                    WindowEvent::Ime(Ime::Commit(text)) if !text.is_empty() => {
+                        let ime_commit_text = crate::frontend::normalize_ime_dedupe_text(&text)
+                            .unwrap_or_else(|| text.clone());
+                        crate::frontend::trace_input(format!(
+                            "cpu ime-commit raw={:?} normalized={:?}",
+                            text, ime_commit_text
+                        ));
+                        if should_skip_ime_commit_after_key_event(
+                            &mut state.recent_text_key_event,
+                            &ime_commit_text,
+                            Instant::now(),
+                        ) {
+                            crate::frontend::trace_input(
+                                "cpu ime-commit skipped after key-event dedupe",
+                            );
+                            return;
+                        }
+                        state.pending_ime_commit = Some(ime_commit_text);
+                        let _ = state.pty.write_all(text.as_bytes());
+                        if state.terminal.grid.scroll_offset > 0 {
+                            state.terminal.grid.scroll_offset = 0;
+                            state.terminal.grid.all_dirty = true;
+                        }
+                        state.terminal.grid.selection = None;
+                        let changed = drain_pty(state) > 0;
+                        let work = classify_redraw_work(&state.terminal, changed);
+                        let should_redraw_now = if *focused_window == Some(state.id) {
+                            state.scheduler.mark_redraw_needed();
+                            true
+                        } else {
+                            state
+                                .scheduler
+                                .mark_io_processed(Instant::now(), FRAME_INTERVAL, work)
+                        };
+                        if should_redraw_now {
+                            state.window.request_redraw();
                         }
                     }
                     WindowEvent::KeyboardInput { event, .. } => {

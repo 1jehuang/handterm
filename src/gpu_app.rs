@@ -95,12 +95,17 @@ pub fn run(config: AppConfig, startup_command: Option<String>) -> Result<()> {
         .context("failed while running app")
 }
 
+/// Result of the background shared-GPU-context initialization: the context
+/// itself plus timing/profiling data captured during creation.
+type SharedGpuInit = (Arc<SharedGpuContext>, SharedGpuInitProfile);
+/// Handle to the background thread performing shared GPU initialization.
+type SharedGpuInitTask = std::thread::JoinHandle<Result<SharedGpuInit>>;
+
 struct GpuApp {
     config: AppConfig,
     startup_command: Option<String>,
     shared: Option<Arc<SharedGpuContext>>,
-    shared_init_task:
-        Option<std::thread::JoinHandle<Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)>>>,
+    shared_init_task: Option<SharedGpuInitTask>,
     windows: HashMap<WinitWindowId, GpuWindowState>,
     window_ids: HashMap<u64, WinitWindowId>,
     next_window_id: u64,
@@ -215,13 +220,8 @@ impl SyntheticInputTarget for GpuWindowState {
 }
 
 impl GpuApp {
-    fn spawn_shared_init_task()
-    -> std::thread::JoinHandle<Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)>> {
-        std::thread::spawn(
-            || -> Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)> {
-                create_shared_gpu_context_profiled()
-            },
-        )
+    fn spawn_shared_init_task() -> SharedGpuInitTask {
+        std::thread::spawn(|| -> Result<SharedGpuInit> { create_shared_gpu_context_profiled() })
     }
 
     fn new(
@@ -229,9 +229,7 @@ impl GpuApp {
         startup_command: Option<String>,
         ipc: Option<IpcServer>,
         proxy: EventLoopProxy<GpuAppEvent>,
-        shared_init_task: Option<
-            std::thread::JoinHandle<Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)>>,
-        >,
+        shared_init_task: Option<SharedGpuInitTask>,
     ) -> Self {
         Self {
             config,
@@ -939,80 +937,6 @@ impl GpuApp {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use winit::dpi::PhysicalPosition;
-
-    #[test]
-    fn smooth_pixel_wheel_delta_preserves_fractional_rows() {
-        let config = AppConfig::default();
-        let (_up, delta_rows) = GpuApp::wheel_delta_rows(
-            &config,
-            &MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 4.0)),
-            16.0,
-        );
-
-        assert!(
-            delta_rows > 0.0 && delta_rows < 1.0,
-            "expected fractional smooth scroll delta, got {delta_rows}"
-        );
-    }
-
-    #[test]
-    fn non_smooth_pixel_wheel_delta_still_steps_at_least_one_row() {
-        let mut config = AppConfig::default();
-        config.scrollback.smooth = false;
-
-        let (_up, delta_rows) = GpuApp::wheel_delta_rows(
-            &config,
-            &MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 4.0)),
-            16.0,
-        );
-
-        assert!(delta_rows >= 1.0);
-    }
-
-    #[test]
-    fn dpi_from_scale_factor_matches_96_dpi_convention() {
-        assert_eq!(dpi_from_scale_factor(1.0), 96);
-        assert_eq!(dpi_from_scale_factor(2.0), 192);
-        assert_eq!(dpi_from_scale_factor(1.5), 144);
-        // Fractional scales truncate, matching the host's historical behavior so
-        // the atlas-cache key for a given display does not shift.
-        assert_eq!(dpi_from_scale_factor(2.0 + 1.0 / 96.0), 193);
-        // Degenerate scales never collapse to zero DPI.
-        assert_eq!(dpi_from_scale_factor(0.0), 1);
-    }
-
-    #[test]
-    fn monitor_scale_factor_prefers_primary_when_usable() {
-        assert_eq!(
-            monitor_scale_factor(Some(2.0), vec![1.0, 3.0]),
-            Some(2.0),
-            "primary monitor scale should win"
-        );
-    }
-
-    #[test]
-    fn monitor_scale_factor_falls_back_to_first_usable_available() {
-        // No/invalid primary -> first finite, positive available scale is used.
-        assert_eq!(monitor_scale_factor(None, vec![1.5, 2.0]), Some(1.5));
-        assert_eq!(monitor_scale_factor(Some(0.0), vec![2.0]), Some(2.0));
-        assert_eq!(
-            monitor_scale_factor(Some(f64::NAN), vec![0.0, -1.0, 1.25]),
-            Some(1.25)
-        );
-    }
-
-    #[test]
-    fn monitor_scale_factor_returns_none_when_no_display() {
-        // Headless: nothing usable -> caller falls back to a probe window.
-        assert_eq!(monitor_scale_factor(None, Vec::<f64>::new()), None);
-        assert_eq!(monitor_scale_factor(Some(-1.0), vec![0.0]), None);
-    }
-}
-
 impl ApplicationHandler<GpuAppEvent> for GpuApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.ensure_initial_window(event_loop);
@@ -1071,80 +995,73 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                     .expect("atlas should exist for window dpi");
 
                 match event {
-                    WindowEvent::Resized(size) => {
-                        if size.width > 0 && size.height > 0 {
-                            let pad2 = 2 * self.config.window.padding_px(atlas.dpi()) as usize;
-                            let new_cols = ((size.width as usize).saturating_sub(pad2)
-                                / atlas.cell_width.max(1))
-                                as u16;
-                            let new_rows = ((size.height as usize).saturating_sub(pad2)
-                                / atlas.cell_height.max(1))
-                                as u16;
-                            let new_cols = new_cols.max(1);
-                            let new_rows = new_rows.max(1);
+                    WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
+                        let pad2 = 2 * self.config.window.padding_px(atlas.dpi()) as usize;
+                        let new_cols = ((size.width as usize).saturating_sub(pad2)
+                            / atlas.cell_width.max(1))
+                            as u16;
+                        let new_rows = ((size.height as usize).saturating_sub(pad2)
+                            / atlas.cell_height.max(1))
+                            as u16;
+                        let new_cols = new_cols.max(1);
+                        let new_rows = new_rows.max(1);
 
-                            resize_surface_state(
-                                &mut state.renderer,
-                                atlas,
-                                size.width,
-                                size.height,
-                                new_cols,
-                                new_rows,
-                                self.config.window.padding_px(atlas.dpi()),
-                            );
+                        resize_surface_state(
+                            &mut state.renderer,
+                            atlas,
+                            size.width,
+                            size.height,
+                            new_cols,
+                            new_rows,
+                            self.config.window.padding_px(atlas.dpi()),
+                        );
 
-                            if new_cols != state.terminal.cols || new_rows != state.terminal.rows {
-                                state.terminal.resize(new_cols, new_rows);
-                                let _ = state.pty.resize(new_cols, new_rows);
-                            }
-
-                            state.renderer.window.request_redraw();
+                        if new_cols != state.terminal.cols || new_rows != state.terminal.rows {
+                            state.terminal.resize(new_cols, new_rows);
+                            let _ = state.pty.resize(new_cols, new_rows);
                         }
+
+                        state.renderer.window.request_redraw();
                     }
                     WindowEvent::ModifiersChanged(new_modifiers) => {
                         state.modifiers = new_modifiers;
                     }
-                    WindowEvent::Ime(Ime::Commit(text)) => {
-                        if !text.is_empty() {
-                            let ime_commit_text = crate::frontend::normalize_ime_dedupe_text(&text)
-                                .unwrap_or_else(|| text.clone());
-                            crate::frontend::trace_input(format!(
-                                "gpu ime-commit raw={:?} normalized={:?}",
-                                text, ime_commit_text
-                            ));
-                            if should_skip_ime_commit_after_key_event(
-                                &mut state.recent_text_key_event,
-                                &ime_commit_text,
-                                Instant::now(),
-                            ) {
-                                crate::frontend::trace_input(
-                                    "gpu ime-commit skipped after key-event dedupe",
-                                );
-                                return;
-                            }
-                            Self::enter_hot_mode(state, Instant::now());
-                            state.pending_ime_commit = Some(ime_commit_text);
-                            let _ = state.pty.write_all(text.as_bytes());
-                            if state.terminal.grid.scroll_offset > 0 {
-                                Self::reset_scrollback_view(state);
-                            }
-                            state.terminal.grid.selection = None;
-                            let changed = drain_pty(state) > 0;
-                            let work =
-                                crate::frontend::classify_redraw_work(&state.terminal, changed);
-                            let should_redraw_now = if *focused_window == Some(state.id) {
-                                state.scheduler.mark_redraw_needed();
-                                true
-                            } else {
-                                state.scheduler.mark_io_processed(
-                                    Instant::now(),
-                                    FRAME_INTERVAL,
-                                    work,
-                                )
-                            };
-                            if should_redraw_now {
-                                state.renderer.window.request_redraw();
-                            }
+                    WindowEvent::Ime(Ime::Commit(text)) if !text.is_empty() => {
+                        let ime_commit_text = crate::frontend::normalize_ime_dedupe_text(&text)
+                            .unwrap_or_else(|| text.clone());
+                        crate::frontend::trace_input(format!(
+                            "gpu ime-commit raw={:?} normalized={:?}",
+                            text, ime_commit_text
+                        ));
+                        if should_skip_ime_commit_after_key_event(
+                            &mut state.recent_text_key_event,
+                            &ime_commit_text,
+                            Instant::now(),
+                        ) {
+                            crate::frontend::trace_input(
+                                "gpu ime-commit skipped after key-event dedupe",
+                            );
+                            return;
+                        }
+                        Self::enter_hot_mode(state, Instant::now());
+                        state.pending_ime_commit = Some(ime_commit_text);
+                        let _ = state.pty.write_all(text.as_bytes());
+                        if state.terminal.grid.scroll_offset > 0 {
+                            Self::reset_scrollback_view(state);
+                        }
+                        state.terminal.grid.selection = None;
+                        let changed = drain_pty(state) > 0;
+                        let work = crate::frontend::classify_redraw_work(&state.terminal, changed);
+                        let should_redraw_now = if *focused_window == Some(state.id) {
+                            state.scheduler.mark_redraw_needed();
+                            true
+                        } else {
+                            state
+                                .scheduler
+                                .mark_io_processed(Instant::now(), FRAME_INTERVAL, work)
+                        };
+                        if should_redraw_now {
+                            state.renderer.window.request_redraw();
                         }
                     }
                     WindowEvent::KeyboardInput { event, .. } => {
@@ -1667,4 +1584,78 @@ fn drain_pty(state: &mut GpuWindowState) -> usize {
     }
 
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winit::dpi::PhysicalPosition;
+
+    #[test]
+    fn smooth_pixel_wheel_delta_preserves_fractional_rows() {
+        let config = AppConfig::default();
+        let (_up, delta_rows) = GpuApp::wheel_delta_rows(
+            &config,
+            &MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 4.0)),
+            16.0,
+        );
+
+        assert!(
+            delta_rows > 0.0 && delta_rows < 1.0,
+            "expected fractional smooth scroll delta, got {delta_rows}"
+        );
+    }
+
+    #[test]
+    fn non_smooth_pixel_wheel_delta_still_steps_at_least_one_row() {
+        let mut config = AppConfig::default();
+        config.scrollback.smooth = false;
+
+        let (_up, delta_rows) = GpuApp::wheel_delta_rows(
+            &config,
+            &MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 4.0)),
+            16.0,
+        );
+
+        assert!(delta_rows >= 1.0);
+    }
+
+    #[test]
+    fn dpi_from_scale_factor_matches_96_dpi_convention() {
+        assert_eq!(dpi_from_scale_factor(1.0), 96);
+        assert_eq!(dpi_from_scale_factor(2.0), 192);
+        assert_eq!(dpi_from_scale_factor(1.5), 144);
+        // Fractional scales truncate, matching the host's historical behavior so
+        // the atlas-cache key for a given display does not shift.
+        assert_eq!(dpi_from_scale_factor(2.0 + 1.0 / 96.0), 193);
+        // Degenerate scales never collapse to zero DPI.
+        assert_eq!(dpi_from_scale_factor(0.0), 1);
+    }
+
+    #[test]
+    fn monitor_scale_factor_prefers_primary_when_usable() {
+        assert_eq!(
+            monitor_scale_factor(Some(2.0), vec![1.0, 3.0]),
+            Some(2.0),
+            "primary monitor scale should win"
+        );
+    }
+
+    #[test]
+    fn monitor_scale_factor_falls_back_to_first_usable_available() {
+        // No/invalid primary -> first finite, positive available scale is used.
+        assert_eq!(monitor_scale_factor(None, vec![1.5, 2.0]), Some(1.5));
+        assert_eq!(monitor_scale_factor(Some(0.0), vec![2.0]), Some(2.0));
+        assert_eq!(
+            monitor_scale_factor(Some(f64::NAN), vec![0.0, -1.0, 1.25]),
+            Some(1.25)
+        );
+    }
+
+    #[test]
+    fn monitor_scale_factor_returns_none_when_no_display() {
+        // Headless: nothing usable -> caller falls back to a probe window.
+        assert_eq!(monitor_scale_factor(None, Vec::<f64>::new()), None);
+        assert_eq!(monitor_scale_factor(Some(-1.0), vec![0.0]), None);
+    }
 }

@@ -615,15 +615,6 @@ impl SharedGpuContext {
             start.elapsed(),
         )
     }
-
-    #[allow(dead_code)]
-    fn pipelines_for_format(
-        &self,
-        format: wgpu::TextureFormat,
-    ) -> (wgpu::RenderPipeline, wgpu::RenderPipeline) {
-        let (text, image, _, _) = self.pipelines_for_format_profiled(format);
-        (text, image)
-    }
 }
 
 pub fn create_window_attributes(
@@ -684,11 +675,6 @@ pub fn create_window_attributes_for_metrics(
     let attrs = attrs.with_max_inner_size(Size::Physical(inner));
 
     attrs
-}
-
-pub fn create_shared_gpu_context() -> Result<Arc<SharedGpuContext>> {
-    let (shared, _) = create_shared_gpu_context_profiled()?;
-    Ok(shared)
 }
 
 pub fn create_shared_gpu_context_profiled() -> Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)>
@@ -819,43 +805,6 @@ pub fn create_shared_gpu_context_profiled() -> Result<(Arc<SharedGpuContext>, Sh
             total: total_start.elapsed(),
         },
     ))
-}
-
-pub fn create_surface_state(
-    event_loop: &ActiveEventLoop,
-    config: &AppConfig,
-    title: &str,
-    atlas: &GlyphAtlas,
-) -> Result<GpuSurfaceState> {
-    let shared = create_shared_gpu_context()?;
-    let (state, _) =
-        create_surface_state_with_shared_profiled(shared, event_loop, config, title, atlas)?;
-    Ok(state)
-}
-
-pub fn create_surface_state_with_shared(
-    shared: Arc<SharedGpuContext>,
-    event_loop: &ActiveEventLoop,
-    config: &AppConfig,
-    title: &str,
-    atlas: &GlyphAtlas,
-) -> Result<GpuSurfaceState> {
-    let (state, _) = create_surface_state_with_shared_profiled_with_defaults(
-        shared, event_loop, config, title, atlas, None,
-    )?;
-    Ok(state)
-}
-
-pub fn create_surface_state_with_shared_profiled(
-    shared: Arc<SharedGpuContext>,
-    event_loop: &ActiveEventLoop,
-    config: &AppConfig,
-    title: &str,
-    atlas: &GlyphAtlas,
-) -> Result<(GpuSurfaceState, GpuSurfaceCreateProfile)> {
-    create_surface_state_with_shared_profiled_with_defaults(
-        shared, event_loop, config, title, atlas, None,
-    )
 }
 
 pub fn create_surface_state_with_shared_profiled_with_defaults(
@@ -1144,15 +1093,6 @@ pub fn resize_surface_state(
         .write_buffer(&state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 }
 
-pub fn render_surface_state(
-    state: &mut GpuSurfaceState,
-    terminal: &mut impl TerminalView,
-    atlas: &mut GlyphAtlas,
-    config: &AppConfig,
-) {
-    render_surface_state_with_scroll(state, terminal, atlas, config, 0.0);
-}
-
 pub fn render_surface_state_with_scroll(
     state: &mut GpuSurfaceState,
     terminal: &mut impl TerminalView,
@@ -1161,15 +1101,6 @@ pub fn render_surface_state_with_scroll(
     scroll_rows: f32,
 ) {
     let _ = render_surface_state_profiled_with_scroll(state, terminal, atlas, config, scroll_rows);
-}
-
-pub fn render_surface_state_profiled(
-    state: &mut GpuSurfaceState,
-    terminal: &mut impl TerminalView,
-    atlas: &mut GlyphAtlas,
-    config: &AppConfig,
-) -> Option<GpuRenderProfile> {
-    render_surface_state_profiled_with_scroll(state, terminal, atlas, config, 0.0)
 }
 
 pub fn render_surface_state_profiled_with_scroll(

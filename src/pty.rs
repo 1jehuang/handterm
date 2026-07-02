@@ -3,7 +3,7 @@ use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::pty::{ForkptyResult, Winsize, forkpty};
 use nix::unistd::Pid;
 use std::ffi::{CString, OsString, c_char};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
 
@@ -154,14 +154,6 @@ impl PtyChild {
         Self::spawn_shell_with_env(&shell, columns, rows, &[])
     }
 
-    pub fn spawn_default_shell_with_command(
-        columns: u16,
-        rows: u16,
-        command: Option<&str>,
-    ) -> Result<Self> {
-        Self::spawn_default_shell_with_command_and_env(columns, rows, command, &[])
-    }
-
     pub fn spawn_default_shell_with_command_and_env(
         columns: u16,
         rows: u16,
@@ -262,11 +254,6 @@ impl PtyChild {
         let new_flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
         fcntl(&self.master_fd, FcntlArg::F_SETFL(new_flags)).context("F_SETFL failed")?;
         Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub fn fd(&self) -> BorrowedFd<'_> {
-        self.master_fd.as_fd()
     }
 
     pub fn raw_fd(&self) -> i32 {

@@ -439,11 +439,6 @@ impl Grid {
     }
 
     #[allow(dead_code)]
-    pub fn has_any_dirty(&self) -> bool {
-        self.all_dirty || self.dirty.iter().any(|&w| w != 0)
-    }
-
-    #[allow(dead_code)]
     pub fn dirty_cell_count(&self) -> usize {
         if self.all_dirty {
             return self.rows * self.cols;
@@ -1428,15 +1423,6 @@ impl Grid {
             self.current_attrs |= ATTR_ITALIC;
         } else {
             self.current_attrs &= !ATTR_ITALIC;
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn set_underline(&mut self, on: bool) {
-        if on {
-            self.current_attrs |= ATTR_UNDERLINE;
-        } else {
-            self.current_attrs &= !ATTR_UNDERLINE;
         }
     }
 

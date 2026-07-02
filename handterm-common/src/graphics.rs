@@ -45,25 +45,58 @@ pub struct KittyGraphicsCommand {
     pub quiet: u8,
 }
 
+/// Why a kitty graphics payload could not be decoded into RGBA pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KittyImageDecodeError {
+    /// The transmitted payload was not valid base64.
+    InvalidBase64,
+    /// Zlib decompression of the payload failed.
+    Decompression,
+    /// An unknown compression flag was supplied.
+    UnsupportedCompression,
+    /// The `f=` format parameter is not one we support (24, 32, or 100).
+    UnsupportedFormat,
+    /// Width/height were zero or did not match the payload length.
+    InvalidDimensions,
+    /// The embedded PNG failed to parse or used an unsupported color type.
+    InvalidPng,
+}
+
+impl std::fmt::Display for KittyImageDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let msg = match self {
+            Self::InvalidBase64 => "invalid base64 payload",
+            Self::Decompression => "zlib decompression failed",
+            Self::UnsupportedCompression => "unsupported compression flag",
+            Self::UnsupportedFormat => "unsupported image format",
+            Self::InvalidDimensions => "invalid or mismatched image dimensions",
+            Self::InvalidPng => "invalid or unsupported PNG data",
+        };
+        f.write_str(msg)
+    }
+}
+
+impl std::error::Error for KittyImageDecodeError {}
+
 pub fn decode_kitty_image_payload(
     format: u32,
     compression: Option<u8>,
     payload: &[u8],
     width: u32,
     height: u32,
-) -> Result<(u32, u32, Vec<u8>), ()> {
+) -> Result<(u32, u32, Vec<u8>), KittyImageDecodeError> {
     let decoded = base64_decode_kitty(payload)?;
     let decoded = decompress_kitty_payload(decoded, compression)?;
     match format {
         24 => {
             if width == 0 || height == 0 {
-                return Err(());
+                return Err(KittyImageDecodeError::InvalidDimensions);
             }
             let expected = (width as usize)
                 .saturating_mul(height as usize)
                 .saturating_mul(3);
             if decoded.len() != expected {
-                return Err(());
+                return Err(KittyImageDecodeError::InvalidDimensions);
             }
             let mut rgba = Vec::with_capacity((width as usize) * (height as usize) * 4);
             for chunk in decoded.chunks_exact(3) {
@@ -73,22 +106,22 @@ pub fn decode_kitty_image_payload(
         }
         32 => {
             if width == 0 || height == 0 {
-                return Err(());
+                return Err(KittyImageDecodeError::InvalidDimensions);
             }
             let expected = (width as usize)
                 .saturating_mul(height as usize)
                 .saturating_mul(4);
             if decoded.len() != expected {
-                return Err(());
+                return Err(KittyImageDecodeError::InvalidDimensions);
             }
             Ok((width, height, decoded))
         }
         100 => decode_png_kitty(&decoded),
-        _ => Err(()),
+        _ => Err(KittyImageDecodeError::UnsupportedFormat),
     }
 }
 
-fn base64_decode_kitty(input: &[u8]) -> Result<Vec<u8>, ()> {
+fn base64_decode_kitty(input: &[u8]) -> Result<Vec<u8>, KittyImageDecodeError> {
     const TABLE: [u8; 256] = {
         let mut t = [0xffu8; 256];
         let mut i = 0u8;
@@ -115,7 +148,7 @@ fn base64_decode_kitty(input: &[u8]) -> Result<Vec<u8>, ()> {
         }
         let val = TABLE[b as usize];
         if val == 0xff {
-            return Err(());
+            return Err(KittyImageDecodeError::InvalidBase64);
         }
         buf = (buf << 6) | val as u32;
         bits += 6;
@@ -128,12 +161,16 @@ fn base64_decode_kitty(input: &[u8]) -> Result<Vec<u8>, ()> {
     Ok(out)
 }
 
-fn decode_png_kitty(encoded_png: &[u8]) -> Result<(u32, u32, Vec<u8>), ()> {
+fn decode_png_kitty(encoded_png: &[u8]) -> Result<(u32, u32, Vec<u8>), KittyImageDecodeError> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(encoded_png));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = decoder.read_info().map_err(|_| ())?;
+    let mut reader = decoder
+        .read_info()
+        .map_err(|_| KittyImageDecodeError::InvalidPng)?;
     let mut buf = vec![0u8; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut buf).map_err(|_| ())?;
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|_| KittyImageDecodeError::InvalidPng)?;
     let bytes = &buf[..info.buffer_size()];
 
     let rgba = match info.color_type {
@@ -159,21 +196,25 @@ fn decode_png_kitty(encoded_png: &[u8]) -> Result<(u32, u32, Vec<u8>), ()> {
             }
             rgba
         }
-        _ => return Err(()),
+        _ => return Err(KittyImageDecodeError::InvalidPng),
     };
 
     Ok((info.width, info.height, rgba))
 }
 
-fn decompress_kitty_payload(decoded: Vec<u8>, compression: Option<u8>) -> Result<Vec<u8>, ()> {
+fn decompress_kitty_payload(
+    decoded: Vec<u8>,
+    compression: Option<u8>,
+) -> Result<Vec<u8>, KittyImageDecodeError> {
     match compression {
         None => Ok(decoded),
         Some(b'z') => {
             let mut decoder = flate2::read::ZlibDecoder::new(decoded.as_slice());
             let mut out = Vec::new();
-            std::io::Read::read_to_end(&mut decoder, &mut out).map_err(|_| ())?;
+            std::io::Read::read_to_end(&mut decoder, &mut out)
+                .map_err(|_| KittyImageDecodeError::Decompression)?;
             Ok(out)
         }
-        Some(_) => Err(()),
+        Some(_) => Err(KittyImageDecodeError::UnsupportedCompression),
     }
 }

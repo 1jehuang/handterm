@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  test:
+  test-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,7 +17,9 @@ jobs:
             pkg-config \
             libwayland-dev \
             libxkbcommon-dev \
-            libdrm-dev
+            libdrm-dev \
+            libfreetype-dev \
+            libfontconfig-dev
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
@@ -26,10 +28,36 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Format check
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Feature matrix
+        run: ./scripts/check-features.sh
 
       - name: Test
-        run: cargo test --all-targets --all-features
+        run: cargo test --workspace --all-targets --all-features
+
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: brew install pkgconf freetype fontconfig
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Feature matrix
+        run: ./scripts/check-features.sh
+
+      - name: Test
+        run: cargo test --workspace --all-targets --all-features

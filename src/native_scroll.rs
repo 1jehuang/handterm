@@ -310,26 +310,41 @@ fn write_line<T: Serialize>(stream: &mut UnixStream, message: &T) -> Result<()> 
         .context("failed writing native scroll command")
 }
 
+// Child-side environment helpers.
+//
+// Handterm has no in-repo consumer for these: they are public library API for
+// out-of-repo child applications (spawned inside a handterm window, see the
+// `child_envs` wiring in app.rs/gpu_app.rs) to discover the native scroll
+// bridge socket and their host window id from the environment handterm sets.
+
+/// Path of the native scroll bridge socket, read from the environment
+/// handterm sets for its child processes. For use by child applications.
 pub fn child_socket_path() -> Option<PathBuf> {
     std::env::var_os(ENV_SOCKET).map(PathBuf::from)
 }
 
+/// Host window id of the handterm window this child runs in, read from the
+/// environment handterm sets for its child processes.
 pub fn child_window_id() -> Option<u64> {
     std::env::var(ENV_WINDOW_ID).ok()?.parse().ok()
 }
 
+/// Name of the env var carrying the native scroll bridge socket path.
 pub fn socket_env_key() -> &'static str {
     ENV_SOCKET
 }
 
+/// Name of the env var children can check to detect they run under handterm.
 pub fn term_program_env_key() -> &'static str {
     ENV_TERM_PROGRAM
 }
 
+/// Value handterm sets for `TERM_PROGRAM` in child environments.
 pub fn term_program_env_value() -> &'static str {
     TERM_PROGRAM_VALUE
 }
 
+/// Name of the env var carrying the host window id.
 pub fn window_env_key() -> &'static str {
     ENV_WINDOW_ID
 }

@@ -281,7 +281,7 @@ fn probe_category(
         }
 
         // (a) ink inside the expected cell span.
-        let (ink, first_ink) = ink_evidence(&band, band_w, ctx.bg);
+        let (ink, _first_ink) = ink_evidence(&band, band_w, ctx.bg);
         min_ink = min_ink.min(ink);
         max_ink = max_ink.max(ink);
         if ink == 0 {

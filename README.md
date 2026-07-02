@@ -2,13 +2,14 @@
 
 # handterm
 
-A Wayland-native terminal emulator focused on reaching the theoretical limits of performance and resource efficiency.
+A terminal emulator for Wayland and macOS (Metal) focused on reaching the theoretical limits of performance and resource efficiency.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org)
 [![Wayland](https://img.shields.io/badge/wayland-native-green.svg)](https://wayland.freedesktop.org)
+[![macOS](https://img.shields.io/badge/macOS-Metal-lightgrey.svg)](https://developer.apple.com/metal/)
 
-Rust workspace split across 6 packages. Single-process host architecture for low-overhead multi-window scaling.
+Rust workspace with 2 crates (`handterm` + `handterm-common`). Single-process host architecture for low-overhead multi-window scaling.
 
 ![handterm screenshot](assets/screenshot.png)
 
@@ -202,7 +203,7 @@ Current workspace snapshot from this repository:
 
 | Terminal | Lines of code | Language | Packaging / dependencies |
 |----------|-------------:|:--------:|:------------------------:|
-| **handterm** | **~24,200** | Rust | 6 local workspace crates, 341 resolved Cargo packages |
+| **handterm** | **~24,200** | Rust | 2 local workspace crates, ~340 resolved Cargo packages |
 | alacritty | ~34,000 | Rust | ~100+ crates |
 | foot | ~55,000 | C | system libs only |
 | kitty | ~116,000 | C + Python | system libs + Python stdlib |

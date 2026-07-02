@@ -588,4 +588,249 @@ mod tests {
         }
         panic!("expected an OscDispatch action");
     }
+
+    /// Feed a byte slice and return the last action plus all dispatches seen.
+    fn run(p: &mut Parser, bytes: &[u8]) -> Action {
+        let mut last = Action::Nop;
+        for &b in bytes {
+            last = p.advance(b);
+        }
+        last
+    }
+
+    #[test]
+    fn params_beyond_max_are_dropped_not_wrapped() {
+        let mut p = Parser::new();
+        let mut seq = b"\x1b[".to_vec();
+        for i in 1..=24 {
+            if i > 1 {
+                seq.push(b';');
+            }
+            seq.extend_from_slice(i.to_string().as_bytes());
+        }
+        seq.push(b'm');
+
+        let last = run(&mut p, &seq);
+        assert_eq!(
+            last,
+            Action::CsiDispatch {
+                params_count: MAX_PARAMS as u8,
+                intermediate: 0,
+                final_byte: b'm',
+            }
+        );
+        // The first MAX_PARAMS values are kept verbatim; the excess is dropped.
+        let expected: Vec<u16> = (1..=MAX_PARAMS as u16).collect();
+        assert_eq!(p.params(), expected.as_slice());
+    }
+
+    #[test]
+    fn huge_numeric_param_saturates_at_u16_max() {
+        let mut p = Parser::new();
+        run(&mut p, b"\x1b[99999999999999999999H");
+        assert_eq!(p.params(), &[u16::MAX]);
+    }
+
+    #[test]
+    fn colon_subparams_split_like_semicolons() {
+        // SGR 38:2:255:0:0 (colon-separated direct color) must not corrupt
+        // neighboring params.
+        let mut p = Parser::new();
+        let last = run(&mut p, b"\x1b[38:2:255:0:0m");
+        assert_eq!(
+            last,
+            Action::CsiDispatch {
+                params_count: 5,
+                intermediate: 0,
+                final_byte: b'm',
+            }
+        );
+        assert_eq!(p.params(), &[38, 2, 255, 0, 0]);
+    }
+
+    /// A C0 control interleaved inside a CSI sequence aborts the sequence and
+    /// returns the parser to ground, so the following text prints normally.
+    #[test]
+    fn c0_control_inside_csi_aborts_sequence() {
+        let mut p = Parser::new();
+        assert_eq!(run(&mut p, b"\x1b[12"), Action::Nop);
+        assert_eq!(p.advance(0x0e), Action::Nop); // SO aborts the CSI
+        assert!(p.is_ground());
+        assert_eq!(p.advance(b'A'), Action::Print(b'A'));
+    }
+
+    /// An unterminated OSC swallows following text until a real terminator,
+    /// then the parser recovers and handles the next sequence normally.
+    #[test]
+    fn unterminated_osc_recovers_on_terminator() {
+        let mut p = Parser::new();
+        assert_eq!(run(&mut p, b"\x1b]0;titleplain text after"), Action::Nop);
+        assert_eq!(
+            p.advance(0x07),
+            Action::OscDispatch(Box::new(b"0;titleplain text after".to_vec()))
+        );
+        // A complete follow-up sequence parses cleanly from ground.
+        let last = run(&mut p, b"\x1b[3m");
+        assert_eq!(
+            last,
+            Action::CsiDispatch {
+                params_count: 1,
+                intermediate: 0,
+                final_byte: b'm',
+            }
+        );
+        assert_eq!(p.params(), &[3]);
+    }
+
+    #[test]
+    fn embedded_escape_in_osc_payload_is_preserved() {
+        // ESC followed by anything other than `\` is data, not a terminator.
+        let mut p = Parser::new();
+        assert_eq!(run(&mut p, b"\x1b]0;a\x1bXb"), Action::Nop);
+        assert_eq!(
+            p.advance(0x07),
+            Action::OscDispatch(Box::new(b"0;a\x1bXb".to_vec()))
+        );
+    }
+
+    #[test]
+    fn c0_controls_inside_osc_are_buffered_as_data() {
+        let mut p = Parser::new();
+        run(&mut p, b"\x1b]0;a\nb");
+        assert_eq!(
+            p.advance(0x07),
+            Action::OscDispatch(Box::new(b"0;a\nb".to_vec()))
+        );
+    }
+
+    #[test]
+    fn osc_payload_is_capped_at_4096_bytes() {
+        let mut p = Parser::new();
+        run(&mut p, b"\x1b]");
+        for _ in 0..5000 {
+            assert_eq!(p.advance(b'x'), Action::Nop);
+        }
+        match p.advance(0x07) {
+            Action::OscDispatch(data) => {
+                assert_eq!(data.len(), 4096, "OSC payload should be truncated");
+            }
+            other => panic!("expected OscDispatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apc_dispatches_on_st_and_bel() {
+        let mut p = Parser::new();
+        assert_eq!(run(&mut p, b"\x1b_Gf=32\x1b"), Action::Nop);
+        assert_eq!(
+            p.advance(b'\\'),
+            Action::ApcDispatch(Box::new(b"Gf=32".to_vec()))
+        );
+
+        // BEL also terminates an APC string.
+        assert_eq!(run(&mut p, b"\x1b_Ga=d"), Action::Nop);
+        assert_eq!(
+            p.advance(0x07),
+            Action::ApcDispatch(Box::new(b"Ga=d".to_vec()))
+        );
+    }
+
+    #[test]
+    fn embedded_escape_in_apc_and_dcs_payloads_is_preserved() {
+        let mut p = Parser::new();
+        run(&mut p, b"\x1b_a\x1bZb\x1b");
+        assert_eq!(
+            p.advance(b'\\'),
+            Action::ApcDispatch(Box::new(b"a\x1bZb".to_vec()))
+        );
+
+        run(&mut p, b"\x1bPc\x1bZd\x1b");
+        assert_eq!(
+            p.advance(b'\\'),
+            Action::DcsDispatch(Box::new(b"c\x1bZd".to_vec()))
+        );
+    }
+
+    /// SOS (ESC X) and PM (ESC ^) have no string-consuming state in this
+    /// parser: the introducer dispatches as a plain escape and the payload
+    /// prints. Pin that down so a future change is a conscious decision.
+    #[test]
+    fn sos_and_pm_introducers_dispatch_as_escapes() {
+        for intro in [b'X', b'^'] {
+            let mut p = Parser::new();
+            assert_eq!(p.advance(0x1b), Action::Nop);
+            assert_eq!(
+                p.advance(intro),
+                Action::EscDispatch {
+                    intermediate: 0,
+                    final_byte: intro,
+                }
+            );
+            assert!(p.is_ground());
+        }
+    }
+
+    #[test]
+    fn utf8_multibyte_garbage_prints_bytewise_from_ground() {
+        // Raw UTF-8 continuation bytes and truncated multibyte prefixes are
+        // the terminal layer's problem; the parser must pass them through.
+        let mut p = Parser::new();
+        for &b in "é€\u{10348}".as_bytes() {
+            assert_eq!(p.advance(b), Action::Print(b));
+        }
+        // Lone continuation byte and overlong-encoding prefix also print.
+        assert_eq!(p.advance(0xbf), Action::Print(0xbf));
+        assert_eq!(p.advance(0xc0), Action::Print(0xc0));
+    }
+
+    /// Deterministic pseudo-random byte storm: the parser must never panic
+    /// and its invariants (bounded params, bounded payloads) must hold on
+    /// every single byte.
+    #[test]
+    fn never_panics_on_pseudo_random_bytes() {
+        let mut rng_state: u64 = 0x1531_5731_dead_beef;
+        let mut next = move || {
+            // xorshift64: deterministic, no dependencies.
+            rng_state ^= rng_state << 13;
+            rng_state ^= rng_state >> 7;
+            rng_state ^= rng_state << 17;
+            rng_state
+        };
+
+        let mut p = Parser::new();
+        for _ in 0..4000 {
+            let len = (next() % 64) as usize;
+            for _ in 0..len {
+                let byte = (next() >> 32) as u8;
+                let action = p.advance(byte);
+                assert!(p.params().len() <= MAX_PARAMS);
+                match action {
+                    Action::CsiDispatch { params_count, .. } => {
+                        assert!(usize::from(params_count) <= MAX_PARAMS);
+                    }
+                    Action::OscDispatch(data) => {
+                        assert!(data.len() <= 4096, "OSC payload exceeded cap");
+                    }
+                    Action::DcsDispatch(data) | Action::ApcDispatch(data) => {
+                        assert!(data.len() <= 1024 * 1024, "string payload exceeded cap");
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // After any garbage the parser must still parse a clean sequence.
+        run(&mut p, b"\x07\x1b\\"); // best-effort flush to ground
+        run(&mut p, b"\x1b[0m");
+        let last = run(&mut p, b"\x1b[1;31m");
+        assert_eq!(
+            last,
+            Action::CsiDispatch {
+                params_count: 2,
+                intermediate: 0,
+                final_byte: b'm',
+            }
+        );
+        assert_eq!(p.params(), &[1, 31]);
+    }
 }

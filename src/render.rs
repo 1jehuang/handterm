@@ -6,7 +6,6 @@ use crate::grid::{COLOR_DEFAULT, Cell};
 use crate::terminal::{CursorStyle, TerminalView};
 use crate::visual::{is_in_selection, resolve_cell_colors, resolve_underline_color};
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub struct OffscreenRenderer {
     pub width: usize,
     pub height: usize,
@@ -14,7 +13,6 @@ pub struct OffscreenRenderer {
     last_visual_state: Option<VisualState>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl OffscreenRenderer {
     pub fn new(cols: u16, rows: u16, atlas: &GlyphAtlas) -> Self {
         let width = cols as usize * atlas.cell_width;

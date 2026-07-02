@@ -1,5 +1,5 @@
-#![allow(dead_code)]
-
+// Shared with `render.rs` and `gpu_frame.rs` test modules only.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const FISH_STARTUP_TRANSCRIPT: &[&[u8]] = &[
     b"\x1b[?u\x1b[>0q\x1b]11;?\x1b\\",
     b"\x1b[?1049h\x1bP+q696e646e\x1b\\",
@@ -22,6 +22,8 @@ pub(crate) const STARSHIP_PROMPT_TRANSCRIPT: &[&[u8]] = &[
     STARSHIP_PROMPT_FINAL_CHUNK,
 ];
 
+// Shared with the `render.rs` test module only.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const TUI_HELP_OVERLAY_TRANSCRIPT: &[&[u8]] = &[
     b"\x1b[?1049h",
     b"jcode boot\r\nloading modules\r\nready\r\n",
@@ -46,5 +48,8 @@ pub(crate) const EMOJI_AND_SHADE_TRANSCRIPT: &[&[u8]] = &[
     "░░░░░░░░░░".as_bytes(),
 ];
 
+// Only the cpu-feature render benchmark (metrics.rs) drives these workloads.
+#[cfg(feature = "cpu")]
 pub(crate) const PROMPT_PREFIX: &[u8] = b"\x1b[38;5;10m>\x1b[0m ";
+#[cfg(feature = "cpu")]
 pub(crate) const TYPING_WORKLOAD: &[u8] = b"echo hello world from handterm";

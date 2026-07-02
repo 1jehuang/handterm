@@ -8,7 +8,10 @@ pub mod cli;
 pub mod color;
 pub mod config;
 pub mod fd_watcher;
-#[allow(dead_code)]
+// `font` exposes a wide glyph/shaping API surface. With `local-fonts` off, the
+// font-discovery-dependent parts are compiled but unreachable, so allow
+// dead_code only for that feature combination.
+#[cfg_attr(not(feature = "local-fonts"), allow(dead_code))]
 pub mod font;
 pub mod frontend;
 #[cfg(all(feature = "gpu", feature = "standalone"))]

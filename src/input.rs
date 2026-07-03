@@ -648,8 +648,13 @@ fn encode_kitty_key_into(
 }
 
 fn text_key_is_ambiguous(modifiers: ModifiersState) -> bool {
-    modifiers.shift_key()
-        || modifiers.alt_key()
+    // Shift alone is NOT ambiguous: a text key pressed with only shift
+    // produces plain shifted text (e.g. shift+/ types `?`), and kitty's
+    // disambiguate flag only rewrites combinations whose legacy encodings
+    // collide with control codes (esc, alt+key, ctrl+key, etc.). Encoding
+    // shift-only keys as CSI u made applications see the unshifted base key
+    // (`/` instead of `?`).
+    modifiers.alt_key()
         || modifiers.control_key()
         || modifiers.super_key()
         || hyper_modifier_active(modifiers)
@@ -2000,6 +2005,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bytes, b"a");
+    }
+
+    #[test]
+    fn kitty_shift_only_symbol_key_types_shifted_text() {
+        // shift+/ must type `?`, not a CSI u report of the unshifted base
+        // key. Regression test: with only the disambiguate flag active,
+        // shift-only text keys take the legacy path and emit their text.
+        let bytes = key_to_bytes(
+            &Key::Character("?".into()),
+            Some("?"),
+            Some(&PhysicalKey::Code(KeyCode::Slash)),
+            false,
+            ModifiersState::SHIFT,
+            KITTY_KBD_DISAMBIGUATE,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"?");
+
+        // Same for shifted letters: shift+a types `A`.
+        let bytes = key_to_bytes(
+            &Key::Character("A".into()),
+            Some("A"),
+            Some(&PhysicalKey::Code(KeyCode::KeyA)),
+            false,
+            ModifiersState::SHIFT,
+            KITTY_KBD_DISAMBIGUATE,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"A");
     }
 
     #[test]

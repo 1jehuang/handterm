@@ -138,6 +138,10 @@ impl IpcServer {
         self.listener.as_raw_fd()
     }
 
+    pub(crate) fn has_clients(&self) -> bool {
+        !self.clients.is_empty()
+    }
+
     pub fn poll(
         &mut self,
         handler: &mut dyn FnMut(&Request) -> (Response, IpcAction),
@@ -331,6 +335,7 @@ pub fn send_command(socket_path: &Path, req: &Request) -> Result<Response> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     #[test]
     fn host_socket_override_accepts_non_empty_value() {
@@ -345,5 +350,36 @@ mod tests {
         assert_eq!(host_socket_override_from(None), None);
         assert_eq!(host_socket_override_from(Some("")), None);
         assert_eq!(host_socket_override_from(Some("   ")), None);
+    }
+
+    #[test]
+    fn connected_client_can_complete_request_across_multiple_polls() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("split.sock");
+        let mut server = IpcServer::bind(&path).unwrap();
+        let mut client = UnixStream::connect(&path).unwrap();
+
+        server.poll(&mut |_| (Response::ok_empty(), IpcAction::None));
+        assert!(server.has_clients());
+
+        client.write_all(br#"{"cmd":"pi"#).unwrap();
+        let mut handled = 0;
+        server.poll(&mut |_| {
+            handled += 1;
+            (Response::ok_empty(), IpcAction::None)
+        });
+        assert_eq!(handled, 0);
+
+        client.write_all(br#"ng","args":{}}
+"#).unwrap();
+        server.poll(&mut |_| {
+            handled += 1;
+            (Response::ok_empty(), IpcAction::None)
+        });
+        assert_eq!(handled, 1);
+
+        let mut response = [0_u8; 256];
+        let n = client.read(&mut response).unwrap();
+        assert!(String::from_utf8_lossy(&response[..n]).contains("\"ok\":true"));
     }
 }

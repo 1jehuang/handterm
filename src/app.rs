@@ -44,6 +44,12 @@ enum AppEvent {
 }
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(8);
+const IPC_CLIENT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const MAX_PTY_BYTES_PER_EVENT: usize = 1024 * 1024;
+
+fn earlier_deadline(current: Option<Instant>, candidate: Instant) -> Option<Instant> {
+    Some(current.map_or(candidate, |existing| existing.min(candidate)))
+}
 
 pub fn run(config: AppConfig, startup_command: Option<String>) -> Result<()> {
     let event_loop = EventLoop::<AppEvent>::with_user_event()
@@ -1170,6 +1176,7 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
         let mut earliest_deadline: Option<Instant> = None;
         let mut redraw_ids = Vec::new();
         let mut closed_windows = Vec::new();
@@ -1179,10 +1186,7 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
             let decision: FrameDecision =
                 scheduler.prepare_redraw(Instant::now(), RedrawWork::default);
             if let Some(deadline) = decision.wait_until {
-                earliest_deadline = Some(match earliest_deadline {
-                    Some(existing) => existing.min(deadline),
-                    None => deadline,
-                });
+                earliest_deadline = earlier_deadline(earliest_deadline, deadline);
             }
             if decision.request_redraw {
                 redraw_ids.push(*winit_id);
@@ -1202,6 +1206,20 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
             self.close_window(winit_id, event_loop);
         }
 
+        // The fd watcher monitors the listening socket. Once a client has
+        // connected, later bytes (notably a request split across writes) do not
+        // make that listener readable again. Poll connected nonblocking clients
+        // at a modest cadence so partial requests cannot remain stuck forever.
+        if self.ipc.as_ref().is_some_and(IpcServer::has_clients) {
+            self.process_ipc_actions(event_loop);
+            if self.ipc.as_ref().is_some_and(IpcServer::has_clients) {
+                earliest_deadline = earlier_deadline(
+                    earliest_deadline,
+                    now + IPC_CLIENT_POLL_INTERVAL,
+                );
+            }
+        }
+
         if self.windows.is_empty() {
             event_loop.set_control_flow(ControlFlow::Wait);
         } else if let Some(deadline) = earliest_deadline {
@@ -1217,7 +1235,7 @@ fn drain_pty(state: &mut HostWindowState) -> usize {
         return 0;
     }
     let mut total = 0;
-    loop {
+    while total < MAX_PTY_BYTES_PER_EVENT {
         match state.pty.try_read(&mut state.pty_buf) {
             Ok(0) => break,
             Ok(n) => {
@@ -1296,4 +1314,19 @@ fn render_grid(
         .map_err(|e| anyhow::anyhow!("failed presenting frame: {e}"))?;
     state.last_presented_signature = Some(signature);
     Ok(())
+}
+
+#[cfg(test)]
+mod event_loop_tests {
+    use super::earlier_deadline;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn ipc_poll_deadline_never_delays_an_existing_frame_deadline() {
+        let now = Instant::now();
+        let frame = now + Duration::from_millis(4);
+        let ipc = now + Duration::from_millis(16);
+        assert_eq!(earlier_deadline(Some(frame), ipc), Some(frame));
+        assert_eq!(earlier_deadline(None, ipc), Some(ipc));
+    }
 }

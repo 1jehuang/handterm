@@ -401,11 +401,17 @@ impl HandtermApp {
             })
             .unwrap_or_default();
         let before_pty = Instant::now();
-        let pty = PtyChild::spawn_default_shell_with_command_and_env(
+        let added_window_cwd = (existing_windows > 0).then(dirs::home_dir).flatten();
+        let pty = PtyChild::spawn_default_shell_with_command_env_and_cwd(
             cols,
             rows,
-            self.startup_command.as_deref(),
+            if existing_windows == 0 {
+                self.startup_command.as_deref()
+            } else {
+                None
+            },
             &native_scroll_env_refs,
+            added_window_cwd.as_deref(),
         )
         .context("pty should spawn")?;
         let pty_spawned_at = Instant::now();

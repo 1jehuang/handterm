@@ -5,7 +5,7 @@ use nix::unistd::Pid;
 use std::ffi::{CString, OsString, c_char};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStringExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub type ChildEnvVar<'a> = (&'a str, &'a str);
 
@@ -34,10 +34,17 @@ struct PreparedExec {
     argv: Vec<*const c_char>,
     /// Null-terminated pointer array for `execve(2)`'s `envp`.
     envp: Vec<*const c_char>,
+    /// Optional directory to enter in the child before exec.
+    cwd: Option<CString>,
 }
 
 impl PreparedExec {
-    fn new(shell_path: &str, command: Option<&str>, envs: &[ChildEnvVar<'_>]) -> Result<Self> {
+    fn new(
+        shell_path: &str,
+        command: Option<&str>,
+        envs: &[ChildEnvVar<'_>],
+        cwd: Option<&Path>,
+    ) -> Result<Self> {
         let mut args = vec![
             CString::new(shell_path)
                 .with_context(|| format!("invalid shell path: {shell_path}"))?,
@@ -67,12 +74,17 @@ impl PreparedExec {
 
         let argv = nul_terminated_ptrs(&args);
         let envp = nul_terminated_ptrs(&env);
+        let cwd = cwd
+            .map(|path| CString::new(path.as_os_str().as_encoded_bytes()))
+            .transpose()
+            .context("working directory contains a NUL byte")?;
         Ok(Self {
             candidates,
             _args: args,
             _env: env,
             argv,
             envp,
+            cwd,
         })
     }
 }
@@ -160,12 +172,22 @@ impl PtyChild {
         command: Option<&str>,
         envs: &[ChildEnvVar<'_>],
     ) -> Result<Self> {
+        Self::spawn_default_shell_with_command_env_and_cwd(columns, rows, command, envs, None)
+    }
+
+    pub fn spawn_default_shell_with_command_env_and_cwd(
+        columns: u16,
+        rows: u16,
+        command: Option<&str>,
+        envs: &[ChildEnvVar<'_>],
+        cwd: Option<&Path>,
+    ) -> Result<Self> {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
         match command.filter(|command| !command.trim().is_empty()) {
             Some(command) => {
-                Self::spawn_shell_command_with_env(&shell, command, columns, rows, envs)
+                Self::spawn_shell_inner(&shell, Some(command), columns, rows, envs, cwd)
             }
-            None => Self::spawn_shell_with_env(&shell, columns, rows, envs),
+            None => Self::spawn_shell_inner(&shell, None, columns, rows, envs, cwd),
         }
     }
 
@@ -179,7 +201,7 @@ impl PtyChild {
         rows: u16,
         envs: &[ChildEnvVar<'_>],
     ) -> Result<Self> {
-        Self::spawn_shell_inner(shell_path, None, columns, rows, envs)
+        Self::spawn_shell_inner(shell_path, None, columns, rows, envs, None)
     }
 
     pub fn spawn_shell_command(
@@ -198,7 +220,7 @@ impl PtyChild {
         rows: u16,
         envs: &[ChildEnvVar<'_>],
     ) -> Result<Self> {
-        Self::spawn_shell_inner(shell_path, Some(command), columns, rows, envs)
+        Self::spawn_shell_inner(shell_path, Some(command), columns, rows, envs, None)
     }
 
     fn spawn_shell_inner(
@@ -207,11 +229,12 @@ impl PtyChild {
         columns: u16,
         rows: u16,
         envs: &[ChildEnvVar<'_>],
+        cwd: Option<&Path>,
     ) -> Result<Self> {
         // Prepare argv/envp/program paths before forking: the child branch
         // below must not allocate or touch the environment (see
         // `PreparedExec`).
-        let exec = PreparedExec::new(shell_path, command, envs)?;
+        let exec = PreparedExec::new(shell_path, command, envs, cwd)?;
 
         let ws = Winsize {
             ws_row: rows,
@@ -232,6 +255,13 @@ impl PtyChild {
                 Ok(pty)
             }
             ForkptyResult::Child => {
+                if let Some(cwd) = &exec.cwd {
+                    // SAFETY: `cwd` is a preallocated, NUL-terminated path and
+                    // `chdir(2)` is async-signal-safe after fork.
+                    if unsafe { nix::libc::chdir(cwd.as_ptr()) } != 0 {
+                        unsafe { nix::libc::_exit(126) }
+                    }
+                }
                 // Only async-signal-safe calls are allowed here (see
                 // `PreparedExec`): `execve(2)` and `_exit(2)` qualify. Try
                 // each pre-resolved candidate in order, mirroring
@@ -329,6 +359,22 @@ mod tests {
             .write_all(b"printf 'handterm-pty-ok\\n'\\n")
             .expect("write should succeed");
         read_until_contains(&child, "handterm-pty-ok");
+    }
+
+    #[test]
+    fn pty_can_start_in_an_explicit_working_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let command = "pwd";
+        let child = PtyChild::spawn_default_shell_with_command_env_and_cwd(
+            80,
+            24,
+            Some(command),
+            &[],
+            Some(dir.path()),
+        )
+        .expect("PTY should start in requested directory");
+
+        read_until_contains(&child, &dir.path().to_string_lossy());
     }
 
     #[test]

@@ -983,16 +983,14 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                     state.startup_timing.mark_pty_event(Instant::now());
                     let bytes_read = drain_pty(state);
                     if bytes_read > 0 {
-                        Self::enter_hot_mode(state, Instant::now());
                         let work = crate::frontend::classify_redraw_work(&state.terminal, true);
-                        let should_redraw_now = if self.focused_window == Some(state.id) {
-                            state.scheduler.mark_redraw_needed();
-                            true
-                        } else {
+                        // Large TUI frames are emitted across multiple PTY reads.
+                        // Coalescing heavy damage prevents partially parsed child
+                        // frames from being presented during native pane scrolling.
+                        let should_redraw_now =
                             state
                                 .scheduler
-                                .mark_io_processed(Instant::now(), FRAME_INTERVAL, work)
-                        };
+                                .mark_io_processed(Instant::now(), FRAME_INTERVAL, work);
                         if should_redraw_now {
                             state.renderer.window.request_redraw();
                         }
@@ -1345,7 +1343,11 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                                 },
                             )
                         {
-                            Self::enter_hot_mode(state, Instant::now());
+                            // The bridge only queues a command. Jcode's resulting
+                            // PTY damage is the authoritative signal that a new
+                            // frame is ready. Starting host hot-frame scheduling
+                            // here races unchanged retained frames against the
+                            // asynchronous child update and causes visible flicker.
                             return;
                         }
                         if state.terminal.mouse_mode != crate::terminal::MouseMode::Off {
@@ -1528,32 +1530,6 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
         let now = Instant::now();
 
         for (winit_id, state) in &mut self.windows {
-            if self.config.scrollback.smooth && state.smooth_scroll.is_animating() {
-                let next_frame_at = state.next_hot_frame_at.unwrap_or(now);
-                if now >= next_frame_at {
-                    redraw_ids.push(*winit_id);
-                    state.next_hot_frame_at = Some(now + FRAME_INTERVAL);
-                } else {
-                    earliest_deadline = earlier_deadline(earliest_deadline, next_frame_at);
-                }
-            }
-            if self.focused_window == Some(state.id)
-                && let Some(hot_until) = state.hot_until
-            {
-                if now < hot_until {
-                    let next_frame_at = state.next_hot_frame_at.unwrap_or(now);
-                    if now >= next_frame_at {
-                        redraw_ids.push(*winit_id);
-                        state.next_hot_frame_at = Some(now + FRAME_INTERVAL);
-                    } else {
-                        earliest_deadline = earlier_deadline(earliest_deadline, next_frame_at);
-                    }
-                } else {
-                    state.hot_until = None;
-                    state.next_hot_frame_at = None;
-                }
-            }
-
             let scheduler = &mut state.scheduler;
             let decision: FrameDecision = scheduler.prepare_redraw(now, RedrawWork::default);
             if let Some(deadline) = decision.wait_until {
@@ -1561,6 +1537,38 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
             }
             if decision.request_redraw {
                 redraw_ids.push(*winit_id);
+            }
+
+            // A scheduler deadline means heavy PTY damage is still being
+            // coalesced. It must take precedence over smooth-scroll and hot-mode
+            // ticks, otherwise either periodic source can present a partially
+            // parsed TUI frame before the defer interval expires.
+            if !decision.blocks_periodic_redraw() {
+                if self.config.scrollback.smooth && state.smooth_scroll.is_animating() {
+                    let next_frame_at = state.next_hot_frame_at.unwrap_or(now);
+                    if now >= next_frame_at {
+                        redraw_ids.push(*winit_id);
+                        state.next_hot_frame_at = Some(now + FRAME_INTERVAL);
+                    } else {
+                        earliest_deadline = earlier_deadline(earliest_deadline, next_frame_at);
+                    }
+                }
+                if self.focused_window == Some(state.id)
+                    && let Some(hot_until) = state.hot_until
+                {
+                    if now < hot_until {
+                        let next_frame_at = state.next_hot_frame_at.unwrap_or(now);
+                        if now >= next_frame_at {
+                            redraw_ids.push(*winit_id);
+                            state.next_hot_frame_at = Some(now + FRAME_INTERVAL);
+                        } else {
+                            earliest_deadline = earlier_deadline(earliest_deadline, next_frame_at);
+                        }
+                    } else {
+                        state.hot_until = None;
+                        state.next_hot_frame_at = None;
+                    }
+                }
             }
         }
 

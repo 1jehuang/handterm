@@ -723,14 +723,16 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                     let bytes_read = drain_pty(state);
                     if bytes_read > 0 {
                         let work = classify_redraw_work(&state.terminal, true);
-                        let should_redraw_now = if self.focused_window == Some(state.id) {
-                            state.scheduler.mark_redraw_needed();
-                            true
-                        } else {
+                        // A full-screen TUI update commonly arrives as several PTY
+                        // reads. Presenting every partial read can expose an
+                        // intermediate frame, which looks like flicker while
+                        // scrolling. Keep light output immediate, but coalesce
+                        // heavy updates for one frame interval in focused windows
+                        // as well as background windows.
+                        let should_redraw_now =
                             state
                                 .scheduler
-                                .mark_io_processed(Instant::now(), FRAME_INTERVAL, work)
-                        };
+                                .mark_io_processed(Instant::now(), FRAME_INTERVAL, work);
                         if should_redraw_now {
                             state.window.request_redraw();
                         }

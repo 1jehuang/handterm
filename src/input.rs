@@ -2123,6 +2123,24 @@ mod tests {
     }
 
     #[test]
+    fn jcode_kitty_flags_keep_question_mark_as_text() {
+        // Jcode enables disambiguation and event reporting together. A physical
+        // Shift+Slash press must still be delivered as printable `?` text rather
+        // than as an unshifted slash report or Ctrl-? DEL byte.
+        let bytes = key_to_bytes(
+            &Key::Character("?".into()),
+            Some("?"),
+            Some(&PhysicalKey::Code(KeyCode::Slash)),
+            false,
+            ModifiersState::SHIFT,
+            KITTY_KBD_DISAMBIGUATE | KITTY_KBD_REPORT_EVENTS,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"?");
+    }
+
+    #[test]
     fn kitty_app_cursor_uses_ss3_sequence_without_modifiers() {
         let bytes = key_to_bytes(
             &Key::Named(NamedKey::ArrowUp),

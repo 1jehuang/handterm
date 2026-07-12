@@ -631,7 +631,10 @@ fn encode_kitty_key_into(
     if !produces_text {
         return false;
     }
-    if !report_all && matches!(event_kind, KeyEventKind::Repeat | KeyEventKind::Release) {
+    if !report_all
+        && matches!(event_kind, KeyEventKind::Repeat | KeyEventKind::Release)
+        && !(report_events && (disambiguate || text_key_is_ambiguous(modifiers)))
+    {
         return false;
     }
     if !report_all && !disambiguate && matches!(event_kind, KeyEventKind::Press) {
@@ -1471,6 +1474,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bytes, b"\x1b[1;1:3A");
+    }
+
+    #[test]
+    fn kitty_report_events_encodes_modified_text_repeat_without_report_all() {
+        let bytes = key_to_bytes(
+            &Key::Character("f".into()),
+            Some("f"),
+            Some(&PhysicalKey::Code(KeyCode::KeyF)),
+            false,
+            ModifiersState::ALT,
+            KITTY_KBD_DISAMBIGUATE | KITTY_KBD_REPORT_EVENTS,
+            KeyEventKind::Repeat,
+        );
+        assert_eq!(bytes, Some(b"\x1b[102;3:2u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_report_events_encodes_modified_text_release_without_report_all() {
+        let bytes = key_to_bytes(
+            &Key::Character("f".into()),
+            Some("f"),
+            Some(&PhysicalKey::Code(KeyCode::KeyF)),
+            false,
+            ModifiersState::ALT,
+            KITTY_KBD_DISAMBIGUATE | KITTY_KBD_REPORT_EVENTS,
+            KeyEventKind::Release,
+        );
+        assert_eq!(bytes, Some(b"\x1b[102;3:3u".to_vec()));
     }
 
     #[test]

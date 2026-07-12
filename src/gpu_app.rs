@@ -1101,6 +1101,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
 
                             if ctrl
                                 && shift
+                                && !event.repeat
                                 && let Key::Character(s) = &event.logical_key
                             {
                                 let ch = s.chars().next().unwrap_or('\0').to_ascii_lowercase();

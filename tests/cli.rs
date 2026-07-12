@@ -1,7 +1,7 @@
+#![cfg(feature = "cli")]
+
 use handterm::backend::Backend;
-#[cfg(feature = "cli")]
 use handterm::cli::Cli;
-#[cfg(feature = "cli")]
 use handterm::should_reuse_existing_host;
 use predicates::prelude::*;
 use std::fs;

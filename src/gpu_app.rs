@@ -47,6 +47,12 @@ enum GpuAppEvent {
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 const HOT_MODE_DURATION: Duration = Duration::from_millis(160);
+const IPC_CLIENT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const MAX_PTY_BYTES_PER_EVENT: usize = 1024 * 1024;
+
+fn earlier_deadline(current: Option<Instant>, candidate: Instant) -> Option<Instant> {
+    Some(current.map_or(candidate, |existing| existing.min(candidate)))
+}
 
 /// Convert a winit scale factor into the integer DPI value the font/atlas stack
 /// expects (96 DPI per 1.0 scale). Uses the same truncating conversion the GPU
@@ -1528,10 +1534,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                     redraw_ids.push(*winit_id);
                     state.next_hot_frame_at = Some(now + FRAME_INTERVAL);
                 } else {
-                    earliest_deadline = Some(match earliest_deadline {
-                        Some(existing) => existing.min(next_frame_at),
-                        None => next_frame_at,
-                    });
+                    earliest_deadline = earlier_deadline(earliest_deadline, next_frame_at);
                 }
             }
             if self.focused_window == Some(state.id)
@@ -1543,10 +1546,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                         redraw_ids.push(*winit_id);
                         state.next_hot_frame_at = Some(now + FRAME_INTERVAL);
                     } else {
-                        earliest_deadline = Some(match earliest_deadline {
-                            Some(existing) => existing.min(next_frame_at),
-                            None => next_frame_at,
-                        });
+                        earliest_deadline = earlier_deadline(earliest_deadline, next_frame_at);
                     }
                 } else {
                     state.hot_until = None;
@@ -1557,10 +1557,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
             let scheduler = &mut state.scheduler;
             let decision: FrameDecision = scheduler.prepare_redraw(now, RedrawWork::default);
             if let Some(deadline) = decision.wait_until {
-                earliest_deadline = Some(match earliest_deadline {
-                    Some(existing) => existing.min(deadline),
-                    None => deadline,
-                });
+                earliest_deadline = earlier_deadline(earliest_deadline, deadline);
             }
             if decision.request_redraw {
                 redraw_ids.push(*winit_id);
@@ -1570,6 +1567,17 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
         for winit_id in redraw_ids {
             if let Some(state) = self.windows.get(&winit_id) {
                 state.renderer.window.request_redraw();
+            }
+        }
+
+        // Readiness on the listening socket only covers accepts. Once a client
+        // has connected, a request split across writes may otherwise remain
+        // buffered forever because later bytes do not wake the listener.
+        if self.ipc.as_ref().is_some_and(IpcServer::has_clients) {
+            self.process_ipc_actions(event_loop);
+            if self.ipc.as_ref().is_some_and(IpcServer::has_clients) {
+                earliest_deadline =
+                    earlier_deadline(earliest_deadline, now + IPC_CLIENT_POLL_INTERVAL);
             }
         }
 
@@ -1589,7 +1597,7 @@ fn drain_pty(state: &mut GpuWindowState) -> usize {
     }
 
     let mut total = 0;
-    loop {
+    while total < MAX_PTY_BYTES_PER_EVENT {
         match state.pty.try_read(&mut state.pty_buf) {
             Ok(0) => break,
             Ok(n) => {

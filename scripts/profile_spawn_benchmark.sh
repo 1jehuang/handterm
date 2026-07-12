@@ -99,7 +99,7 @@ read_cpu_ticks() {
 }
 CLK_TCK=$(getconf CLK_TCK)
 START_TICKS=$(read_cpu_ticks)
-START_RSS=$(grep '^VmRSS:' /proc/$HOST_PID/status | awk '{print $2}')
+START_RSS=$(grep '^VmRSS:' "/proc/$HOST_PID/status" | awk '{print $2}')
 
 : > "$OUT_FILE"
 printf 'backend=%s count=%s\n' "$BACKEND" "$COUNT" | tee -a "$OUT_FILE"
@@ -116,13 +116,13 @@ for i in $(seq 2 "$COUNT"); do
   done
   END_NS=$(date +%s%N)
   if (( i == 2 )) || (( i % 10 == 0 )) || (( i == COUNT )); then
-    RSS=$(grep '^VmRSS:' /proc/$HOST_PID/status | awk '{print $2}')
+    RSS=$(grep '^VmRSS:' "/proc/$HOST_PID/status" | awk '{print $2}')
     printf 'window=%s startup_ms=%s rss_kb=%s\n' "$i" "$(( (END_NS-START_NS)/1000000 ))" "$RSS" | tee -a "$OUT_FILE"
   fi
 done
 
 END_TICKS=$(read_cpu_ticks)
-END_RSS=$(grep '^VmRSS:' /proc/$HOST_PID/status | awk '{print $2}')
+END_RSS=$(grep '^VmRSS:' "/proc/$HOST_PID/status" | awk '{print $2}')
 CPU_MS=$(( (END_TICKS - START_TICKS) * 1000 / CLK_TCK ))
 RSS_DELTA=$(( END_RSS - START_RSS ))
 printf 'cpu_time_ms=%s rss_delta_kb=%s\n' "$CPU_MS" "$RSS_DELTA" | tee -a "$OUT_FILE"

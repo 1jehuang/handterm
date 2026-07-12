@@ -176,6 +176,24 @@ pub fn with_app_id(attrs: WindowAttributes, _app_id: &str) -> WindowAttributes {
     }
 }
 
+/// Configure terminal-style keyboard handling on the native window.
+///
+/// macOS normally treats Option as a text-composition key, so shortcuts such
+/// as Option-F arrive as `ƒ` instead of Alt-F. Terminal applications need both
+/// Option keys to behave as Alt so shells receive the expected escape-prefixed
+/// key sequence. Other platforms already report Alt directly.
+pub fn with_terminal_keyboard(attrs: WindowAttributes) -> WindowAttributes {
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS};
+        attrs.with_option_as_alt(OptionAsAlt::Both)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        attrs
+    }
+}
+
 /// Apply the "no window chrome" look for `window.decorations = false`.
 ///
 /// On macOS a fully undecorated window loses the standard rounded-corner

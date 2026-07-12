@@ -38,16 +38,6 @@ if [[ ! -x "$HANDTERM_BIN" ]]; then
   exit 2
 fi
 
-# Each metric: regex over the bench text -> we take the best (max) across REPEATS,
-# except latency/startup metrics where lower is better (we take the min).
-# Format: key|grep_pattern|field_index|mode(max|min)
-METRICS=$(cat <<'EOF'
-memcpy_mb_s|memcpy (64MB)|MAX
-byte_scan_mb_s|byte scan (64MB)|MAX
-parser_ascii_mb_s|^  ASCII *: .*MB/s  (.*% of memcpy)|MAX_PARSER
-EOF
-)
-
 # Collect raw runs.
 RAW="$OUT_DIR/${LABEL}.raw.txt"
 : > "$RAW"

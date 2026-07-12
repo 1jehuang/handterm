@@ -102,7 +102,7 @@ echo "Single idle window footprint (one shell, settle ${SETTLE}s, median of 3):"
 
 # handterm single window
 ht_samples=()
-for i in 1 2 3; do
+for _ in 1 2 3; do
   rm -rf /tmp/handterm-one-$$; mkdir -p /tmp/handterm-one-$$
   XDG_RUNTIME_DIR=/tmp/handterm-one-$$ "$HANDTERM_BIN" --standalone --backend gpu --exec "sleep 600" >/dev/null 2>&1 &
   hp=$!
@@ -119,7 +119,7 @@ measure_gui_app() {
   local label="$1"; shift
   local procmatch="$1"; shift
   local samples=()
-  for i in 1 2 3; do
+  for _ in 1 2 3; do
     # close pre-existing of this app to isolate? No: measure only the new pid set delta.
     local before after newpids
     before=$(pgrep -f "$procmatch" | sort)
@@ -129,13 +129,15 @@ measure_gui_app() {
     newpids=$(comm -13 <(echo "$before") <(echo "$after"))
     if [[ -z "$newpids" ]]; then
       # app already running; sum all matching pids as fallback
-      newpids=$(echo "$after")
+      newpids=$after
     fi
-    local kb
-    kb=$(sum_footprint_kb $newpids)
+    local kb p
+    local pid_list=()
+    read -r -a pid_list <<< "$newpids"
+    kb=$(sum_footprint_kb "${pid_list[@]}")
     samples+=("$kb")
     # kill the new pids
-    for p in $newpids; do kill "$p" 2>/dev/null; done
+    for p in "${pid_list[@]}"; do kill "$p" 2>/dev/null; done
     sleep 1
   done
   local med

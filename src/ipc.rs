@@ -138,6 +138,7 @@ impl IpcServer {
         self.listener.as_raw_fd()
     }
 
+    #[cfg(any(feature = "cpu", feature = "gpu"))]
     pub(crate) fn has_clients(&self) -> bool {
         !self.clients.is_empty()
     }
@@ -370,8 +371,12 @@ mod tests {
         });
         assert_eq!(handled, 0);
 
-        client.write_all(br#"ng","args":{}}
-"#).unwrap();
+        client
+            .write_all(
+                br#"ng","args":{}}
+"#,
+            )
+            .unwrap();
         server.poll(&mut |_| {
             handled += 1;
             (Response::ok_empty(), IpcAction::None)

@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::pty::{ForkptyResult, Winsize, forkpty};
+use nix::sys::signal::{Signal, killpg};
 use nix::sys::wait::waitpid;
 use nix::unistd::Pid;
 use std::ffi::{CString, OsString, c_char};
@@ -162,6 +163,24 @@ fn nul_terminated_ptrs(strings: &[CString]) -> Vec<*const c_char> {
 pub struct PtyChild {
     master_fd: OwnedFd,
     child_pid: Pid,
+}
+
+impl Drop for PtyChild {
+    fn drop(&mut self) {
+        // `forkpty` makes the child a process-group leader. Explicitly hang up
+        // the whole group when its terminal window closes, then reap the child
+        // off the event-loop thread. Closing `master_fd` immediately after this
+        // drop hook reinforces the same terminal hangup semantics.
+        let _ = killpg(self.child_pid, Signal::SIGHUP);
+        let child_pid = self.child_pid;
+        let _ = std::thread::Builder::new()
+            .name("handterm-pty-reaper".into())
+            .spawn(
+                move || {
+                    while let Err(nix::errno::Errno::EINTR) = waitpid(child_pid, None) {}
+                },
+            );
+    }
 }
 
 impl PtyChild {
@@ -421,7 +440,10 @@ fn read_launch_error(fd: i32) -> Result<Option<(&'static str, i32)>> {
                 b'e' => "exec",
                 _ => "setup",
             };
-            return Ok(Some((stage, i32::from_ne_bytes(message[1..].try_into().unwrap()))));
+            return Ok(Some((
+                stage,
+                i32::from_ne_bytes(message[1..].try_into().unwrap()),
+            )));
         }
     }
 }
@@ -521,7 +543,10 @@ mod tests {
         )
         .err()
         .expect("missing cwd must fail spawn");
-        assert!(error.to_string().contains("child chdir failed"), "{error:#}");
+        assert!(
+            error.to_string().contains("child chdir failed"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -538,5 +563,21 @@ mod tests {
         let pid = child.child_pid().as_raw();
         assert_eq!(unsafe { nix::libc::getsid(pid) }, pid);
         assert_eq!(unsafe { nix::libc::getpgid(pid) }, pid);
+    }
+
+    #[test]
+    fn dropping_pty_hangs_up_and_reaps_child() {
+        let child = PtyChild::spawn_shell("/bin/sh", 80, 24).expect("pty should launch shell");
+        let pid = child.child_pid();
+        drop(child);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if nix::sys::signal::kill(pid, None) == Err(nix::errno::Errno::ESRCH) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("PTY child {pid} was not reaped after terminal teardown");
     }
 }

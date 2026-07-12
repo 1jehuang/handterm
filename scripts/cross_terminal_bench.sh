@@ -22,8 +22,6 @@ OUT_DIR="${BENCH_OUT_DIR:-$ROOT/bench_out}"
 mkdir -p "$OUT_DIR"
 OUT="$OUT_DIR/cross_terminal.txt"
 SETTLE="${SETTLE:-3}"
-GHOSTTY_APP="/Applications/Ghostty.app"
-GHOSTTY_BIN="$GHOSTTY_APP/Contents/MacOS/ghostty"
 KITTY_BIN="/Applications/kitty.app/Contents/MacOS/kitty"
 
 median() { sort -n | awk '{a[NR]=$1} END{ if(NR==0){print 0} else if(NR%2){print a[(NR+1)/2]} else {print int((a[NR/2]+a[NR/2+1])/2)} }'; }
@@ -37,7 +35,8 @@ fp_kb() {
 tree_fp_kb() {
   local root="$1"
   # collect subtree pids
-  local pids=$(pstree_pids "$root")
+  local pids
+  pids=$(pstree_pids "$root")
   local total=0 p kb
   for p in $pids; do
     kb=$(fp_kb "$p")
@@ -79,7 +78,7 @@ echo | tee -a "$OUT"
 ############################################################
 measure_handterm() {
   local samples1=() samples3=()
-  for i in 1 2 3; do
+  for _ in 1 2 3; do
     rm -rf /tmp/xt-ht; mkdir -p /tmp/xt-ht
     XDG_RUNTIME_DIR=/tmp/xt-ht "$HANDTERM_BIN" --standalone --backend gpu --exec "sleep 600" >/tmp/xt-ht.log 2>&1 &
     local p=$!
@@ -106,7 +105,7 @@ measure_handterm() {
 measure_kitty() {
   [[ -x "$KITTY_BIN" ]] || { echo "  kitty not found" | tee -a "$OUT"; return; }
   local samples1=() samples3=()
-  for i in 1 2 3; do
+  for _ in 1 2 3; do
     "$KITTY_BIN" --single-instance=no -o confirm_os_window_close=0 -e sleep 600 >/tmp/xt-kit.log 2>&1 &
     local launch=$!
     sleep "$SETTLE"
@@ -120,11 +119,11 @@ measure_kitty() {
   done
   # 3-window: launch 3 separate isolated kitty processes and sum footprints
   local three=()
-  for i in 1 2 3; do
+  for _ in 1 2 3; do
     local pids=()
-    for w in 1 2 3; do
+    for _ in 1 2 3; do
       "$KITTY_BIN" --single-instance=no -o confirm_os_window_close=0 -e sleep 600 >/dev/null 2>&1 &
-      pids+=($!)
+      pids+=("$!")
     done
     sleep "$SETTLE"
     local total=0 pp

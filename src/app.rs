@@ -299,10 +299,10 @@ impl HandtermApp {
         let width = cols as f64 * cell_width as f64;
         let height = rows as f64 * cell_height as f64;
 
-        let attrs = crate::platform::with_app_id(
+        let attrs = crate::platform::with_terminal_keyboard(crate::platform::with_app_id(
             Window::default_attributes().with_title("handterm [cpu host]"),
             "handterm",
-        )
+        ))
         .with_transparent(false)
         .with_inner_size(Size::Logical(LogicalSize::new(width, height)));
         let attrs = crate::platform::with_decorations(attrs, self.config.window.decorations);
@@ -1214,10 +1214,8 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
         if self.ipc.as_ref().is_some_and(IpcServer::has_clients) {
             self.process_ipc_actions(event_loop);
             if self.ipc.as_ref().is_some_and(IpcServer::has_clients) {
-                earliest_deadline = earlier_deadline(
-                    earliest_deadline,
-                    now + IPC_CLIENT_POLL_INTERVAL,
-                );
+                earliest_deadline =
+                    earlier_deadline(earliest_deadline, now + IPC_CLIENT_POLL_INTERVAL);
             }
         }
 

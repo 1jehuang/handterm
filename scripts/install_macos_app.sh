@@ -1,7 +1,12 @@
 #!/bin/sh
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [ "$(uname -s)" != "Darwin" ]; then
+  echo "HandTerm.app installation is supported only on macOS" >&2
+  exit 1
+fi
+
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 BINARY=${1:-"$ROOT/target/release/handterm"}
 APP_DIR=${2:-"$HOME/Applications/HandTerm.app"}
 CONTENTS="$APP_DIR/Contents"

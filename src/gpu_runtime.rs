@@ -497,10 +497,12 @@ pub fn create_window_attributes_for_metrics(
         width.round().max(1.0) as u32,
         height.round().max(1.0) as u32,
     );
-    let attrs =
-        crate::platform::with_app_id(Window::default_attributes().with_title(title), "handterm")
-            .with_transparent(transparency_requested(config.style.background_opacity))
-            .with_inner_size(Size::Physical(inner));
+    let attrs = crate::platform::with_terminal_keyboard(crate::platform::with_app_id(
+        Window::default_attributes().with_title(title),
+        "handterm",
+    ))
+    .with_transparent(transparency_requested(config.style.background_opacity))
+    .with_inner_size(Size::Physical(inner));
     let attrs = crate::platform::with_decorations(attrs, config.window.decorations);
     // Spawn position policy (config `window.position`): centered by default,
     // cascading extra windows. Wayland ignores position hints; macOS/X11
@@ -936,12 +938,8 @@ pub fn resume_surface_state(state: &mut GpuSurfaceState, transparency: bool) -> 
         state.surface_config.height.max(1),
     );
     let preferred = state.preferred_surface_defaults();
-    let (config, reused) = build_surface_config(
-        size,
-        transparency,
-        Some(preferred),
-        Some(&capabilities),
-    )?;
+    let (config, reused) =
+        build_surface_config(size, transparency, Some(preferred), Some(&capabilities))?;
     if !reused || config.format != state.surface_config.format {
         let (pipeline, image_pipeline, _, _) =
             state.shared.pipelines_for_format_profiled(config.format);
@@ -949,7 +947,9 @@ pub fn resume_surface_state(state: &mut GpuSurfaceState, transparency: bool) -> 
         state.image_pipeline = image_pipeline;
     }
     state.surface_config = config;
-    state.surface.configure(&state.shared.device, &state.surface_config);
+    state
+        .surface
+        .configure(&state.shared.device, &state.surface_config);
     state.last_presented_signature = None;
     state.last_viewport_scroll_quantized = None;
     Ok(())

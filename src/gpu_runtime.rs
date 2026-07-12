@@ -124,8 +124,9 @@ struct SharedPipelines {
 }
 
 pub struct GpuSurfaceState {
-    pub shared: Arc<SharedGpuContext>,
-    pub window: Arc<Window>,
+    // Field order is deliberate: Rust drops fields top-to-bottom. Release the
+    // surface and device-owned resources before the window and shared context
+    // they were created from.
     pub surface: wgpu::Surface<'static>,
     pub surface_config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
@@ -143,6 +144,8 @@ pub struct GpuSurfaceState {
     pub last_visual_state: Option<VisualState>,
     pub last_presented_signature: Option<u64>,
     pub last_viewport_scroll_quantized: Option<u32>,
+    pub window: Arc<Window>,
+    pub shared: Arc<SharedGpuContext>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -158,7 +161,9 @@ fn build_surface_config(
     preferred_defaults: Option<GpuSurfaceDefaults>,
     surface_caps: Option<&wgpu::SurfaceCapabilities>,
 ) -> Result<(wgpu::SurfaceConfiguration, bool)> {
-    if let Some(defaults) = preferred_defaults {
+    if let Some(defaults) = preferred_defaults
+        && surface_caps.is_some_and(|caps| surface_supports_defaults(caps, defaults))
+    {
         return Ok((
             wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -192,6 +197,15 @@ fn build_surface_config(
         },
         false,
     ))
+}
+
+fn surface_supports_defaults(
+    capabilities: &wgpu::SurfaceCapabilities,
+    defaults: GpuSurfaceDefaults,
+) -> bool {
+    capabilities.formats.contains(&defaults.format)
+        && capabilities.present_modes.contains(&defaults.present_mode)
+        && capabilities.alpha_modes.contains(&defaults.alpha_mode)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -702,40 +716,18 @@ pub fn create_surface_state_for_window_with_shared_profiled_with_defaults(
 
     let size = window.inner_size();
 
-    let (surface_config, capabilities, default_config, reused_surface_defaults) =
-        if preferred_defaults.is_some() {
-            let (surface_config, reused_surface_defaults) = build_surface_config(
-                size,
-                transparency_requested(config.style.background_opacity),
-                preferred_defaults,
-                None,
-            )?;
-            (
-                surface_config,
-                Duration::ZERO,
-                Duration::ZERO,
-                reused_surface_defaults,
-            )
-        } else {
-            let step_start = Instant::now();
-            let surface_caps = surface.get_capabilities(&shared.adapter);
-            let capabilities = step_start.elapsed();
+    let step_start = Instant::now();
+    let surface_caps = surface.get_capabilities(&shared.adapter);
+    let capabilities = step_start.elapsed();
 
-            let step_start = Instant::now();
-            let (surface_config, reused_surface_defaults) = build_surface_config(
-                size,
-                transparency_requested(config.style.background_opacity),
-                None,
-                Some(&surface_caps),
-            )?;
-            let default_config = step_start.elapsed();
-            (
-                surface_config,
-                capabilities,
-                default_config,
-                reused_surface_defaults,
-            )
-        };
+    let step_start = Instant::now();
+    let (surface_config, reused_surface_defaults) = build_surface_config(
+        size,
+        transparency_requested(config.style.background_opacity),
+        preferred_defaults,
+        Some(&surface_caps),
+    )?;
+    let default_config = step_start.elapsed();
 
     let step_start = Instant::now();
     surface.configure(&shared.device, &surface_config);
@@ -814,8 +806,6 @@ pub fn create_surface_state_for_window_with_shared_profiled_with_defaults(
 
     Ok((
         GpuSurfaceState {
-            shared,
-            window,
             surface,
             surface_config,
             pipeline,
@@ -837,6 +827,8 @@ pub fn create_surface_state_for_window_with_shared_profiled_with_defaults(
             last_visual_state: None,
             last_presented_signature: None,
             last_viewport_scroll_quantized: None,
+            window,
+            shared,
         },
         GpuSurfaceCreateProfile {
             window_create,
@@ -935,6 +927,32 @@ pub fn resize_surface_state(
         .shared
         .queue
         .write_buffer(&state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+}
+
+pub fn resume_surface_state(state: &mut GpuSurfaceState, transparency: bool) -> Result<()> {
+    let capabilities = state.surface.get_capabilities(&state.shared.adapter);
+    let size = winit::dpi::PhysicalSize::new(
+        state.surface_config.width.max(1),
+        state.surface_config.height.max(1),
+    );
+    let preferred = state.preferred_surface_defaults();
+    let (config, reused) = build_surface_config(
+        size,
+        transparency,
+        Some(preferred),
+        Some(&capabilities),
+    )?;
+    if !reused || config.format != state.surface_config.format {
+        let (pipeline, image_pipeline, _, _) =
+            state.shared.pipelines_for_format_profiled(config.format);
+        state.pipeline = pipeline;
+        state.image_pipeline = image_pipeline;
+    }
+    state.surface_config = config;
+    state.surface.configure(&state.shared.device, &state.surface_config);
+    state.last_presented_signature = None;
+    state.last_viewport_scroll_quantized = None;
+    Ok(())
 }
 
 pub fn render_surface_state_with_scroll(

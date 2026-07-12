@@ -768,7 +768,7 @@ fn falls_back_to_opaque_alpha_when_compositor_has_no_transparent_mode() {
 }
 
 #[test]
-fn build_surface_config_reuses_preferred_defaults_without_capabilities() {
+fn build_surface_config_reuses_supported_preferred_defaults() {
     let size = winit::dpi::PhysicalSize::new(800, 600);
     let defaults = GpuSurfaceDefaults {
         format: wgpu::TextureFormat::Bgra8Unorm,
@@ -776,7 +776,13 @@ fn build_surface_config_reuses_preferred_defaults_without_capabilities() {
         alpha_mode: wgpu::CompositeAlphaMode::PreMultiplied,
     };
 
-    let (config, reused) = build_surface_config(size, true, Some(defaults), None)
+    let capabilities = wgpu::SurfaceCapabilities {
+        formats: vec![defaults.format],
+        present_modes: vec![defaults.present_mode],
+        alpha_modes: vec![defaults.alpha_mode],
+        usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
+    };
+    let (config, reused) = build_surface_config(size, true, Some(defaults), Some(&capabilities))
         .expect("preferred defaults should build a surface config");
 
     assert!(reused);
@@ -785,6 +791,30 @@ fn build_surface_config_reuses_preferred_defaults_without_capabilities() {
     assert_eq!(config.format, defaults.format);
     assert_eq!(config.present_mode, defaults.present_mode);
     assert_eq!(config.alpha_mode, defaults.alpha_mode);
+}
+
+#[test]
+fn build_surface_config_rejects_defaults_unsupported_by_new_surface() {
+    let size = winit::dpi::PhysicalSize::new(800, 600);
+    let defaults = GpuSurfaceDefaults {
+        format: wgpu::TextureFormat::Rgba16Float,
+        present_mode: wgpu::PresentMode::Mailbox,
+        alpha_mode: wgpu::CompositeAlphaMode::PreMultiplied,
+    };
+    let capabilities = wgpu::SurfaceCapabilities {
+        formats: vec![wgpu::TextureFormat::Bgra8Unorm],
+        present_modes: vec![wgpu::PresentMode::Fifo],
+        alpha_modes: vec![wgpu::CompositeAlphaMode::Opaque],
+        usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
+    };
+
+    let (config, reused) = build_surface_config(size, false, Some(defaults), Some(&capabilities))
+        .expect("unsupported defaults should fall back to capabilities");
+
+    assert!(!reused);
+    assert_eq!(config.format, wgpu::TextureFormat::Bgra8Unorm);
+    assert_eq!(config.present_mode, wgpu::PresentMode::Fifo);
+    assert_eq!(config.alpha_mode, wgpu::CompositeAlphaMode::Opaque);
 }
 
 #[test]

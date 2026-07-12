@@ -11,7 +11,7 @@ use crate::gpu_runtime::{
     GpuSurfaceState, SharedGpuContext, SharedGpuInitProfile, create_shared_gpu_context_profiled,
     create_surface_state_for_window_with_shared_profiled_with_defaults,
     create_window_attributes_for_metrics, render_surface_state_profiled_with_scroll,
-    render_surface_state_with_scroll, resize_surface_state,
+    render_surface_state_with_scroll, resize_surface_state, resume_surface_state,
 };
 use crate::host_commands::{
     HostControlRequest, host_list_windows_response, parse_host_control_request,
@@ -115,6 +115,7 @@ struct GpuApp {
     ipc_watcher_started: bool,
     ipc_watcher_stop: Option<Arc<AtomicBool>>,
     atlas_cache: HashMap<u32, GlyphAtlas>,
+    suspended: bool,
 }
 
 struct GpuWindowState {
@@ -245,6 +246,7 @@ impl GpuApp {
             ipc_watcher_started: false,
             ipc_watcher_stop: None,
             atlas_cache: HashMap::new(),
+            suspended: false,
         }
     }
 
@@ -947,7 +949,23 @@ impl GpuApp {
 
 impl ApplicationHandler<GpuAppEvent> for GpuApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.suspended = false;
+        for state in self.windows.values_mut() {
+            if let Err(error) = resume_surface_state(
+                &mut state.renderer,
+                self.config.style.background_opacity < 1.0,
+            ) {
+                eprintln!("handterm gpu host: failed to resume surface: {error:#}");
+            } else {
+                state.renderer.window.request_redraw();
+            }
+        }
         self.ensure_initial_window(event_loop);
+    }
+
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        self.suspended = true;
+        event_loop.set_control_flow(ControlFlow::Wait);
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: GpuAppEvent) {
@@ -1360,6 +1378,9 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                         }
                     }
                     WindowEvent::RedrawRequested => {
+                        if self.suspended {
+                            return;
+                        }
                         if self.config.scrollback.smooth {
                             let _ = state.smooth_scroll.advance(
                                 Instant::now(),
@@ -1491,6 +1512,10 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.suspended {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
         let mut earliest_deadline: Option<Instant> = None;
         let mut redraw_ids = Vec::new();
         let now = Instant::now();

@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::pty::{ForkptyResult, Winsize, forkpty};
+use nix::sys::wait::waitpid;
 use nix::unistd::Pid;
 use std::ffi::{CString, OsString, c_char};
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -61,16 +62,19 @@ impl PreparedExec {
         let candidates = program_candidates(shell_path, &env_pairs)?;
         let env: Vec<CString> = env_pairs
             .into_iter()
-            .filter_map(|(key, value)| {
+            .map(|(key, value)| {
+                anyhow::ensure!(
+                    !key.as_encoded_bytes().contains(&b'='),
+                    "environment variable name contains '=': {:?}",
+                    key
+                );
                 let mut entry = Vec::with_capacity(key.len() + value.len() + 1);
                 entry.extend_from_slice(key.as_encoded_bytes());
                 entry.push(b'=');
                 entry.extend_from_slice(value.as_encoded_bytes());
-                // Environment entries cannot contain NUL bytes on Unix; skip
-                // any pathological entry rather than failing the spawn.
-                CString::new(entry).ok()
+                CString::new(entry).context("environment variable contains a NUL byte")
             })
-            .collect();
+            .collect::<Result<_>>()?;
 
         let argv = nul_terminated_ptrs(&args);
         let envp = nul_terminated_ptrs(&env);
@@ -157,7 +161,7 @@ fn nul_terminated_ptrs(strings: &[CString]) -> Vec<*const c_char> {
 
 pub struct PtyChild {
     master_fd: OwnedFd,
-    _child_pid: Pid,
+    child_pid: Pid,
 }
 
 impl PtyChild {
@@ -236,6 +240,11 @@ impl PtyChild {
         // `PreparedExec`).
         let exec = PreparedExec::new(shell_path, command, envs, cwd)?;
 
+        // Successful exec closes the writer automatically. Setup/exec failure
+        // writes a compact diagnostic first, allowing the parent to distinguish
+        // a launched program from a child that immediately failed to launch.
+        let (error_read, error_write) = cloexec_pipe().context("exec status pipe failed")?;
+
         let ws = Winsize {
             ws_row: rows,
             ws_col: columns,
@@ -243,22 +252,43 @@ impl PtyChild {
             ws_ypixel: 0,
         };
 
-        let result = unsafe { forkpty(Some(&ws), None) }.context("forkpty failed")?;
+        let result = match unsafe { forkpty(Some(&ws), None) } {
+            Ok(result) => result,
+            Err(error) => {
+                unsafe {
+                    nix::libc::close(error_read);
+                    nix::libc::close(error_write);
+                }
+                return Err(error).context("forkpty failed");
+            }
+        };
 
         match result {
             ForkptyResult::Parent { child, master } => {
+                unsafe { nix::libc::close(error_write) };
+                let launch_error = read_launch_error(error_read);
+                unsafe { nix::libc::close(error_read) };
+                if let Some((stage, errno)) = launch_error? {
+                    let _ = waitpid(child, None);
+                    anyhow::bail!(
+                        "child {stage} failed: {}",
+                        std::io::Error::from_raw_os_error(errno)
+                    );
+                }
                 let pty = Self {
                     master_fd: master,
-                    _child_pid: child,
+                    child_pid: child,
                 };
                 pty.set_nonblocking()?;
                 Ok(pty)
             }
             ForkptyResult::Child => {
+                unsafe { nix::libc::close(error_read) };
                 if let Some(cwd) = &exec.cwd {
                     // SAFETY: `cwd` is a preallocated, NUL-terminated path and
                     // `chdir(2)` is async-signal-safe after fork.
                     if unsafe { nix::libc::chdir(cwd.as_ptr()) } != 0 {
+                        report_launch_error(error_write, b'c');
                         unsafe { nix::libc::_exit(126) }
                     }
                 }
@@ -274,6 +304,7 @@ impl PtyChild {
                         nix::libc::execve(program.as_ptr(), exec.argv.as_ptr(), exec.envp.as_ptr());
                     }
                 }
+                report_launch_error(error_write, b'e');
                 unsafe { nix::libc::_exit(127) }
             }
         }
@@ -288,6 +319,11 @@ impl PtyChild {
 
     pub fn raw_fd(&self) -> i32 {
         self.master_fd.as_raw_fd()
+    }
+
+    #[cfg(test)]
+    fn child_pid(&self) -> Pid {
+        self.child_pid
     }
 
     pub fn write_all(&self, data: &[u8]) -> Result<()> {
@@ -322,6 +358,71 @@ impl PtyChild {
             anyhow::bail!("TIOCSWINSZ failed: {}", std::io::Error::last_os_error());
         }
         Ok(())
+    }
+}
+
+fn report_launch_error(fd: i32, stage: u8) {
+    let errno = nix::errno::Errno::last_raw();
+    let mut message = [0_u8; 5];
+    message[0] = stage;
+    message[1..].copy_from_slice(&errno.to_ne_bytes());
+    unsafe {
+        nix::libc::write(fd, message.as_ptr().cast(), message.len());
+    }
+}
+
+fn cloexec_pipe() -> std::io::Result<(i32, i32)> {
+    let mut fds = [-1; 2];
+    if unsafe { nix::libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    for fd in fds {
+        if unsafe { nix::libc::fcntl(fd, nix::libc::F_SETFD, nix::libc::FD_CLOEXEC) } == -1 {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                nix::libc::close(fds[0]);
+                nix::libc::close(fds[1]);
+            }
+            return Err(error);
+        }
+    }
+    Ok((fds[0], fds[1]))
+}
+
+fn read_launch_error(fd: i32) -> Result<Option<(&'static str, i32)>> {
+    let mut message = [0_u8; 5];
+    let mut offset = 0;
+    loop {
+        let n = unsafe {
+            nix::libc::read(
+                fd,
+                message[offset..].as_mut_ptr().cast(),
+                message.len() - offset,
+            )
+        };
+        if n == 0 {
+            return if offset == 0 {
+                Ok(None)
+            } else {
+                anyhow::bail!("child launch status pipe closed with a partial message")
+            };
+        }
+        if n < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error).context("reading child launch status");
+        }
+        offset += n as usize;
+        if offset == message.len() {
+            let stage = match message[0] {
+                b'c' => "chdir",
+                b'e' => "exec",
+                _ => "setup",
+            };
+            return Ok(Some((stage, i32::from_ne_bytes(message[1..].try_into().unwrap()))));
+        }
     }
 }
 
@@ -398,5 +499,44 @@ mod tests {
         )
         .expect("pty should spawn shell resolved via PATH");
         read_until_contains(&child, "env:xterm-256color|truecolor|fork-safe");
+    }
+
+    #[test]
+    fn pty_spawn_reports_exec_failure() {
+        let error = PtyChild::spawn_shell("/definitely/not/a/handterm-shell", 80, 24)
+            .err()
+            .expect("missing executable must fail spawn");
+        assert!(error.to_string().contains("child exec failed"), "{error:#}");
+    }
+
+    #[test]
+    fn pty_spawn_reports_working_directory_failure() {
+        let missing = std::path::Path::new("/definitely/not/a/handterm-directory");
+        let error = PtyChild::spawn_default_shell_with_command_env_and_cwd(
+            80,
+            24,
+            Some("true"),
+            &[],
+            Some(missing),
+        )
+        .err()
+        .expect("missing cwd must fail spawn");
+        assert!(error.to_string().contains("child chdir failed"), "{error:#}");
+    }
+
+    #[test]
+    fn pty_rejects_malformed_environment_names() {
+        let error = PtyChild::spawn_shell_with_env("/bin/sh", 80, 24, &[("BAD=NAME", "value")])
+            .err()
+            .expect("malformed environment name must be rejected");
+        assert!(error.to_string().contains("contains '='"), "{error:#}");
+    }
+
+    #[test]
+    fn forkpty_child_is_its_own_session_and_process_group_leader() {
+        let child = PtyChild::spawn_shell("/bin/sh", 80, 24).expect("pty should launch shell");
+        let pid = child.child_pid().as_raw();
+        assert_eq!(unsafe { nix::libc::getsid(pid) }, pid);
+        assert_eq!(unsafe { nix::libc::getpgid(pid) }, pid);
     }
 }

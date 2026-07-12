@@ -1,6 +1,7 @@
 use std::io::Write;
 
 use crate::config::{WindowPosition, WindowPositionPreset};
+use anyhow::{Context, Result};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::window::WindowAttributes;
 
@@ -9,6 +10,10 @@ use winit::window::WindowAttributes;
 const CASCADE_STEP_PX: i32 = 32;
 /// After this many cascaded windows, wrap back to the centered origin.
 const CASCADE_WRAP: usize = 8;
+
+fn clamp_i64_to_i32(value: i64) -> i32 {
+    value.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
 
 /// Compute the initial top-left position for a new window, in physical
 /// pixels, or `None` to let the OS place it.
@@ -32,20 +37,26 @@ pub fn initial_window_position(
             let origin = monitor
                 .map(|(pos, _)| pos)
                 .unwrap_or_else(|| PhysicalPosition::new(0, 0));
-            Some(PhysicalPosition::new(origin.x + x, origin.y + y))
+            Some(PhysicalPosition::new(
+                origin.x.saturating_add(x),
+                origin.y.saturating_add(y),
+            ))
         }
         WindowPosition::Preset(WindowPositionPreset::Center) => {
             let (mon_pos, mon_size) = monitor?;
             let step = ((cascade_index % CASCADE_WRAP) as i32) * CASCADE_STEP_PX;
-            let x = mon_pos.x + (mon_size.width as i32 - window.width as i32) / 2 + step;
-            let y = mon_pos.y + (mon_size.height as i32 - window.height as i32) / 2 + step;
+            let x =
+                mon_pos.x as i64 + (mon_size.width as i64 - window.width as i64) / 2 + step as i64;
+            let y = mon_pos.y as i64
+                + (mon_size.height as i64 - window.height as i64) / 2
+                + step as i64;
             // Keep the window fully on the monitor even when cascaded or
             // larger than the display.
-            let max_x = mon_pos.x + (mon_size.width as i32 - window.width as i32).max(0);
-            let max_y = mon_pos.y + (mon_size.height as i32 - window.height as i32).max(0);
+            let max_x = mon_pos.x as i64 + (mon_size.width as i64 - window.width as i64).max(0);
+            let max_y = mon_pos.y as i64 + (mon_size.height as i64 - window.height as i64).max(0);
             Some(PhysicalPosition::new(
-                x.clamp(mon_pos.x, max_x.max(mon_pos.x)),
-                y.clamp(mon_pos.y, max_y.max(mon_pos.y)),
+                clamp_i64_to_i32(x.clamp(mon_pos.x as i64, max_x.max(mon_pos.x as i64))),
+                clamp_i64_to_i32(y.clamp(mon_pos.y as i64, max_y.max(mon_pos.y as i64))),
             ))
         }
     }
@@ -77,7 +88,7 @@ pub fn with_initial_position(
 /// Read the system clipboard as raw bytes.
 ///
 /// Uses the Wayland `wl-paste` tool on Linux and `pbpaste` on macOS.
-pub fn paste_from_clipboard() -> Option<Vec<u8>> {
+pub fn paste_from_clipboard() -> Result<Vec<u8>> {
     #[cfg(target_os = "macos")]
     let mut command = std::process::Command::new("pbpaste");
 
@@ -88,17 +99,22 @@ pub fn paste_from_clipboard() -> Option<Vec<u8>> {
         c
     };
 
-    command
+    let output = command
         .output()
-        .ok()
-        .map(|output| output.stdout)
-        .filter(|stdout| !stdout.is_empty())
+        .context("failed to launch clipboard reader")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "clipboard reader exited with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(output.stdout)
 }
 
 /// Write raw bytes to the system clipboard.
 ///
 /// Uses the Wayland `wl-copy` tool on Linux and `pbcopy` on macOS.
-pub fn copy_to_clipboard(text: &[u8]) {
+pub fn copy_to_clipboard(text: &[u8]) -> Result<()> {
     #[cfg(target_os = "macos")]
     let program = "pbcopy";
     #[cfg(not(target_os = "macos"))]
@@ -107,26 +123,40 @@ pub fn copy_to_clipboard(text: &[u8]) {
     let mut child = std::process::Command::new(program)
         .stdin(std::process::Stdio::piped())
         .spawn()
-        .ok();
-    if let Some(ref mut child) = child
-        && let Some(ref mut stdin) = child.stdin
-    {
-        let _ = stdin.write_all(text);
-    }
-    // Reap the child so it does not linger as a zombie.
-    if let Some(mut child) = child {
-        let _ = child.wait();
-    }
+        .context("failed to launch clipboard writer")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("clipboard writer has no stdin")?;
+    stdin
+        .write_all(text)
+        .context("failed writing clipboard data")?;
+    drop(stdin);
+    let status = child
+        .wait()
+        .context("failed waiting for clipboard writer")?;
+    anyhow::ensure!(status.success(), "clipboard writer exited with {status}");
+    Ok(())
 }
 
 /// Open a URL in the user's default browser/handler.
-pub fn open_url(url: &str) {
+pub fn open_url(url: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     let program = "open";
     #[cfg(not(target_os = "macos"))]
     let program = "xdg-open";
 
-    let _ = std::process::Command::new(program).arg(url).spawn();
+    let mut child = std::process::Command::new(program)
+        .arg(url)
+        .spawn()
+        .context("failed to launch URL opener")?;
+    std::thread::Builder::new()
+        .name("handterm-url-opener-reaper".into())
+        .spawn(move || {
+            let _ = child.wait();
+        })
+        .context("failed to spawn URL opener reaper")?;
+    Ok(())
 }
 
 /// Apply the Wayland app-id to window attributes.
@@ -202,12 +232,18 @@ mod tests {
             0,
         )
         .expect("centered position should resolve");
-        assert_eq!(pos, PhysicalPosition::new((1920 - 800) / 2, (1080 - 600) / 2));
+        assert_eq!(
+            pos,
+            PhysicalPosition::new((1920 - 800) / 2, (1080 - 600) / 2)
+        );
     }
 
     #[test]
     fn center_respects_monitor_origin_on_secondary_display() {
-        let monitor = Some((PhysicalPosition::new(1920, 200), PhysicalSize::new(1920, 1080)));
+        let monitor = Some((
+            PhysicalPosition::new(1920, 200),
+            PhysicalSize::new(1920, 1080),
+        ));
         let pos = initial_window_position(
             WindowPosition::default(),
             PhysicalSize::new(800, 600),
@@ -297,7 +333,10 @@ mod tests {
 
     #[test]
     fn fixed_position_is_relative_to_monitor_origin() {
-        let monitor = Some((PhysicalPosition::new(1920, 0), PhysicalSize::new(1920, 1080)));
+        let monitor = Some((
+            PhysicalPosition::new(1920, 0),
+            PhysicalSize::new(1920, 1080),
+        ));
         let pos = initial_window_position(
             WindowPosition::Fixed(100, 50),
             PhysicalSize::new(800, 600),
@@ -316,5 +355,35 @@ mod tests {
             0,
         );
         assert_eq!(pos, Some(PhysicalPosition::new(100, 50)));
+    }
+
+    #[test]
+    fn fixed_position_saturates_instead_of_overflowing() {
+        let pos = initial_window_position(
+            WindowPosition::Fixed(i32::MAX, i32::MIN),
+            PhysicalSize::new(800, 600),
+            Some((
+                PhysicalPosition::new(i32::MAX, i32::MIN),
+                PhysicalSize::new(1920, 1080),
+            )),
+            0,
+        )
+        .unwrap();
+        assert_eq!(pos, PhysicalPosition::new(i32::MAX, i32::MIN));
+    }
+
+    #[test]
+    fn center_handles_u32_sized_geometry_without_wrapping() {
+        let pos = initial_window_position(
+            WindowPosition::Preset(WindowPositionPreset::Center),
+            PhysicalSize::new(u32::MAX, u32::MAX),
+            Some((
+                PhysicalPosition::new(i32::MAX - 10, i32::MAX - 10),
+                PhysicalSize::new(u32::MAX, u32::MAX),
+            )),
+            7,
+        )
+        .unwrap();
+        assert_eq!(pos, PhysicalPosition::new(i32::MAX - 10, i32::MAX - 10));
     }
 }

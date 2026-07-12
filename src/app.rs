@@ -852,7 +852,7 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                             {
                                 let ch = s.chars().next().unwrap_or('\0').to_ascii_lowercase();
                                 if ch == 'v' {
-                                    if let Some(text) = paste_from_clipboard() {
+                                    if let Ok(text) = paste_from_clipboard() {
                                         if state.terminal.bracketed_paste_mode() {
                                             let _ = state.pty.write_all(b"\x1b[200~");
                                             let _ = state.pty.write_all(&text);
@@ -865,7 +865,7 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                                 } else if ch == 'c' {
                                     let text = state.terminal.grid.get_selection_text();
                                     if !text.is_empty() {
-                                        copy_to_clipboard(text.as_bytes());
+                                        let _ = copy_to_clipboard(text.as_bytes());
                                     }
                                     return;
                                 }
@@ -1023,7 +1023,7 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                                         && let Some(url) =
                                             state.terminal.grid.hyperlink_url(cell.hyperlink_id)
                                     {
-                                        open_url(url);
+                                        let _ = open_url(url);
                                         return;
                                     }
                                 }
@@ -1039,7 +1039,7 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                                 state.selecting = false;
                                 let text = state.terminal.grid.get_selection_text();
                                 if !text.is_empty() {
-                                    copy_to_clipboard(text.as_bytes());
+                                    let _ = copy_to_clipboard(text.as_bytes());
                                 }
                             }
                         }
@@ -1262,7 +1262,7 @@ fn drain_pty(state: &mut HostWindowState) -> usize {
         if let Some(b64_data) = state.terminal.take_osc52_clipboard()
             && let Ok(decoded) = base64_decode(&b64_data)
         {
-            copy_to_clipboard(&decoded);
+            let _ = copy_to_clipboard(&decoded);
         }
     }
     total

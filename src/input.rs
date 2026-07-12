@@ -315,6 +315,18 @@ pub fn key_to_bytes_into(
 ) -> bool {
     out.clear();
 
+    // Match the familiar macOS text-editing shortcut while preserving the
+    // terminal convention used by shells and line editors: Ctrl-W deletes the
+    // previous word. Treat this as a local shortcut even when the application
+    // has enabled the kitty keyboard protocol.
+    if modifiers.super_key() && matches!(key, Key::Named(NamedKey::Backspace)) {
+        if matches!(event_kind, KeyEventKind::Release) {
+            return false;
+        }
+        out.push(0x17);
+        return true;
+    }
+
     if kitty_flags != 0
         && encode_kitty_key_into(
             out,
@@ -1268,6 +1280,47 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bytes, b"\x1bx");
+    }
+
+    #[test]
+    fn cmd_backspace_sends_delete_previous_word() {
+        let bytes = key_to_bytes(
+            &Key::Named(NamedKey::Backspace),
+            None,
+            None,
+            false,
+            ModifiersState::SUPER,
+            0,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"\x17");
+    }
+
+    #[test]
+    fn cmd_backspace_overrides_kitty_keyboard_reporting() {
+        let bytes = key_to_bytes(
+            &Key::Named(NamedKey::Backspace),
+            None,
+            None,
+            false,
+            ModifiersState::SUPER,
+            KITTY_KBD_REPORT_ALL | KITTY_KBD_REPORT_EVENTS,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"\x17");
+
+        let release = key_to_bytes(
+            &Key::Named(NamedKey::Backspace),
+            None,
+            None,
+            false,
+            ModifiersState::SUPER,
+            KITTY_KBD_REPORT_ALL | KITTY_KBD_REPORT_EVENTS,
+            KeyEventKind::Release,
+        );
+        assert_eq!(release, None);
     }
 
     #[test]

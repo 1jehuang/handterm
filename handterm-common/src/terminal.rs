@@ -39,6 +39,7 @@ pub struct Terminal {
     pub cols: u16,
     pub rows: u16,
     pub cursor_visible: bool,
+    cursor_blink_visible: bool,
     pub title: Option<String>,
     control_strings: ControlStringState,
     response_buf: Vec<u8>,
@@ -134,7 +135,7 @@ impl TerminalView for Terminal {
     }
 
     fn cursor_visible(&self) -> bool {
-        self.cursor_visible
+        self.cursor_visible && self.cursor_blink_visible
     }
 
     fn cursor_style(&self) -> CursorStyle {
@@ -174,6 +175,7 @@ impl Terminal {
             cols,
             rows,
             cursor_visible: true,
+            cursor_blink_visible: true,
             title: None,
             control_strings: ControlStringState::default(),
             response_buf: Vec::new(),
@@ -204,6 +206,15 @@ impl Terminal {
 
     pub fn scrollback_limit(&self) -> usize {
         self.scrollback_limit
+    }
+
+    /// Set the frontend-controlled blink phase without changing the terminal's
+    /// DECTCEM cursor visibility mode. Returns whether the rendered cursor
+    /// visibility changed.
+    pub fn set_cursor_blink_visible(&mut self, visible: bool) -> bool {
+        let was_visible = self.cursor_visible && self.cursor_blink_visible;
+        self.cursor_blink_visible = visible;
+        was_visible != (self.cursor_visible && self.cursor_blink_visible)
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {

@@ -2,10 +2,10 @@ use crate::config::AppConfig;
 use crate::fd_watcher::spawn_fd_watcher;
 use crate::font::{GlyphAtlas, bootstrap_font_metrics_with_family_dpi};
 use crate::frontend::{
-    FrameDecision, FrameScheduler, KeyEventKind, RecentTextKeyEvent, RedrawWork, SmoothScrollState,
-    StartupTiming, ViewportScroll, base64_decode, key_to_bytes, remember_text_key_event,
-    scroll_to_bytes, scrollback_wheel_delta, should_skip_duplicate_ime_input,
-    should_skip_ime_commit_after_key_event,
+    CursorBlinkState, FrameDecision, FrameScheduler, KeyEventKind, RecentTextKeyEvent, RedrawWork,
+    SmoothScrollState, StartupTiming, ViewportScroll, base64_decode, clear_collapsed_selection,
+    key_to_bytes, remember_text_key_event, scroll_to_bytes, scrollback_wheel_delta,
+    should_skip_duplicate_ime_input, should_skip_ime_commit_after_key_event,
 };
 use crate::gpu_runtime::{
     GpuSurfaceState, SharedGpuContext, SharedGpuInitProfile, create_shared_gpu_context_profiled,
@@ -142,6 +142,7 @@ struct GpuWindowState {
     mouse_col: usize,
     mouse_row: usize,
     selecting: bool,
+    cursor_blink: CursorBlinkState,
     scheduler: FrameScheduler,
     watcher_stop: Arc<AtomicBool>,
     open_window_start: Option<Instant>,
@@ -608,6 +609,7 @@ impl GpuApp {
                 mouse_col: 0,
                 mouse_row: 0,
                 selecting: false,
+                cursor_blink: CursorBlinkState::new(Instant::now(), true),
                 scheduler: FrameScheduler::default(),
                 watcher_stop: stop,
                 open_window_start: Some(start),
@@ -1079,6 +1081,15 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                         }
                         Self::enter_hot_mode(state, Instant::now());
                         state.pending_ime_commit = Some(ime_commit_text);
+                        state
+                            .cursor_blink
+                            .reset(Instant::now(), state.terminal.cursor_visible);
+                        if state
+                            .terminal
+                            .set_cursor_blink_visible(state.cursor_blink.visible())
+                        {
+                            state.scheduler.mark_redraw_needed();
+                        }
                         let _ = state.pty.write_all(text.as_bytes());
                         if state.terminal.grid.scroll_offset > 0 {
                             Self::reset_scrollback_view(state);
@@ -1100,6 +1111,16 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                     }
                     WindowEvent::KeyboardInput { event, .. } => {
                         if event.state == ElementState::Pressed {
+                            state
+                                .cursor_blink
+                                .reset(Instant::now(), state.terminal.cursor_visible);
+                            if state
+                                .terminal
+                                .set_cursor_blink_visible(state.cursor_blink.visible())
+                            {
+                                state.scheduler.mark_redraw_needed();
+                                state.renderer.window.request_redraw();
+                            }
                             let ctrl = state.modifiers.state().control_key();
                             let shift = state.modifiers.state().shift_key();
 
@@ -1309,6 +1330,9 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                                 state.scheduler.mark_redraw_needed();
                             } else {
                                 state.selecting = false;
+                                if clear_collapsed_selection(&mut state.terminal.grid.selection) {
+                                    state.scheduler.mark_redraw_needed();
+                                }
                                 let text = state.terminal.grid.get_selection_text();
                                 if !text.is_empty() {
                                     let _ = copy_to_clipboard(text.as_bytes());
@@ -1377,6 +1401,19 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                         if focused {
                             *focused_window = Some(state.id);
                             Self::enter_hot_mode(state, Instant::now());
+                        } else if *focused_window == Some(state.id) {
+                            *focused_window = None;
+                        }
+                        state.cursor_blink.set_focused(
+                            focused,
+                            Instant::now(),
+                            state.terminal.cursor_visible,
+                        );
+                        if state
+                            .terminal
+                            .set_cursor_blink_visible(state.cursor_blink.visible())
+                        {
+                            state.scheduler.mark_redraw_needed();
                         }
                         if state.terminal.focus_events_mode() {
                             let _ = if focused {
@@ -1530,6 +1567,21 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
         let now = Instant::now();
 
         for (winit_id, state) in &mut self.windows {
+            if state
+                .cursor_blink
+                .update(now, state.terminal.cursor_visible)
+                && state
+                    .terminal
+                    .set_cursor_blink_visible(state.cursor_blink.visible())
+            {
+                state.scheduler.mark_redraw_needed();
+            }
+            if let Some(deadline) = state
+                .cursor_blink
+                .next_deadline(state.terminal.cursor_visible)
+            {
+                earliest_deadline = earlier_deadline(earliest_deadline, deadline);
+            }
             let scheduler = &mut state.scheduler;
             let decision: FrameDecision = scheduler.prepare_redraw(now, RedrawWork::default);
             if let Some(deadline) = decision.wait_until {

@@ -10,6 +10,7 @@ use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
 const IME_KEY_DEDUPE_WINDOW: Duration = Duration::from_millis(50);
 const SCROLLBACK_WHEEL_STEP_MULTIPLIER: usize = 2;
+const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 
 fn input_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -274,6 +275,13 @@ pub struct FrameScheduler {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorBlinkState {
+    focused: bool,
+    visible: bool,
+    next_toggle_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameDecision {
     pub request_redraw: bool,
     pub wait_until: Option<Instant>,
@@ -283,6 +291,74 @@ impl FrameDecision {
     pub fn blocks_periodic_redraw(self) -> bool {
         self.wait_until.is_some()
     }
+}
+
+impl CursorBlinkState {
+    pub fn new(now: Instant, focused: bool) -> Self {
+        Self {
+            focused,
+            visible: true,
+            next_toggle_at: focused.then_some(now + CURSOR_BLINK_INTERVAL),
+        }
+    }
+
+    pub fn visible(self) -> bool {
+        self.visible
+    }
+
+    pub fn reset(&mut self, now: Instant, protocol_visible: bool) -> bool {
+        let changed = !self.visible;
+        self.visible = true;
+        self.next_toggle_at =
+            (self.focused && protocol_visible).then_some(now + CURSOR_BLINK_INTERVAL);
+        changed
+    }
+
+    pub fn set_focused(&mut self, focused: bool, now: Instant, protocol_visible: bool) -> bool {
+        self.focused = focused;
+        self.reset(now, protocol_visible)
+    }
+
+    pub fn update(&mut self, now: Instant, protocol_visible: bool) -> bool {
+        if !self.focused || !protocol_visible {
+            return self.reset(now, protocol_visible);
+        }
+
+        let Some(next_toggle_at) = self.next_toggle_at else {
+            return self.reset(now, protocol_visible);
+        };
+        if now < next_toggle_at {
+            return false;
+        }
+
+        let elapsed_intervals =
+            now.duration_since(next_toggle_at).as_millis() / CURSOR_BLINK_INTERVAL.as_millis();
+        let toggles = elapsed_intervals.saturating_add(1).min(u32::MAX as u128) as u32;
+        let previous = self.visible;
+        if toggles % 2 == 1 {
+            self.visible = !self.visible;
+        }
+        self.next_toggle_at = Some(next_toggle_at + CURSOR_BLINK_INTERVAL * toggles);
+        previous != self.visible
+    }
+
+    pub fn next_deadline(self, protocol_visible: bool) -> Option<Instant> {
+        (self.focused && protocol_visible)
+            .then_some(self.next_toggle_at)
+            .flatten()
+    }
+}
+
+/// Clear the one-cell selection created by a simple click while preserving a
+/// real drag selection. Returns `true` when a collapsed selection was removed.
+pub fn clear_collapsed_selection(selection: &mut Option<Selection>) -> bool {
+    let collapsed = selection.is_some_and(|selection| {
+        selection.start_col == selection.end_col && selection.start_row == selection.end_row
+    });
+    if collapsed {
+        *selection = None;
+    }
+    collapsed
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -1151,6 +1227,110 @@ mod tests {
             .set_cell_with_grapheme(0, 0, crate::grid::Cell::BLANK, Some("♠️".into()));
         let with_suit = visual_signature(&terminal);
         assert_ne!(with_heart, with_suit);
+    }
+
+    #[test]
+    fn simple_click_selection_is_cleared() {
+        let mut selection = Some(Selection {
+            start_col: 2,
+            start_row: 1,
+            end_col: 2,
+            end_row: 1,
+        });
+
+        assert!(clear_collapsed_selection(&mut selection));
+        assert!(selection.is_none());
+    }
+
+    #[test]
+    fn forward_and_reverse_drag_selections_are_preserved() {
+        for mut selection in [
+            Some(Selection {
+                start_col: 1,
+                start_row: 0,
+                end_col: 3,
+                end_row: 0,
+            }),
+            Some(Selection {
+                start_col: 3,
+                start_row: 2,
+                end_col: 1,
+                end_row: 0,
+            }),
+        ] {
+            let expected = selection;
+            assert!(!clear_collapsed_selection(&mut selection));
+            assert_eq!(selection, expected);
+        }
+    }
+
+    #[test]
+    fn cursor_blink_toggles_on_fixed_deadlines_and_resets_after_input() {
+        let start = Instant::now();
+        let mut blink = CursorBlinkState::new(start, true);
+
+        assert!(blink.visible());
+        assert_eq!(
+            blink.next_deadline(true),
+            Some(start + CURSOR_BLINK_INTERVAL)
+        );
+        assert!(!blink.update(
+            start + CURSOR_BLINK_INTERVAL - Duration::from_millis(1),
+            true
+        ));
+        assert!(blink.update(start + CURSOR_BLINK_INTERVAL, true));
+        assert!(!blink.visible());
+
+        let input_at = start + CURSOR_BLINK_INTERVAL + Duration::from_millis(20);
+        assert!(blink.reset(input_at, true));
+        assert!(blink.visible());
+        assert_eq!(
+            blink.next_deadline(true),
+            Some(input_at + CURSOR_BLINK_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn cursor_blink_catches_up_without_drifting() {
+        let start = Instant::now();
+        let mut blink = CursorBlinkState::new(start, true);
+        let after_three_toggles = start + CURSOR_BLINK_INTERVAL * 3;
+
+        assert!(blink.update(after_three_toggles, true));
+        assert!(!blink.visible());
+        assert_eq!(
+            blink.next_deadline(true),
+            Some(start + CURSOR_BLINK_INTERVAL * 4)
+        );
+    }
+
+    #[test]
+    fn cursor_blink_stops_when_unfocused_or_protocol_hidden() {
+        let start = Instant::now();
+        let mut blink = CursorBlinkState::new(start, true);
+        assert!(blink.update(start + CURSOR_BLINK_INTERVAL, true));
+        assert!(!blink.visible());
+
+        assert!(blink.set_focused(false, start + Duration::from_secs(1), true));
+        assert!(blink.visible());
+        assert_eq!(blink.next_deadline(true), None);
+
+        assert!(!blink.set_focused(true, start + Duration::from_secs(2), false));
+        assert_eq!(blink.next_deadline(false), None);
+        assert!(!blink.update(start + Duration::from_secs(3), false));
+    }
+
+    #[test]
+    fn terminal_view_combines_protocol_and_blink_visibility() {
+        let mut terminal = Terminal::new(2, 1);
+        assert!(terminal.cursor_visible());
+
+        assert!(terminal.set_cursor_blink_visible(false));
+        assert!(!terminal.cursor_visible());
+        assert!(terminal.set_cursor_blink_visible(true));
+        terminal.cursor_visible = false;
+        assert!(!terminal.cursor_visible());
+        assert!(!terminal.set_cursor_blink_visible(false));
     }
 
     #[test]

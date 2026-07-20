@@ -38,6 +38,11 @@ pub enum Command {
     InitConfig,
     /// Run quick local performance benchmarks
     Bench,
+    /// Render a LaTeX math expression in Handterm
+    Latex {
+        /// LaTeX math body, without `$` delimiters
+        expression: String,
+    },
     /// Ask a running CPU host to open another window
     OpenWindow {
         /// Socket path (auto-detected if omitted)

@@ -10,6 +10,8 @@ use crate::metrics::{format_bench_results, run_quick_bench};
 use anyhow::Result;
 #[cfg(feature = "cli")]
 use clap::Parser;
+#[cfg(feature = "cli")]
+use std::io::Write;
 
 #[cfg(feature = "cli")]
 fn open_window_in_existing_host(
@@ -65,7 +67,28 @@ pub fn should_reuse_existing_host(cli: &Cli) -> bool {
 }
 
 #[cfg(feature = "cli")]
+fn run_latex_command(expression: &str) -> Result<()> {
+    if std::env::var("TERM_PROGRAM").as_deref() == Ok("handterm") {
+        let encoded = handterm_common::latex::encode_latex_apc(expression)?;
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(&encoded)?;
+        stdout.write_all(b"\n")?;
+        stdout.flush()?;
+    } else {
+        match handterm_common::latex::render_latex_str(expression) {
+            Ok(layout) => println!("{}", layout.as_text()),
+            Err(_) => println!("{expression}"),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "cli")]
 pub fn run_with_cli(cli: Cli) -> Result<()> {
+    if let Some(Command::Latex { expression }) = &cli.command {
+        return run_latex_command(expression);
+    }
+
     let backend = resolve_backend(cli.backend)?;
     let config = AppConfig::load(cli.config.as_deref())?;
 
@@ -85,6 +108,7 @@ pub fn run_with_cli(cli: Cli) -> Result<()> {
             println!("{}", format_bench_results(&out));
             Ok(())
         }
+        Some(Command::Latex { .. }) => unreachable!("LaTeX commands return before backend setup"),
         Some(Command::OpenWindow { to, cols, rows }) => {
             open_window_in_existing_host(backend, to, cols, rows)
         }

@@ -13,6 +13,7 @@ pub enum DcsEvent {
 pub enum ApcEvent {
     Generic(Vec<u8>),
     KittyGraphics(Vec<u8>),
+    Latex(Vec<u8>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

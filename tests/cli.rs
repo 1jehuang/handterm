@@ -55,6 +55,28 @@ fn bench_command_prints_metrics() {
 }
 
 #[test]
+fn latex_command_renders_unicode_outside_handterm() {
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("handterm");
+    cmd.env_remove("TERM_PROGRAM")
+        .arg("latex")
+        .arg(r"\frac{a}{b}")
+        .assert()
+        .success()
+        .stdout("a\n─\nb\n");
+}
+
+#[test]
+fn latex_command_emits_native_apc_inside_handterm() {
+    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("handterm");
+    cmd.env("TERM_PROGRAM", "handterm")
+        .arg("latex")
+        .arg(r"\sqrt{x}")
+        .assert()
+        .success()
+        .stdout(b"\x1b_L;\\sqrt{x}\x1b\\\n".as_slice());
+}
+
+#[test]
 fn standalone_flag_bypasses_existing_host_reuse() {
     let cli = Cli {
         config: None,

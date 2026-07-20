@@ -11,6 +11,7 @@ unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }
 flate2 = "1.1"
 png = "0.17"
+mdwright-latex = "0.1.3"
 
 [dev-dependencies]
 bincode = { workspace = true }

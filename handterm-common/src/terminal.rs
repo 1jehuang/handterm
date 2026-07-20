@@ -4,6 +4,7 @@ use crate::control_strings::{
 pub use crate::graphics::{KittyGraphicsCommand, KittyImage, KittyImageFinalize, KittyPlacement};
 use crate::graphics::{KittyUploadState, decode_kitty_image_payload};
 use crate::grid::Grid;
+use crate::latex::{LATEX_APC_PREFIX, LatexLayout, render_latex};
 use crate::parser::{Action, Parser};
 use crate::protocol::{CursorState, DirtyCell, ServerMessage, WindowModes};
 use crate::server_sync::{
@@ -1042,9 +1043,44 @@ impl Terminal {
             let event = ApcEvent::KittyGraphics(data[1..].to_vec());
             self.control_strings.push_apc(event);
             self.handle_kitty_graphics(&data[1..]);
+        } else if let Some(source) = data.strip_prefix(LATEX_APC_PREFIX) {
+            let event = ApcEvent::Latex(source.to_vec());
+            self.control_strings.push_apc(event);
+            self.handle_latex(source);
         } else {
             let event = ApcEvent::Generic(data.to_vec());
             self.control_strings.push_apc(event);
+        }
+    }
+
+    fn handle_latex(&mut self, source: &[u8]) {
+        match render_latex(source) {
+            Ok(layout) if layout.width() <= usize::from(self.cols) => {
+                self.write_latex_layout(&layout);
+            }
+            Ok(_) | Err(_) => self.grid.write_bytes(source),
+        }
+    }
+
+    fn write_latex_layout(&mut self, layout: &LatexLayout) {
+        if layout.lines().is_empty() || layout.width() == 0 {
+            return;
+        }
+
+        let (cursor_col, _) = self.grid.cursor_pos();
+        if cursor_col > 0 && cursor_col.saturating_add(layout.width()) > usize::from(self.cols) {
+            self.grid.carriage_return();
+            self.grid.line_feed();
+        }
+        let (start_col, _) = self.grid.cursor_pos();
+
+        for (index, line) in layout.lines().iter().enumerate() {
+            self.grid.set_cursor_col(start_col);
+            self.grid.write_bytes(line.as_bytes());
+            if index + 1 < layout.lines().len() {
+                self.grid.carriage_return();
+                self.grid.line_feed();
+            }
         }
     }
 
@@ -1857,6 +1893,45 @@ mod tests {
         assert_eq!(
             t.take_apc(),
             Some(ApcEvent::KittyGraphics(b"i=7,a=d".to_vec()))
+        );
+    }
+
+    #[test]
+    fn latex_apc_renders_fraction_into_selectable_grid_cells() {
+        let mut t = Terminal::new(12, 6);
+        t.process(b"> \x1b_L;\\frac{a}{b}\x1b\\");
+
+        assert_eq!(t.grid.cell_char(0, 0), '>');
+        assert_eq!(t.grid.cell_char(0, 2), 'a');
+        assert_eq!(t.grid.cell_char(1, 2), '─');
+        assert_eq!(t.grid.cell_char(2, 2), 'b');
+        assert_eq!(t.grid.cursor_pos(), (3, 2));
+        assert_eq!(
+            t.take_apc(),
+            Some(ApcEvent::Latex(br"\frac{a}{b}".to_vec()))
+        );
+    }
+
+    #[test]
+    fn latex_apc_moves_to_next_line_when_layout_does_not_fit() {
+        let mut t = Terminal::new(10, 4);
+        t.process(b"123456789\x1b_L;\\sqrt{x}\x1b\\");
+
+        assert_eq!(t.grid.cell_char(0, 8), '9');
+        assert_eq!(t.grid.cell_char(1, 0), '√');
+        assert_eq!(t.grid.cell_char(1, 1), 'x');
+        assert_eq!(t.grid.cursor_pos(), (2, 1));
+    }
+
+    #[test]
+    fn latex_apc_uses_visible_source_fallback_for_unsupported_input() {
+        let mut t = Terminal::new(30, 4);
+        t.process(b"\x1b_L;\\color{red}{x}\x1b\\");
+
+        assert!(t.grid.get_text(0, 1).starts_with(r"\color{red}{x}"));
+        assert_eq!(
+            t.take_apc(),
+            Some(ApcEvent::Latex(br"\color{red}{x}".to_vec()))
         );
     }
 

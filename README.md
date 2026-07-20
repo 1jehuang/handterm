@@ -253,10 +253,12 @@ handterm bench
 - Two-pass rendering (backgrounds then glyphs) for correct powerline/nerd font display
 - Damage tracking with bitset dirty map
 - Ligature support via rustybuzz text shaping
+- Native LaTeX math layout into selectable Unicode terminal cells
 - DPI-aware rendering (HiDPI)
 
 **Input and interaction**
 - Full keyboard input with Ctrl, Shift, function keys
+- Alt-Backspace and Ctrl-Backspace delete the previous word in legacy and Kitty keyboard modes
 - Mouse reporting: X10, Normal, Button, Any-event, SGR encoding
 - Bracketed paste mode
 - Focus events
@@ -294,6 +296,32 @@ handterm @ send-key-event '{"key":"clear","physical_key":"numpad5"}'
 # Right shift press
 handterm @ send-key-event '{"key":"shift","physical_key":"shift_right","kind":"press","shift":true}'
 ```
+
+### Native LaTeX math
+
+Handterm can typeset a LaTeX math body directly into normal terminal cells. It
+does not invoke a TeX installation, browser, JavaScript runtime, or image
+renderer. The result remains selectable, searchable, and part of scrollback.
+
+From a shell running inside Handterm:
+
+```bash
+handterm latex '\frac{-b \pm \sqrt{b^2 - 4ac}}{2a}'
+handterm latex '\begin{pmatrix}a & b \\ c & d\end{pmatrix}'
+```
+
+The helper emits Handterm's private APC sequence when `TERM_PROGRAM=handterm`.
+In another terminal it prints the same terminal-friendly Unicode layout as a
+portable fallback. Applications can emit the protocol directly:
+
+```bash
+printf '\033_L;%s\033\\' '\sum_{i=0}^{n} i^2'
+```
+
+The wire form is `ESC _ L ; <UTF-8 LaTeX body> ESC \\`. Supported constructs
+include common symbols and Greek letters, super/subscripts, fractions, roots,
+accents, delimiters, matrices, cases, and aligned rows. Unsupported or malformed
+input is shown as its original source instead of disappearing.
 
 ## Install
 

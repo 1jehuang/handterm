@@ -315,11 +315,14 @@ pub fn key_to_bytes_into(
 ) -> bool {
     out.clear();
 
-    // Match the familiar macOS text-editing shortcut while preserving the
-    // terminal convention used by shells and line editors: Ctrl-W deletes the
-    // previous word. Treat this as a local shortcut even when the application
-    // has enabled the kitty keyboard protocol.
-    if modifiers.super_key() && matches!(key, Key::Named(NamedKey::Backspace)) {
+    // Match familiar text-editing shortcuts while preserving the terminal
+    // convention used by shells and line editors: Ctrl-W deletes the previous
+    // word. Treat Cmd-Backspace and unmodified Ctrl-Backspace as local
+    // shortcuts even when the application has enabled kitty keyboard reporting.
+    // Keep Alt+Ctrl-Backspace on its legacy ESC+Ctrl-H path for compatibility.
+    let delete_previous_word =
+        modifiers.super_key() || (modifiers.control_key() && !modifiers.alt_key());
+    if delete_previous_word && matches!(key, Key::Named(NamedKey::Backspace)) {
         if matches!(event_kind, KeyEventKind::Release) {
             return false;
         }
@@ -851,7 +854,12 @@ fn encode_kitty_named_key_into(
     report_events: bool,
     event_kind: KeyEventKind,
 ) -> bool {
-    if matches!(key, Key::Named(NamedKey::Backspace)) && modifiers.control_key() {
+    // Keep the traditional Alt-Backspace and Alt+Ctrl-Backspace byte sequences
+    // stable even when an application enables kitty keyboard reporting. Plain
+    // Ctrl-Backspace was already handled above as the local Ctrl-W shortcut.
+    if matches!(key, Key::Named(NamedKey::Backspace))
+        && (modifiers.control_key() || modifiers.alt_key())
+    {
         return false;
     }
 
@@ -1286,6 +1294,36 @@ mod tests {
     }
 
     #[test]
+    fn legacy_alt_backspace_sends_meta_delete() {
+        let bytes = key_to_bytes(
+            &Key::Named(NamedKey::Backspace),
+            None,
+            None,
+            false,
+            ModifiersState::ALT,
+            0,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"\x1b\x7f");
+    }
+
+    #[test]
+    fn ctrl_backspace_sends_delete_previous_word() {
+        let bytes = key_to_bytes(
+            &Key::Named(NamedKey::Backspace),
+            None,
+            None,
+            false,
+            ModifiersState::CONTROL,
+            0,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"\x17");
+    }
+
+    #[test]
     fn cmd_backspace_sends_delete_previous_word() {
         let bytes = key_to_bytes(
             &Key::Named(NamedKey::Backspace),
@@ -1400,7 +1438,7 @@ mod tests {
     }
 
     #[test]
-    fn kitty_ctrl_backspace_falls_back_to_legacy_ctrl_h() {
+    fn kitty_ctrl_backspace_overrides_reporting_with_delete_previous_word() {
         let bytes = key_to_bytes(
             &Key::Named(NamedKey::Backspace),
             None,
@@ -1411,7 +1449,33 @@ mod tests {
             KeyEventKind::Press,
         )
         .unwrap();
-        assert_eq!(bytes, b"\x08");
+        assert_eq!(bytes, b"\x17");
+    }
+
+    #[test]
+    fn kitty_alt_backspace_falls_back_to_legacy_meta_delete() {
+        let bytes = key_to_bytes(
+            &Key::Named(NamedKey::Backspace),
+            None,
+            None,
+            false,
+            ModifiersState::ALT,
+            KITTY_KBD_DISAMBIGUATE | KITTY_KBD_REPORT_ALL,
+            KeyEventKind::Press,
+        )
+        .unwrap();
+        assert_eq!(bytes, b"\x1b\x7f");
+
+        let release = key_to_bytes(
+            &Key::Named(NamedKey::Backspace),
+            None,
+            None,
+            false,
+            ModifiersState::ALT,
+            KITTY_KBD_DISAMBIGUATE | KITTY_KBD_REPORT_ALL | KITTY_KBD_REPORT_EVENTS,
+            KeyEventKind::Release,
+        );
+        assert_eq!(release, None);
     }
 
     #[test]

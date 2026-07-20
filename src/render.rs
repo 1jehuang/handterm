@@ -6,7 +6,6 @@ use crate::grid::{COLOR_DEFAULT, Cell};
 use crate::terminal::{CursorStyle, TerminalView};
 use crate::visual::{is_in_selection, resolve_cell_colors, resolve_underline_color};
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub struct OffscreenRenderer {
     pub width: usize,
     pub height: usize,
@@ -14,7 +13,6 @@ pub struct OffscreenRenderer {
     last_visual_state: Option<VisualState>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl OffscreenRenderer {
     pub fn new(cols: u16, rows: u16, atlas: &GlyphAtlas) -> Self {
         let width = cols as usize * atlas.cell_width;
@@ -96,7 +94,8 @@ pub fn render_terminal_to_buffer(
 
     for row in 0..grid.rows {
         let row_dirty = full_redraw || grid.row_has_dirty_cells(row);
-        if !(row_dirty || show_cursor && row == cursor_row) {
+        let row_has_cursor = show_cursor && row == cursor_row;
+        if !row_dirty && !row_has_cursor {
             continue;
         }
         for col in 0..grid.cols {
@@ -107,18 +106,41 @@ pub fn render_terminal_to_buffer(
             }
 
             let cell = grid.cell_at_scroll(row, col);
-            let has_custom_bg = cell.bg != COLOR_DEFAULT;
-            let is_dirty = grid.is_cell_dirty(row, col);
 
-            if !full_redraw && !is_cursor && !has_custom_bg && !is_dirty {
-                continue;
+            if !full_redraw {
+                let has_custom_bg = cell.bg != COLOR_DEFAULT;
+                let is_dirty = grid.is_cell_dirty(row, col);
+                if !is_cursor && !has_custom_bg && !is_dirty {
+                    continue;
+                }
             }
 
             let is_cursor_block = is_cursor && cursor_style == CursorStyle::Block;
+
+            // Fast path: on a full redraw the whole buffer was already cleared to
+            // `base_bg`, and a default-background cell with no inverse attribute,
+            // no selection, and no block cursor resolves to exactly `base_bg`. Such
+            // cells need no work at all, so skip the color resolve, selection test,
+            // and fill. This is the overwhelmingly common case for typical content.
+            if full_redraw
+                && !is_cursor_block
+                && selection.is_none()
+                && cell.bg == COLOR_DEFAULT
+                && cell.attrs & crate::grid::ATTR_INVERSE == 0
+            {
+                continue;
+            }
+
             let selected = is_in_selection(selection, row, col);
             let colors = resolve_cell_colors(cell, base_fg, base_bg, is_cursor_block, selected);
 
-            atlas.draw_bg(buffer, buf_w, buf_h, col, row, colors.bg);
+            // For cells that survive the fast path on a full redraw, only paint a
+            // background that actually differs from the already-cleared `base_bg`.
+            // For incremental redraws the buffer persists between frames, so dirty
+            // cells must always be repainted to clear their previous contents.
+            if !full_redraw || colors.bg != base_bg {
+                atlas.draw_bg(buffer, buf_w, buf_h, col, row, colors.bg);
+            }
         }
     }
 
@@ -284,7 +306,8 @@ pub fn render_terminal_to_buffer(
     {
         for row in 0..grid.rows {
             let row_dirty = full_redraw || grid.row_has_dirty_cells(row);
-            if !(row_dirty || show_cursor && row == cursor_row) {
+            let row_has_cursor = show_cursor && row == cursor_row;
+            if !row_dirty && !row_has_cursor {
                 continue;
             }
             for col in 0..grid.cols {
@@ -844,6 +867,54 @@ mod tests {
 
         let expected = 0x8f1f2f;
         assert_eq!(renderer.pixels[0], expected);
+    }
+
+    #[test]
+    fn full_redraw_fast_path_preserves_custom_and_inverse_backgrounds() {
+        // The full-redraw background pass skips cells that resolve to base_bg
+        // (the buffer is pre-cleared to it). This guards that custom-bg, inverse,
+        // and default cells all still produce the correct background after the
+        // fast-path skip is applied.
+        let config = AppConfig::default();
+        let cols = 3u16;
+        let rows = 1u16;
+        let mut atlas = new_atlas(&config);
+        let mut terminal = Terminal::new(cols, rows);
+        terminal.cursor_visible = false;
+
+        // col 0: default background (should stay base_bg, skipped by fast path).
+        // col 1: explicit RGB background.
+        let mut custom = crate::grid::Cell::BLANK;
+        custom.ch = ' ' as u32;
+        custom.bg = crate::grid::COLOR_FLAG_RGB | 0x11_22_33;
+        terminal.grid.set_cell(0, 1, custom);
+        // col 2: inverse attribute swaps fg/bg, so its background becomes base_fg.
+        let mut inverse = crate::grid::Cell::BLANK;
+        inverse.ch = ' ' as u32;
+        inverse.attrs = crate::grid::ATTR_INVERSE;
+        terminal.grid.set_cell(0, 2, inverse);
+
+        let mut renderer = OffscreenRenderer::new(cols, rows, &atlas);
+        renderer.render(&mut terminal, &mut atlas, &config);
+
+        let base_bg = config.style.background.as_u32_rgb();
+        let base_fg = config.style.foreground.as_u32_rgb();
+        let cw = atlas.cell_width;
+
+        // Sample the top-left pixel of each cell's background.
+        assert_eq!(
+            renderer.pixels[0], base_bg,
+            "default cell should be base_bg"
+        );
+        assert_eq!(
+            renderer.pixels[cw], 0x11_22_33,
+            "custom-bg cell should keep its explicit background"
+        );
+        assert_eq!(
+            renderer.pixels[2 * cw],
+            base_fg,
+            "inverse cell background should become base_fg"
+        );
     }
 
     #[test]

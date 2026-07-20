@@ -35,7 +35,6 @@ use winit::dpi::{LogicalSize, Size};
 use winit::event::{ElementState, Ime, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
-use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{ImePurpose, Window, WindowAttributes, WindowId as WinitWindowId};
 
 #[derive(Debug, Clone)]
@@ -45,6 +44,12 @@ enum AppEvent {
 }
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(8);
+const IPC_CLIENT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const MAX_PTY_BYTES_PER_EVENT: usize = 1024 * 1024;
+
+fn earlier_deadline(current: Option<Instant>, candidate: Instant) -> Option<Instant> {
+    Some(current.map_or(candidate, |existing| existing.min(candidate)))
+}
 
 pub fn run(config: AppConfig, startup_command: Option<String>) -> Result<()> {
     let event_loop = EventLoop::<AppEvent>::with_user_event()
@@ -234,22 +239,22 @@ impl HandtermApp {
         self.start_ipc_watcher();
     }
 
-    fn resolve_dpi(&self, event_loop: &ActiveEventLoop) -> u32 {
+    fn resolve_dpi(&self, event_loop: &ActiveEventLoop) -> Result<u32> {
         if let Some(id) = self.focused_window
             && let Some(winit_id) = self.window_ids.get(&id)
             && let Some(state) = self.windows.get(winit_id)
         {
-            return (96.0 * state.window.scale_factor()) as u32;
+            return Ok((96.0 * state.window.scale_factor()) as u32);
         }
         if let Some(state) = self.windows.values().next() {
-            return (96.0 * state.window.scale_factor()) as u32;
+            return Ok((96.0 * state.window.scale_factor()) as u32);
         }
         let probe_window = event_loop
             .create_window(Window::default_attributes().with_visible(false))
-            .expect("probe window should succeed");
+            .context("failed to create invisible probe window while resolving display dpi")?;
         let dpi = (96.0 * probe_window.scale_factor()) as u32;
         drop(probe_window);
-        dpi
+        Ok(dpi)
     }
 
     fn ensure_atlas(&mut self, dpi: u32) -> Result<()> {
@@ -285,6 +290,7 @@ impl HandtermApp {
 
     fn create_window_attributes(
         &self,
+        event_loop: &ActiveEventLoop,
         cell_width: usize,
         cell_height: usize,
         cols: u16,
@@ -293,11 +299,36 @@ impl HandtermApp {
         let width = cols as f64 * cell_width as f64;
         let height = rows as f64 * cell_height as f64;
 
-        Window::default_attributes()
-            .with_title("handterm [cpu host]")
-            .with_name("handterm", "handterm")
-            .with_transparent(false)
-            .with_inner_size(Size::Logical(LogicalSize::new(width, height)))
+        let attrs = crate::platform::with_terminal_keyboard(crate::platform::with_app_id(
+            Window::default_attributes().with_title("handterm [cpu host]"),
+            "handterm",
+        ))
+        .with_transparent(false)
+        .with_inner_size(Size::Logical(LogicalSize::new(width, height)));
+        let attrs = crate::platform::with_decorations(attrs, self.config.window.decorations);
+        // Spawn position policy (config `window.position`). The CPU backend
+        // requests a logical size, so convert to physical pixels for the
+        // placement math using the spawn monitor's scale factor.
+        let spawn_monitor = crate::platform::spawn_monitor_geometry(event_loop);
+        let scale = event_loop
+            .primary_monitor()
+            .or_else(|| event_loop.available_monitors().next())
+            .map(|monitor| monitor.scale_factor())
+            .filter(|scale| scale.is_finite() && *scale > 0.0)
+            .unwrap_or(1.0);
+        let physical = winit::dpi::PhysicalSize::new(
+            (width * scale).round().max(1.0) as u32,
+            (height * scale).round().max(1.0) as u32,
+        );
+        crate::platform::with_initial_position(
+            attrs,
+            crate::platform::initial_window_position(
+                self.config.window.position,
+                physical,
+                spawn_monitor,
+                self.windows.len(),
+            ),
+        )
     }
 
     fn open_window(
@@ -317,7 +348,7 @@ impl HandtermApp {
         let cols = cols.unwrap_or(self.config.window.columns).max(1);
         let rows = rows.unwrap_or(self.config.window.rows).max(1);
         let before_dpi = Instant::now();
-        let dpi = self.resolve_dpi(event_loop);
+        let dpi = self.resolve_dpi(event_loop)?;
         let dpi_ms = before_dpi.elapsed();
         let before_bootstrap = Instant::now();
         let bootstrap = bootstrap_font_metrics_with_family_dpi(
@@ -341,7 +372,13 @@ impl HandtermApp {
         let before_window = Instant::now();
         let window = Arc::new(
             event_loop
-                .create_window(self.create_window_attributes(cell_width, cell_height, cols, rows))
+                .create_window(self.create_window_attributes(
+                    event_loop,
+                    cell_width,
+                    cell_height,
+                    cols,
+                    rows,
+                ))
                 .context("window creation should succeed")?,
         );
         let window_ms = before_window.elapsed();
@@ -370,11 +407,17 @@ impl HandtermApp {
             })
             .unwrap_or_default();
         let before_pty = Instant::now();
-        let pty = PtyChild::spawn_default_shell_with_command_and_env(
+        let added_window_cwd = (existing_windows > 0).then(dirs::home_dir).flatten();
+        let pty = PtyChild::spawn_default_shell_with_command_env_and_cwd(
             cols,
             rows,
-            self.startup_command.as_deref(),
+            if existing_windows == 0 {
+                self.startup_command.as_deref()
+            } else {
+                None
+            },
             &native_scroll_env_refs,
+            added_window_cwd.as_deref(),
         )
         .context("pty should spawn")?;
         let pty_spawned_at = Instant::now();
@@ -680,14 +723,16 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                     let bytes_read = drain_pty(state);
                     if bytes_read > 0 {
                         let work = classify_redraw_work(&state.terminal, true);
-                        let should_redraw_now = if self.focused_window == Some(state.id) {
-                            state.scheduler.mark_redraw_needed();
-                            true
-                        } else {
+                        // A full-screen TUI update commonly arrives as several PTY
+                        // reads. Presenting every partial read can expose an
+                        // intermediate frame, which looks like flicker while
+                        // scrolling. Keep light output immediate, but coalesce
+                        // heavy updates for one frame interval in focused windows
+                        // as well as background windows.
+                        let should_redraw_now =
                             state
                                 .scheduler
-                                .mark_io_processed(Instant::now(), FRAME_INTERVAL, work)
-                        };
+                                .mark_io_processed(Instant::now(), FRAME_INTERVAL, work);
                         if should_redraw_now {
                             state.window.request_redraw();
                         }
@@ -722,9 +767,13 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                 };
 
                 let (cell_width, cell_height) = {
-                    let atlas = atlas_cache
-                        .get(&state.dpi)
-                        .expect("atlas should exist for window dpi");
+                    let Some(atlas) = atlas_cache.get(&state.dpi) else {
+                        eprintln!(
+                            "handterm cpu host: no glyph atlas cached for dpi {}; dropping window event",
+                            state.dpi
+                        );
+                        return;
+                    };
                     (atlas.cell_width.max(1), atlas.cell_height.max(1))
                 };
 
@@ -733,10 +782,9 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                         if let (Some(width), Some(height)) =
                             (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
                         {
-                            state
-                                .surface
-                                .resize(width, height)
-                                .expect("surface resize should succeed");
+                            state.surface.resize(width, height).expect(
+                                "softbuffer surface resize failed while handling window resize",
+                            );
                             state.surface_size = (width.get(), height.get());
                             state.last_visual_state = None;
                             state.last_presented_signature = None;
@@ -757,46 +805,42 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                     WindowEvent::ModifiersChanged(new_modifiers) => {
                         state.modifiers = new_modifiers;
                     }
-                    WindowEvent::Ime(Ime::Commit(text)) => {
-                        if !text.is_empty() {
-                            let ime_commit_text = crate::frontend::normalize_ime_dedupe_text(&text)
-                                .unwrap_or_else(|| text.clone());
-                            crate::frontend::trace_input(format!(
-                                "cpu ime-commit raw={:?} normalized={:?}",
-                                text, ime_commit_text
-                            ));
-                            if should_skip_ime_commit_after_key_event(
-                                &mut state.recent_text_key_event,
-                                &ime_commit_text,
-                                Instant::now(),
-                            ) {
-                                crate::frontend::trace_input(
-                                    "cpu ime-commit skipped after key-event dedupe",
-                                );
-                                return;
-                            }
-                            state.pending_ime_commit = Some(ime_commit_text);
-                            let _ = state.pty.write_all(text.as_bytes());
-                            if state.terminal.grid.scroll_offset > 0 {
-                                state.terminal.grid.scroll_offset = 0;
-                                state.terminal.grid.all_dirty = true;
-                            }
-                            state.terminal.grid.selection = None;
-                            let changed = drain_pty(state) > 0;
-                            let work = classify_redraw_work(&state.terminal, changed);
-                            let should_redraw_now = if *focused_window == Some(state.id) {
-                                state.scheduler.mark_redraw_needed();
-                                true
-                            } else {
-                                state.scheduler.mark_io_processed(
-                                    Instant::now(),
-                                    FRAME_INTERVAL,
-                                    work,
-                                )
-                            };
-                            if should_redraw_now {
-                                state.window.request_redraw();
-                            }
+                    WindowEvent::Ime(Ime::Commit(text)) if !text.is_empty() => {
+                        let ime_commit_text = crate::frontend::normalize_ime_dedupe_text(&text)
+                            .unwrap_or_else(|| text.clone());
+                        crate::frontend::trace_input(format!(
+                            "cpu ime-commit raw={:?} normalized={:?}",
+                            text, ime_commit_text
+                        ));
+                        if should_skip_ime_commit_after_key_event(
+                            &mut state.recent_text_key_event,
+                            &ime_commit_text,
+                            Instant::now(),
+                        ) {
+                            crate::frontend::trace_input(
+                                "cpu ime-commit skipped after key-event dedupe",
+                            );
+                            return;
+                        }
+                        state.pending_ime_commit = Some(ime_commit_text);
+                        let _ = state.pty.write_all(text.as_bytes());
+                        if state.terminal.grid.scroll_offset > 0 {
+                            state.terminal.grid.scroll_offset = 0;
+                            state.terminal.grid.all_dirty = true;
+                        }
+                        state.terminal.grid.selection = None;
+                        let changed = drain_pty(state) > 0;
+                        let work = classify_redraw_work(&state.terminal, changed);
+                        let should_redraw_now = if *focused_window == Some(state.id) {
+                            state.scheduler.mark_redraw_needed();
+                            true
+                        } else {
+                            state
+                                .scheduler
+                                .mark_io_processed(Instant::now(), FRAME_INTERVAL, work)
+                        };
+                        if should_redraw_now {
+                            state.window.request_redraw();
                         }
                     }
                     WindowEvent::KeyboardInput { event, .. } => {
@@ -806,11 +850,12 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
 
                             if ctrl
                                 && shift
+                                && !event.repeat
                                 && let Key::Character(s) = &event.logical_key
                             {
                                 let ch = s.chars().next().unwrap_or('\0').to_ascii_lowercase();
                                 if ch == 'v' {
-                                    if let Some(text) = paste_from_clipboard() {
+                                    if let Ok(text) = paste_from_clipboard() {
                                         if state.terminal.bracketed_paste_mode() {
                                             let _ = state.pty.write_all(b"\x1b[200~");
                                             let _ = state.pty.write_all(&text);
@@ -823,7 +868,7 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                                 } else if ch == 'c' {
                                     let text = state.terminal.grid.get_selection_text();
                                     if !text.is_empty() {
-                                        copy_to_clipboard(text.as_bytes());
+                                        let _ = copy_to_clipboard(text.as_bytes());
                                     }
                                     return;
                                 }
@@ -981,7 +1026,7 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                                         && let Some(url) =
                                             state.terminal.grid.hyperlink_url(cell.hyperlink_id)
                                     {
-                                        open_url(url);
+                                        let _ = open_url(url);
                                         return;
                                     }
                                 }
@@ -997,7 +1042,7 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                                 state.selecting = false;
                                 let text = state.terminal.grid.get_selection_text();
                                 if !text.is_empty() {
-                                    copy_to_clipboard(text.as_bytes());
+                                    let _ = copy_to_clipboard(text.as_bytes());
                                 }
                             }
                         }
@@ -1076,10 +1121,19 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                         }
                     }
                     WindowEvent::RedrawRequested => {
-                        let atlas = atlas_cache
-                            .get_mut(&state.dpi)
-                            .expect("atlas should exist for redraw");
-                        render_grid(state, atlas, config).expect("frame render should succeed");
+                        let Some(atlas) = atlas_cache.get_mut(&state.dpi) else {
+                            eprintln!(
+                                "handterm cpu host: no glyph atlas cached for dpi {}; skipping redraw",
+                                state.dpi
+                            );
+                            return;
+                        };
+                        if let Err(err) = render_grid(state, atlas, config) {
+                            eprintln!(
+                                "handterm cpu host: frame render failed, skipping frame: {err:#}"
+                            );
+                            return;
+                        }
                         state.startup_timing.mark_present(Instant::now());
                         if state.startup_timing.emit_if_ready("cpu host", state.id)
                             && let Some(started) = state.cpu_time_started
@@ -1125,6 +1179,7 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
         let mut earliest_deadline: Option<Instant> = None;
         let mut redraw_ids = Vec::new();
         let mut closed_windows = Vec::new();
@@ -1134,10 +1189,7 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
             let decision: FrameDecision =
                 scheduler.prepare_redraw(Instant::now(), RedrawWork::default);
             if let Some(deadline) = decision.wait_until {
-                earliest_deadline = Some(match earliest_deadline {
-                    Some(existing) => existing.min(deadline),
-                    None => deadline,
-                });
+                earliest_deadline = earlier_deadline(earliest_deadline, deadline);
             }
             if decision.request_redraw {
                 redraw_ids.push(*winit_id);
@@ -1157,6 +1209,18 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
             self.close_window(winit_id, event_loop);
         }
 
+        // The fd watcher monitors the listening socket. Once a client has
+        // connected, later bytes (notably a request split across writes) do not
+        // make that listener readable again. Poll connected nonblocking clients
+        // at a modest cadence so partial requests cannot remain stuck forever.
+        if self.ipc.as_ref().is_some_and(IpcServer::has_clients) {
+            self.process_ipc_actions(event_loop);
+            if self.ipc.as_ref().is_some_and(IpcServer::has_clients) {
+                earliest_deadline =
+                    earlier_deadline(earliest_deadline, now + IPC_CLIENT_POLL_INTERVAL);
+            }
+        }
+
         if self.windows.is_empty() {
             event_loop.set_control_flow(ControlFlow::Wait);
         } else if let Some(deadline) = earliest_deadline {
@@ -1172,7 +1236,7 @@ fn drain_pty(state: &mut HostWindowState) -> usize {
         return 0;
     }
     let mut total = 0;
-    loop {
+    while total < MAX_PTY_BYTES_PER_EVENT {
         match state.pty.try_read(&mut state.pty_buf) {
             Ok(0) => break,
             Ok(n) => {
@@ -1199,7 +1263,7 @@ fn drain_pty(state: &mut HostWindowState) -> usize {
         if let Some(b64_data) = state.terminal.take_osc52_clipboard()
             && let Ok(decoded) = base64_decode(&b64_data)
         {
-            copy_to_clipboard(&decoded);
+            let _ = copy_to_clipboard(&decoded);
         }
     }
     total
@@ -1251,4 +1315,19 @@ fn render_grid(
         .map_err(|e| anyhow::anyhow!("failed presenting frame: {e}"))?;
     state.last_presented_signature = Some(signature);
     Ok(())
+}
+
+#[cfg(test)]
+mod event_loop_tests {
+    use super::earlier_deadline;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn ipc_poll_deadline_never_delays_an_existing_frame_deadline() {
+        let now = Instant::now();
+        let frame = now + Duration::from_millis(4);
+        let ipc = now + Duration::from_millis(16);
+        assert_eq!(earlier_deadline(Some(frame), ipc), Some(frame));
+        assert_eq!(earlier_deadline(None, ipc), Some(ipc));
+    }
 }

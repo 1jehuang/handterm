@@ -14,9 +14,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
-use winit::dpi::{LogicalSize, Size};
+use winit::dpi::{PhysicalPosition, PhysicalSize, Size};
 use winit::event_loop::ActiveEventLoop;
-use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{ImePurpose, Window, WindowAttributes};
 
 #[repr(C)]
@@ -25,7 +24,7 @@ struct Uniforms {
     screen_size: [f32; 2],
     cell_size: [f32; 2],
     atlas_size: [f32; 2],
-    _pad: [f32; 2],
+    grid_offset: [f32; 2],
 }
 
 const ATLAS_WIDTH: u32 = 2048;
@@ -125,8 +124,9 @@ struct SharedPipelines {
 }
 
 pub struct GpuSurfaceState {
-    pub shared: Arc<SharedGpuContext>,
-    pub window: Arc<Window>,
+    // Field order is deliberate: Rust drops fields top-to-bottom. Release the
+    // surface and device-owned resources before the window and shared context
+    // they were created from.
     pub surface: wgpu::Surface<'static>,
     pub surface_config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
@@ -144,6 +144,8 @@ pub struct GpuSurfaceState {
     pub last_visual_state: Option<VisualState>,
     pub last_presented_signature: Option<u64>,
     pub last_viewport_scroll_quantized: Option<u32>,
+    pub window: Arc<Window>,
+    pub shared: Arc<SharedGpuContext>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -159,7 +161,9 @@ fn build_surface_config(
     preferred_defaults: Option<GpuSurfaceDefaults>,
     surface_caps: Option<&wgpu::SurfaceCapabilities>,
 ) -> Result<(wgpu::SurfaceConfiguration, bool)> {
-    if let Some(defaults) = preferred_defaults {
+    if let Some(defaults) = preferred_defaults
+        && surface_caps.is_some_and(|caps| surface_supports_defaults(caps, defaults))
+    {
         return Ok((
             wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -193,6 +197,15 @@ fn build_surface_config(
         },
         false,
     ))
+}
+
+fn surface_supports_defaults(
+    capabilities: &wgpu::SurfaceCapabilities,
+    defaults: GpuSurfaceDefaults,
+) -> bool {
+    capabilities.formats.contains(&defaults.format)
+        && capabilities.present_modes.contains(&defaults.present_mode)
+        && capabilities.alpha_modes.contains(&defaults.alpha_mode)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -270,189 +283,9 @@ impl GpuSurfaceState {
     }
 }
 
-const SHADER: &str = r#"
-struct Uniforms {
-    screen_size: vec2<f32>,
-    cell_size: vec2<f32>,
-    atlas_size: vec2<f32>,
-    _pad: vec2<f32>,
-};
+const SHADER: &str = include_str!("shaders/terminal.wgsl");
 
-struct CellInstance {
-    @location(0) pos: vec2<f32>,
-    @location(1) size: vec2<f32>,
-    @location(2) uv_offset: vec2<f32>,
-    @location(3) uv_size: vec2<f32>,
-    @location(4) fg: vec4<f32>,
-    @location(5) bg: vec4<f32>,
-    @location(6) deco: vec4<f32>,
-    @location(7) flags: u32,
-};
-
-struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-    @location(1) fg: vec4<f32>,
-    @location(2) bg: vec4<f32>,
-    @location(3) deco: vec4<f32>,
-    @location(4) flags: u32,
-    @location(5) local_pos: vec2<f32>,
-    @location(6) cell_size: vec2<f32>,
-};
-
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
-@group(0) @binding(1) var atlas_tex: texture_2d<f32>;
-@group(0) @binding(2) var atlas_sampler: sampler;
-
-@vertex
-fn vs_main(@builtin(vertex_index) vi: u32, instance: CellInstance) -> VertexOutput {
-    let corners = array<vec2<f32>, 6>(
-        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
-        vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
-    );
-    let corner = corners[vi];
-
-    let pixel_pos = instance.pos + corner * instance.size;
-    let ndc = vec2<f32>(
-        pixel_pos.x / uniforms.screen_size.x * 2.0 - 1.0,
-        1.0 - pixel_pos.y / uniforms.screen_size.y * 2.0,
-    );
-
-    var out: VertexOutput;
-    out.clip_position = vec4<f32>(ndc, 0.0, 1.0);
-    out.uv = (instance.uv_offset + corner * instance.uv_size) / uniforms.atlas_size;
-    out.fg = instance.fg;
-    out.bg = instance.bg;
-    out.deco = instance.deco;
-    out.flags = instance.flags;
-    out.local_pos = corner * instance.size;
-    out.cell_size = instance.size;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    var color = in.bg;
-
-    if (in.flags & 1u) != 0u {
-        let glyph = textureSample(atlas_tex, atlas_sampler, in.uv);
-        if (in.flags & 128u) != 0u {
-            color = glyph;
-        } else {
-            color = vec4<f32>(in.fg.rgb, glyph.a * in.fg.a);
-        }
-    }
-
-    let y = in.local_pos.y;
-    let x = in.local_pos.x;
-    let h = in.cell_size.y;
-    let w = in.cell_size.x;
-
-    if (in.flags & 2u) != 0u {
-        let ul_y = h - 2.0;
-        if y >= ul_y && y < ul_y + 1.0 {
-            color = vec4<f32>(in.deco.rgb, 1.0);
-        }
-    }
-    if (in.flags & 8u) != 0u {
-        let ul_y = h - 2.0;
-        let phase = x / w * 6.28318530718;
-        let wave = sin(phase) * 2.0;
-        if abs(y - (ul_y + wave)) < 1.5 {
-            color = vec4<f32>(in.deco.rgb, 1.0);
-        }
-    }
-    if (in.flags & 16u) != 0u {
-        let ul_y1 = h - 2.0;
-        let ul_y2 = h - 4.0;
-        if (y >= ul_y1 && y < ul_y1 + 1.0) || (y >= ul_y2 && y < ul_y2 + 1.0) {
-            color = vec4<f32>(in.deco.rgb, 1.0);
-        }
-    }
-    if (in.flags & 32u) != 0u {
-        let ul_y = h - 2.0;
-        if y >= ul_y && y < ul_y + 1.0 && u32(x) % 3u == 0u {
-            color = vec4<f32>(in.deco.rgb, 1.0);
-        }
-    }
-    if (in.flags & 64u) != 0u {
-        let ul_y = h - 2.0;
-        let dash = u32(w) / 3u;
-        let offset = u32(x);
-        if y >= ul_y && y < ul_y + 1.0 && (offset < dash || (offset >= dash * 2u && offset < dash * 3u)) {
-            color = vec4<f32>(in.deco.rgb, 1.0);
-        }
-    }
-
-    if (in.flags & 4u) != 0u {
-        let mid_y = h / 2.0;
-        if y >= mid_y && y < mid_y + 1.0 {
-            color = vec4<f32>(in.fg.rgb, 1.0);
-        }
-    }
-
-    if (in.flags & 256u) != 0u && x < min(2.0, w) {
-        color = vec4<f32>(in.fg.rgb, 1.0);
-    }
-    if (in.flags & 512u) != 0u {
-        let cursor_y = h - min(2.0, h);
-        if y >= cursor_y {
-            color = vec4<f32>(in.fg.rgb, 1.0);
-        }
-    }
-
-    return color;
-}
-"#;
-
-const IMAGE_SHADER: &str = r#"
-struct Uniforms {
-    screen_size: vec2<f32>,
-    cell_size: vec2<f32>,
-    atlas_size: vec2<f32>,
-    _pad: vec2<f32>,
-};
-
-struct ImageInstance {
-    @location(0) pos: vec2<f32>,
-    @location(1) size: vec2<f32>,
-    @location(2) uv_offset: vec2<f32>,
-    @location(3) uv_size: vec2<f32>,
-};
-
-struct VertexOutput {
-    @builtin(position) clip_position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-
-@group(0) @binding(0) var<uniform> uniforms: Uniforms;
-@group(0) @binding(1) var atlas_tex: texture_2d<f32>;
-@group(0) @binding(2) var atlas_sampler: sampler;
-
-@vertex
-fn vs_main(@builtin(vertex_index) vi: u32, instance: ImageInstance) -> VertexOutput {
-    let corners = array<vec2<f32>, 6>(
-        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
-        vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
-    );
-    let corner = corners[vi];
-    let pixel_pos = instance.pos + corner * instance.size;
-    let ndc = vec2<f32>(
-        pixel_pos.x / uniforms.screen_size.x * 2.0 - 1.0,
-        1.0 - pixel_pos.y / uniforms.screen_size.y * 2.0,
-    );
-
-    var out: VertexOutput;
-    out.clip_position = vec4<f32>(ndc, 0.0, 1.0);
-    out.uv = (instance.uv_offset + corner * instance.uv_size) / uniforms.atlas_size;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return textureSample(atlas_tex, atlas_sampler, in.uv);
-}
-"#;
+const IMAGE_SHADER: &str = include_str!("shaders/image.wgsl");
 
 fn cell_instance_layout() -> wgpu::VertexBufferLayout<'static> {
     wgpu::VertexBufferLayout {
@@ -616,51 +449,103 @@ impl SharedGpuContext {
             start.elapsed(),
         )
     }
-
-    #[allow(dead_code)]
-    fn pipelines_for_format(
-        &self,
-        format: wgpu::TextureFormat,
-    ) -> (wgpu::RenderPipeline, wgpu::RenderPipeline) {
-        let (text, image, _, _) = self.pipelines_for_format_profiled(format);
-        (text, image)
-    }
 }
 
 pub fn create_window_attributes(
     config: &AppConfig,
     atlas: &GlyphAtlas,
     title: &str,
+    spawn_monitor: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
+    cascade_index: usize,
 ) -> WindowAttributes {
-    create_window_attributes_for_metrics(config, atlas.cell_width, atlas.cell_height, title)
+    create_window_attributes_for_metrics(
+        config,
+        atlas.cell_width,
+        atlas.cell_height,
+        atlas.dpi(),
+        title,
+        spawn_monitor,
+        cascade_index,
+    )
 }
 
 pub fn create_window_attributes_for_metrics(
     config: &AppConfig,
     cell_width: usize,
     cell_height: usize,
+    dpi: u32,
     title: &str,
+    spawn_monitor: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
+    cascade_index: usize,
 ) -> WindowAttributes {
-    let width = config.window.columns as f64 * cell_width as f64;
-    let height = config.window.rows as f64 * cell_height as f64;
+    // `cell_width`/`cell_height` are already in *physical* pixels: they come
+    // from rasterizing the font at the display DPI (`font_size_pt * dpi / 72`).
+    // The window inner size must therefore be requested in physical pixels.
+    //
+    // Using `Size::Logical` here was a latent bug on HiDPI displays: winit
+    // multiplies a logical size by the monitor scale factor, so on a 2x retina
+    // Mac an 80x24 grid produced a 4x-too-large surface. On scale-factor-1
+    // platforms (typical Linux) logical and physical coincide, so the bug was
+    // invisible there and only inflated macOS per-window footprint.
+    // Blank padding (physical px) surrounds the cell grid on all sides so
+    // glyphs are not clipped by rounded window corners (see WindowConfig).
+    let pad = 2.0 * config.window.padding_px(dpi) as f64;
+    let width = config.window.columns as f64 * cell_width as f64 + pad;
+    let height = config.window.rows as f64 * cell_height as f64 + pad;
 
-    Window::default_attributes()
-        .with_title(title)
-        .with_name("handterm", "handterm")
-        .with_transparent(transparency_requested(config.style.background_opacity))
-        .with_inner_size(Size::Logical(LogicalSize::new(width, height)))
-}
+    let inner = PhysicalSize::new(
+        width.round().max(1.0) as u32,
+        height.round().max(1.0) as u32,
+    );
+    let attrs = crate::platform::with_terminal_keyboard(crate::platform::with_app_id(
+        Window::default_attributes().with_title(title),
+        "handterm",
+    ))
+    .with_transparent(transparency_requested(config.style.background_opacity))
+    .with_inner_size(Size::Physical(inner));
+    let attrs = crate::platform::with_decorations(attrs, config.window.decorations);
+    // Spawn position policy (config `window.position`): centered by default,
+    // cascading extra windows. Wayland ignores position hints; macOS/X11
+    // honor them.
+    let attrs = crate::platform::with_initial_position(
+        attrs,
+        crate::platform::initial_window_position(
+            config.window.position,
+            inner,
+            spawn_monitor,
+            cascade_index,
+        ),
+    );
 
-pub fn create_shared_gpu_context() -> Result<Arc<SharedGpuContext>> {
-    let (shared, _) = create_shared_gpu_context_profiled()?;
-    Ok(shared)
+    // On macOS, AppKit otherwise grows a freshly created window to fill the
+    // display it lands on (observed: an 80x24 request settling at the full
+    // monitor height). The GPU swapchain drawables are sized to the *actual*
+    // window, so that auto-grow inflated the dominant per-window memory cost
+    // (two ~13 MB IOSurfaces instead of two ~4.5 MB ones). Clamp the initial
+    // max size to the requested grid size to defeat the auto-grow. The cap is
+    // lifted again once the first frame is presented (see gpu_app), so the
+    // window stays freely resizable in steady state.
+    #[cfg(target_os = "macos")]
+    let attrs = attrs.with_max_inner_size(Size::Physical(inner));
+
+    attrs
 }
 
 pub fn create_shared_gpu_context_profiled() -> Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)>
 {
     let total_start = Instant::now();
+    // Pick the native graphics backend for the platform: Metal on macOS,
+    // Vulkan on Linux/other. Falling back to `Backends::all()` keeps things
+    // working if a platform exposes a different native backend.
+    #[cfg(target_os = "macos")]
+    let backends = wgpu::Backends::METAL;
+    #[cfg(target_os = "linux")]
+    let backends = wgpu::Backends::VULKAN;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let backends = wgpu::Backends::all();
+
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::VULKAN,
+        backends,
         ..Default::default()
     });
 
@@ -776,43 +661,6 @@ pub fn create_shared_gpu_context_profiled() -> Result<(Arc<SharedGpuContext>, Sh
     ))
 }
 
-pub fn create_surface_state(
-    event_loop: &ActiveEventLoop,
-    config: &AppConfig,
-    title: &str,
-    atlas: &GlyphAtlas,
-) -> Result<GpuSurfaceState> {
-    let shared = create_shared_gpu_context()?;
-    let (state, _) =
-        create_surface_state_with_shared_profiled(shared, event_loop, config, title, atlas)?;
-    Ok(state)
-}
-
-pub fn create_surface_state_with_shared(
-    shared: Arc<SharedGpuContext>,
-    event_loop: &ActiveEventLoop,
-    config: &AppConfig,
-    title: &str,
-    atlas: &GlyphAtlas,
-) -> Result<GpuSurfaceState> {
-    let (state, _) = create_surface_state_with_shared_profiled_with_defaults(
-        shared, event_loop, config, title, atlas, None,
-    )?;
-    Ok(state)
-}
-
-pub fn create_surface_state_with_shared_profiled(
-    shared: Arc<SharedGpuContext>,
-    event_loop: &ActiveEventLoop,
-    config: &AppConfig,
-    title: &str,
-    atlas: &GlyphAtlas,
-) -> Result<(GpuSurfaceState, GpuSurfaceCreateProfile)> {
-    create_surface_state_with_shared_profiled_with_defaults(
-        shared, event_loop, config, title, atlas, None,
-    )
-}
-
 pub fn create_surface_state_with_shared_profiled_with_defaults(
     shared: Arc<SharedGpuContext>,
     event_loop: &ActiveEventLoop,
@@ -824,7 +672,13 @@ pub fn create_surface_state_with_shared_profiled_with_defaults(
     let step_start = Instant::now();
     let window = Arc::new(
         event_loop
-            .create_window(create_window_attributes(config, atlas, title))
+            .create_window(create_window_attributes(
+                config,
+                atlas,
+                title,
+                crate::platform::spawn_monitor_geometry(event_loop),
+                0,
+            ))
             .context("window creation should succeed")?,
     );
     let window_create = step_start.elapsed();
@@ -864,40 +718,18 @@ pub fn create_surface_state_for_window_with_shared_profiled_with_defaults(
 
     let size = window.inner_size();
 
-    let (surface_config, capabilities, default_config, reused_surface_defaults) =
-        if preferred_defaults.is_some() {
-            let (surface_config, reused_surface_defaults) = build_surface_config(
-                size,
-                transparency_requested(config.style.background_opacity),
-                preferred_defaults,
-                None,
-            )?;
-            (
-                surface_config,
-                Duration::ZERO,
-                Duration::ZERO,
-                reused_surface_defaults,
-            )
-        } else {
-            let step_start = Instant::now();
-            let surface_caps = surface.get_capabilities(&shared.adapter);
-            let capabilities = step_start.elapsed();
+    let step_start = Instant::now();
+    let surface_caps = surface.get_capabilities(&shared.adapter);
+    let capabilities = step_start.elapsed();
 
-            let step_start = Instant::now();
-            let (surface_config, reused_surface_defaults) = build_surface_config(
-                size,
-                transparency_requested(config.style.background_opacity),
-                None,
-                Some(&surface_caps),
-            )?;
-            let default_config = step_start.elapsed();
-            (
-                surface_config,
-                capabilities,
-                default_config,
-                reused_surface_defaults,
-            )
-        };
+    let step_start = Instant::now();
+    let (surface_config, reused_surface_defaults) = build_surface_config(
+        size,
+        transparency_requested(config.style.background_opacity),
+        preferred_defaults,
+        Some(&surface_caps),
+    )?;
+    let default_config = step_start.elapsed();
 
     let step_start = Instant::now();
     surface.configure(&shared.device, &surface_config);
@@ -907,11 +739,12 @@ pub fn create_surface_state_for_window_with_shared_profiled_with_defaults(
     let atlas_state = shared.atlas.lock().expect("shared atlas lock poisoned");
     let atlas_texture_create = step_start.elapsed();
 
+    let pad = config.window.padding_px(atlas.dpi()) as f32;
     let uniforms = Uniforms {
         screen_size: [size.width as f32, size.height as f32],
         cell_size: [atlas.cell_width as f32, atlas.cell_height as f32],
         atlas_size: [ATLAS_WIDTH as f32, ATLAS_HEIGHT as f32],
-        _pad: [0.0; 2],
+        grid_offset: [pad, pad],
     };
 
     let step_start = Instant::now();
@@ -975,8 +808,6 @@ pub fn create_surface_state_for_window_with_shared_profiled_with_defaults(
 
     Ok((
         GpuSurfaceState {
-            shared,
-            window,
             surface,
             surface_config,
             pipeline,
@@ -998,6 +829,8 @@ pub fn create_surface_state_for_window_with_shared_profiled_with_defaults(
             last_visual_state: None,
             last_presented_signature: None,
             last_viewport_scroll_quantized: None,
+            window,
+            shared,
         },
         GpuSurfaceCreateProfile {
             window_create,
@@ -1025,6 +858,7 @@ pub fn resize_surface_state(
     height: u32,
     cols: u16,
     rows: u16,
+    padding_px: u32,
 ) {
     if width == 0 || height == 0 {
         return;
@@ -1084,11 +918,12 @@ pub fn resize_surface_state(
             .reserve(needed_images.saturating_sub(state.image_instances.capacity()));
     }
 
+    let pad = padding_px as f32;
     let uniforms = Uniforms {
         screen_size: [width as f32, height as f32],
         cell_size: [atlas.cell_width as f32, atlas.cell_height as f32],
         atlas_size: [ATLAS_WIDTH as f32, ATLAS_HEIGHT as f32],
-        _pad: [0.0; 2],
+        grid_offset: [pad, pad],
     };
     state
         .shared
@@ -1096,13 +931,28 @@ pub fn resize_surface_state(
         .write_buffer(&state.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 }
 
-pub fn render_surface_state(
-    state: &mut GpuSurfaceState,
-    terminal: &mut impl TerminalView,
-    atlas: &mut GlyphAtlas,
-    config: &AppConfig,
-) {
-    render_surface_state_with_scroll(state, terminal, atlas, config, 0.0);
+pub fn resume_surface_state(state: &mut GpuSurfaceState, transparency: bool) -> Result<()> {
+    let capabilities = state.surface.get_capabilities(&state.shared.adapter);
+    let size = winit::dpi::PhysicalSize::new(
+        state.surface_config.width.max(1),
+        state.surface_config.height.max(1),
+    );
+    let preferred = state.preferred_surface_defaults();
+    let (config, reused) =
+        build_surface_config(size, transparency, Some(preferred), Some(&capabilities))?;
+    if !reused || config.format != state.surface_config.format {
+        let (pipeline, image_pipeline, _, _) =
+            state.shared.pipelines_for_format_profiled(config.format);
+        state.pipeline = pipeline;
+        state.image_pipeline = image_pipeline;
+    }
+    state.surface_config = config;
+    state
+        .surface
+        .configure(&state.shared.device, &state.surface_config);
+    state.last_presented_signature = None;
+    state.last_viewport_scroll_quantized = None;
+    Ok(())
 }
 
 pub fn render_surface_state_with_scroll(
@@ -1113,15 +963,6 @@ pub fn render_surface_state_with_scroll(
     scroll_rows: f32,
 ) {
     let _ = render_surface_state_profiled_with_scroll(state, terminal, atlas, config, scroll_rows);
-}
-
-pub fn render_surface_state_profiled(
-    state: &mut GpuSurfaceState,
-    terminal: &mut impl TerminalView,
-    atlas: &mut GlyphAtlas,
-    config: &AppConfig,
-) -> Option<GpuRenderProfile> {
-    render_surface_state_profiled_with_scroll(state, terminal, atlas, config, 0.0)
 }
 
 pub fn render_surface_state_profiled_with_scroll(
@@ -1200,7 +1041,6 @@ pub fn render_surface_state_profiled_with_scroll(
             base_fg,
             base_bg,
             base_fg_f,
-            background_alpha,
             cell_w,
             cell_h,
             viewport_offset_y: viewport_scroll.viewport_offset_y(cell_h),
@@ -1786,1218 +1626,4 @@ fn select_alpha_mode(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::color::blend_rgba_over_rgb;
-    use crate::config::AppConfig;
-    use crate::font::GlyphAtlas;
-    use crate::gpu_frame::{
-        FLAG_COLOR_GLYPH, FLAG_CURLY_UL, FLAG_CURSOR_BAR, FLAG_CURSOR_UNDERLINE, FLAG_DASHED_UL,
-        FLAG_DOTTED_UL, FLAG_DOUBLE_UL, FLAG_HAS_GLYPH, FLAG_STRIKETHROUGH, FLAG_UNDERLINE,
-    };
-    use crate::render::OffscreenRenderer;
-    use crate::terminal::Terminal;
-    use crate::workloads::{
-        EMOJI_AND_SHADE_TRANSCRIPT, STARSHIP_PROMPT_TRANSCRIPT, TUI_HELP_WITH_IMAGE_TRANSCRIPT,
-    };
-
-    #[derive(Clone)]
-    struct TestAtlasTexture {
-        pixels: Vec<u8>,
-        width: u32,
-        height: u32,
-    }
-
-    fn rgba_bytes(color: [f32; 4]) -> [u8; 4] {
-        [
-            (color[0].clamp(0.0, 1.0) * 255.0).round() as u8,
-            (color[1].clamp(0.0, 1.0) * 255.0).round() as u8,
-            (color[2].clamp(0.0, 1.0) * 255.0).round() as u8,
-            (color[3].clamp(0.0, 1.0) * 255.0).round() as u8,
-        ]
-    }
-
-    fn sample_texture(
-        texture: &TestAtlasTexture,
-        dx: usize,
-        dy: usize,
-        draw_w: usize,
-        draw_h: usize,
-    ) -> [f32; 4] {
-        let src_x = ((((dx as f32) + 0.5) * texture.width as f32 / draw_w.max(1) as f32) - 0.5)
-            .round() as isize;
-        let src_y = ((((dy as f32) + 0.5) * texture.height as f32 / draw_h.max(1) as f32) - 0.5)
-            .round() as isize;
-        let src_x = src_x.clamp(0, texture.width.saturating_sub(1) as isize) as usize;
-        let src_y = src_y.clamp(0, texture.height.saturating_sub(1) as isize) as usize;
-        let offset = (src_y * texture.width as usize + src_x) * 4;
-        [
-            texture.pixels[offset] as f32 / 255.0,
-            texture.pixels[offset + 1] as f32 / 255.0,
-            texture.pixels[offset + 2] as f32 / 255.0,
-            texture.pixels[offset + 3] as f32 / 255.0,
-        ]
-    }
-
-    fn shader_color_for_cell_instance(
-        instance: &CellInstance,
-        texture: Option<&TestAtlasTexture>,
-        dx: usize,
-        dy: usize,
-        draw_w: usize,
-        draw_h: usize,
-    ) -> [f32; 4] {
-        let mut color = instance.bg;
-
-        if instance.flags & FLAG_HAS_GLYPH != 0
-            && let Some(texture) = texture
-        {
-            let glyph = sample_texture(texture, dx, dy, draw_w, draw_h);
-            if instance.flags & FLAG_COLOR_GLYPH != 0 {
-                color = glyph;
-            } else {
-                color = [
-                    instance.fg[0],
-                    instance.fg[1],
-                    instance.fg[2],
-                    glyph[3] * instance.fg[3],
-                ];
-            }
-        }
-
-        let x = dx as f32 + 0.5;
-        let y = dy as f32 + 0.5;
-        let h = instance.size[1].max(1.0);
-        let w = instance.size[0].max(1.0);
-
-        if instance.flags & FLAG_UNDERLINE != 0 {
-            let ul_y = h - 2.0;
-            if y >= ul_y && y < ul_y + 1.0 {
-                color = [instance.deco[0], instance.deco[1], instance.deco[2], 1.0];
-            }
-        }
-        if instance.flags & FLAG_CURLY_UL != 0 {
-            let ul_y = h - 2.0;
-            let phase = x / w * std::f32::consts::TAU;
-            let wave = phase.sin() * 2.0;
-            if (y - (ul_y + wave)).abs() < 1.5 {
-                color = [instance.deco[0], instance.deco[1], instance.deco[2], 1.0];
-            }
-        }
-        if instance.flags & FLAG_DOUBLE_UL != 0 {
-            let ul_y1 = h - 2.0;
-            let ul_y2 = h - 4.0;
-            if (y >= ul_y1 && y < ul_y1 + 1.0) || (y >= ul_y2 && y < ul_y2 + 1.0) {
-                color = [instance.deco[0], instance.deco[1], instance.deco[2], 1.0];
-            }
-        }
-        if instance.flags & FLAG_DOTTED_UL != 0 {
-            let ul_y = h - 2.0;
-            if y >= ul_y && y < ul_y + 1.0 && dx.is_multiple_of(3) {
-                color = [instance.deco[0], instance.deco[1], instance.deco[2], 1.0];
-            }
-        }
-        if instance.flags & FLAG_DASHED_UL != 0 {
-            let ul_y = h - 2.0;
-            let dash = (w as u32 / 3).max(1);
-            let offset = dx as u32;
-            if y >= ul_y
-                && y < ul_y + 1.0
-                && (offset < dash || (offset >= dash * 2 && offset < dash * 3))
-            {
-                color = [instance.deco[0], instance.deco[1], instance.deco[2], 1.0];
-            }
-        }
-        if instance.flags & FLAG_STRIKETHROUGH != 0 {
-            let mid_y = h / 2.0;
-            if y >= mid_y && y < mid_y + 1.0 {
-                color = [instance.fg[0], instance.fg[1], instance.fg[2], 1.0];
-            }
-        }
-        if instance.flags & FLAG_CURSOR_BAR != 0 && x < 2.0_f32.min(w) {
-            color = [instance.fg[0], instance.fg[1], instance.fg[2], 1.0];
-        }
-        if instance.flags & FLAG_CURSOR_UNDERLINE != 0 {
-            let cursor_y = h - h.min(2.0);
-            if y >= cursor_y {
-                color = [instance.fg[0], instance.fg[1], instance.fg[2], 1.0];
-            }
-        }
-
-        color
-    }
-
-    fn draw_cell_instances(
-        buffer: &mut [u32],
-        buf_w: usize,
-        buf_h: usize,
-        instances: &[CellInstance],
-        textures: &std::collections::HashMap<(u32, u32, u32, u32), TestAtlasTexture>,
-    ) {
-        for instance in instances {
-            let raw_px_x = instance.pos[0].floor() as isize;
-            let raw_px_y = instance.pos[1].floor() as isize;
-            let px_x = raw_px_x.max(0) as usize;
-            let px_y = raw_px_y.max(0) as usize;
-            let draw_w = instance.size[0].ceil().max(0.0) as usize;
-            let draw_h = instance.size[1].ceil().max(0.0) as usize;
-            let raw_x_end = raw_px_x + draw_w as isize;
-            let raw_y_end = raw_px_y + draw_h as isize;
-            let x_end = raw_x_end.clamp(0, buf_w as isize) as usize;
-            let y_end = raw_y_end.clamp(0, buf_h as isize) as usize;
-            let texture = textures.get(&(
-                instance.uv_offset[0] as u32,
-                instance.uv_offset[1] as u32,
-                instance.uv_size[0] as u32,
-                instance.uv_size[1] as u32,
-            ));
-
-            for y in px_y..y_end {
-                for x in px_x..x_end {
-                    let dx = (x as isize - raw_px_x) as usize;
-                    let dy = (y as isize - raw_px_y) as usize;
-                    let rgba = rgba_bytes(shader_color_for_cell_instance(
-                        instance, texture, dx, dy, draw_w, draw_h,
-                    ));
-                    blend_rgba_over_rgb(&mut buffer[y * buf_w + x], &rgba);
-                }
-            }
-        }
-    }
-
-    fn draw_image_instances(
-        buffer: &mut [u32],
-        buf_w: usize,
-        buf_h: usize,
-        instances: &[ImageInstance],
-        textures: &std::collections::HashMap<(u32, u32, u32, u32), TestAtlasTexture>,
-    ) {
-        for instance in instances {
-            let raw_px_x = instance.pos[0].floor() as isize;
-            let raw_px_y = instance.pos[1].floor() as isize;
-            let px_x = raw_px_x.max(0) as usize;
-            let px_y = raw_px_y.max(0) as usize;
-            let draw_w = instance.size[0].ceil().max(0.0) as usize;
-            let draw_h = instance.size[1].ceil().max(0.0) as usize;
-            let raw_x_end = raw_px_x + draw_w as isize;
-            let raw_y_end = raw_px_y + draw_h as isize;
-            let x_end = raw_x_end.clamp(0, buf_w as isize) as usize;
-            let y_end = raw_y_end.clamp(0, buf_h as isize) as usize;
-            let Some(texture) = textures.get(&(
-                instance.uv_offset[0] as u32,
-                instance.uv_offset[1] as u32,
-                instance.uv_size[0] as u32,
-                instance.uv_size[1] as u32,
-            )) else {
-                continue;
-            };
-
-            for y in px_y..y_end {
-                for x in px_x..x_end {
-                    let dx = (x as isize - raw_px_x) as usize;
-                    let dy = (y as isize - raw_px_y) as usize;
-                    let rgba = rgba_bytes(sample_texture(texture, dx, dy, draw_w, draw_h));
-                    blend_rgba_over_rgb(&mut buffer[y * buf_w + x], &rgba);
-                }
-            }
-        }
-    }
-
-    fn render_like_gpu_with_scroll(
-        terminal: &mut Terminal,
-        atlas: &mut GlyphAtlas,
-        config: &AppConfig,
-        scroll_rows: f32,
-    ) -> Vec<u32> {
-        let width = terminal.cols as usize * atlas.cell_width;
-        let height = terminal.rows as usize * atlas.cell_height;
-        let base_bg = config.style.background.as_u32_rgb();
-        let base_fg = config.style.foreground.as_u32_rgb();
-        let mut buffer = vec![base_bg; width * height];
-
-        let effective_scroll_rows = terminal.grid().scroll_offset as f32 + scroll_rows.max(0.0);
-        let viewport_scroll = ViewportScroll::from_scroll_rows(effective_scroll_rows);
-
-        let mut cell_infos = Vec::new();
-        if viewport_scroll == ViewportScroll::ZERO {
-            fill_cell_infos(terminal, &mut cell_infos);
-        } else {
-            fill_cell_infos_with_scroll(terminal, &mut cell_infos, viewport_scroll);
-        }
-
-        let mut glyph_textures = std::collections::HashMap::new();
-        let mut next_x = 0u32;
-        let mut batches = FrameTextBatches::default();
-        fill_text_batches(
-            &cell_infos,
-            FrameBatchStyle {
-                base_fg,
-                base_bg,
-                base_fg_f: [
-                    ((base_fg >> 16) & 0xff) as f32 / 255.0,
-                    ((base_fg >> 8) & 0xff) as f32 / 255.0,
-                    (base_fg & 0xff) as f32 / 255.0,
-                    1.0,
-                ],
-                background_alpha: clamp_background_alpha(config.style.background_opacity),
-                cell_w: atlas.cell_width as f32,
-                cell_h: atlas.cell_height as f32,
-                viewport_offset_y: viewport_scroll.viewport_offset_y(atlas.cell_height as f32),
-            },
-            &mut batches,
-            |ci| {
-                let glyph = if let Some(grapheme) = ci.grapheme.as_deref() {
-                    atlas.ensure_grapheme(grapheme);
-                    atlas
-                        .get_grapheme_glyph(grapheme)
-                        .map(|glyph| (glyph, ci.cells))
-                } else {
-                    atlas.ensure_glyph(ci.ch);
-                    atlas.get_glyph(ci.ch).map(|glyph| (glyph, ci.cells))
-                }?;
-                let is_color = glyph.0.format == GlyphFormat::Rgba;
-                let (tile, tile_width, tile_height, left_pad, top_pad) = build_gpu_glyph_tile(
-                    &glyph.0,
-                    glyph.1,
-                    atlas.cell_width,
-                    atlas.cell_height,
-                    atlas.baseline,
-                );
-                let entry = GlyphAtlasEntry {
-                    x: next_x,
-                    y: 0,
-                    width: tile_width,
-                    height: tile_height,
-                    left_pad,
-                    top_pad,
-                    is_color,
-                };
-                glyph_textures.insert(
-                    (entry.x, entry.y, entry.width, entry.height),
-                    TestAtlasTexture {
-                        pixels: tile,
-                        width: tile_width,
-                        height: tile_height,
-                    },
-                );
-                next_x = next_x.saturating_add(tile_width + 1);
-                Some(entry)
-            },
-        );
-        if config.scrollback.scrollbar {
-            append_scrollbar_overlay_instances(
-                &mut batches.overlay_instances,
-                base_fg,
-                width as f32,
-                height as f32,
-                terminal.grid().scrollback_len(),
-                terminal.grid().rows,
-                effective_scroll_rows,
-            );
-        }
-
-        let mut image_textures = std::collections::HashMap::new();
-        let mut image_instances = Vec::new();
-        if viewport_scroll == ViewportScroll::ZERO {
-            fill_image_instances(
-                terminal.kitty_placements(),
-                atlas.cell_width as f32,
-                atlas.cell_height as f32,
-                &mut image_instances,
-                |placement| {
-                    let image = terminal.kitty_image(placement.image_id)?;
-                    if image.data.len() != (image.width as usize) * (image.height as usize) * 4 {
-                        return None;
-                    }
-                    let rect = AtlasImageRect {
-                        x: next_x,
-                        y: 1,
-                        width: image.width,
-                        height: image.height,
-                    };
-                    image_textures.insert(
-                        (rect.x, rect.y, rect.width, rect.height),
-                        TestAtlasTexture {
-                            pixels: image.data.clone(),
-                            width: image.width,
-                            height: image.height,
-                        },
-                    );
-                    next_x = next_x.saturating_add(image.width.max(1) + 1);
-                    Some(rect)
-                },
-            );
-        } else {
-            fill_image_instances_with_viewport_offset(
-                terminal.kitty_placements(),
-                atlas.cell_width as f32,
-                atlas.cell_height as f32,
-                viewport_scroll.viewport_offset_y(atlas.cell_height as f32),
-                &mut image_instances,
-                |placement| {
-                    let image = terminal.kitty_image(placement.image_id)?;
-                    if image.data.len() != (image.width as usize) * (image.height as usize) * 4 {
-                        return None;
-                    }
-                    let rect = AtlasImageRect {
-                        x: next_x,
-                        y: 1,
-                        width: image.width,
-                        height: image.height,
-                    };
-                    image_textures.insert(
-                        (rect.x, rect.y, rect.width, rect.height),
-                        TestAtlasTexture {
-                            pixels: image.data.clone(),
-                            width: image.width,
-                            height: image.height,
-                        },
-                    );
-                    next_x = next_x.saturating_add(image.width.max(1) + 1);
-                    Some(rect)
-                },
-            );
-        }
-
-        draw_cell_instances(
-            &mut buffer,
-            width,
-            height,
-            &batches.bg_instances,
-            &glyph_textures,
-        );
-        draw_image_instances(
-            &mut buffer,
-            width,
-            height,
-            &image_instances,
-            &image_textures,
-        );
-        draw_cell_instances(
-            &mut buffer,
-            width,
-            height,
-            &batches.fg_instances,
-            &glyph_textures,
-        );
-        draw_cell_instances(
-            &mut buffer,
-            width,
-            height,
-            &batches.overlay_instances,
-            &glyph_textures,
-        );
-
-        buffer
-    }
-
-    fn render_like_gpu(
-        terminal: &mut Terminal,
-        atlas: &mut GlyphAtlas,
-        config: &AppConfig,
-    ) -> Vec<u32> {
-        render_like_gpu_with_scroll(terminal, atlas, config, 0.0)
-    }
-
-    fn sample_rgb(buffer: &[u32], width: usize, x: usize, y: usize) -> u32 {
-        buffer[y * width + x] & 0x00ff_ffff
-    }
-
-    fn assert_gpu_framebuffer_matches_cpu(
-        cols: u16,
-        rows: u16,
-        chunks: &[&[u8]],
-        per_step_assert: impl Fn(&Terminal, usize),
-    ) {
-        assert_gpu_framebuffer_matches_cpu_with_dpi(cols, rows, 96, chunks, per_step_assert);
-    }
-
-    fn assert_gpu_framebuffer_matches_cpu_with_dpi(
-        cols: u16,
-        rows: u16,
-        dpi: u32,
-        chunks: &[&[u8]],
-        per_step_assert: impl Fn(&Terminal, usize),
-    ) {
-        let config = AppConfig::default();
-        let mut atlas =
-            GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, dpi)
-                .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, dpi))
-                .expect("should load font atlas for GPU framebuffer parity");
-        let mut terminal = Terminal::new(cols, rows);
-        let mut cpu = OffscreenRenderer::new(cols, rows, &atlas);
-
-        for (idx, chunk) in chunks.iter().enumerate() {
-            terminal.process(chunk);
-            cpu.reset();
-            cpu.render(&mut terminal, &mut atlas, &config);
-            let gpu = render_like_gpu(&mut terminal, &mut atlas, &config);
-            if let Some((pixel_idx, (gpu_px, cpu_px))) = gpu
-                .iter()
-                .zip(cpu.pixels.iter())
-                .enumerate()
-                .find(|(_, (gpu_px, cpu_px))| gpu_px != cpu_px)
-            {
-                let x = pixel_idx % cpu.width;
-                let y = pixel_idx / cpu.width;
-                let mut cell_infos = Vec::new();
-                fill_cell_infos(&terminal, &mut cell_infos);
-                let mut batches = FrameTextBatches::default();
-                let mut glyph_textures = std::collections::HashMap::new();
-                let mut next_x = 0u32;
-                fill_text_batches(
-                    &cell_infos,
-                    FrameBatchStyle {
-                        base_fg: config.style.foreground.as_u32_rgb(),
-                        base_bg: config.style.background.as_u32_rgb(),
-                        base_fg_f: [
-                            ((config.style.foreground.as_u32_rgb() >> 16) & 0xff) as f32 / 255.0,
-                            ((config.style.foreground.as_u32_rgb() >> 8) & 0xff) as f32 / 255.0,
-                            (config.style.foreground.as_u32_rgb() & 0xff) as f32 / 255.0,
-                            1.0,
-                        ],
-                        background_alpha: clamp_background_alpha(config.style.background_opacity),
-                        cell_w: atlas.cell_width as f32,
-                        cell_h: atlas.cell_height as f32,
-                        viewport_offset_y: 0.0,
-                    },
-                    &mut batches,
-                    |ci| {
-                        let glyph = if let Some(grapheme) = ci.grapheme.as_deref() {
-                            atlas.ensure_grapheme(grapheme);
-                            atlas
-                                .get_grapheme_glyph(grapheme)
-                                .map(|glyph| (glyph, ci.cells))
-                        } else {
-                            atlas.ensure_glyph(ci.ch);
-                            atlas.get_glyph(ci.ch).map(|glyph| (glyph, ci.cells))
-                        }?;
-                        let is_color = glyph.0.format == GlyphFormat::Rgba;
-                        let (tile, tile_width, tile_height, left_pad, top_pad) =
-                            build_gpu_glyph_tile(
-                                &glyph.0,
-                                glyph.1,
-                                atlas.cell_width,
-                                atlas.cell_height,
-                                atlas.baseline,
-                            );
-                        let entry = GlyphAtlasEntry {
-                            x: next_x,
-                            y: 0,
-                            width: tile_width,
-                            height: tile_height,
-                            left_pad,
-                            top_pad,
-                            is_color,
-                        };
-                        glyph_textures.insert(
-                            (entry.x, entry.y, entry.width, entry.height),
-                            TestAtlasTexture {
-                                pixels: tile,
-                                width: tile_width,
-                                height: tile_height,
-                            },
-                        );
-                        next_x = next_x.saturating_add(tile_width + 1);
-                        Some(entry)
-                    },
-                );
-                let pixel_in_instance = |instance: &CellInstance| {
-                    let px = x as f32 + 0.5;
-                    let py = y as f32 + 0.5;
-                    px >= instance.pos[0]
-                        && px < instance.pos[0] + instance.size[0]
-                        && py >= instance.pos[1]
-                        && py < instance.pos[1] + instance.size[1]
-                };
-                let bg_hits = batches
-                    .bg_instances
-                    .iter()
-                    .filter(|i| pixel_in_instance(i))
-                    .count();
-                let fg_hits = batches
-                    .fg_instances
-                    .iter()
-                    .filter(|i| pixel_in_instance(i))
-                    .count();
-                let overlay_hits = batches
-                    .overlay_instances
-                    .iter()
-                    .filter(|i| pixel_in_instance(i))
-                    .count();
-                let first_cell = cell_infos.first();
-                let first_fg = batches.fg_instances.first();
-                panic!(
-                    "GPU framebuffer parity diverged after replay chunk {idx} at pixel ({x},{y}): gpu=0x{gpu_px:06x} cpu=0x{cpu_px:06x} cell=({}, {}) bg_hits={} fg_hits={} overlay_hits={} first_cell={:?} first_fg={:?}",
-                    x / atlas.cell_width,
-                    y / atlas.cell_height,
-                    bg_hits,
-                    fg_hits,
-                    overlay_hits,
-                    first_cell,
-                    first_fg,
-                );
-            }
-            per_step_assert(&terminal, idx);
-        }
-    }
-
-    #[test]
-    fn gpu_glyph_tile_spans_requested_cells() {
-        let pixels = [255u8, 128, 64, 32];
-        let glyph = crate::font::GlyphData {
-            pixels: &pixels,
-            width: 2,
-            height: 2,
-            format: GlyphFormat::Alpha,
-            bearing_x: 0,
-            bearing_y: 2,
-        };
-
-        let (tile, width, height, left_pad, top_pad) = build_gpu_glyph_tile(&glyph, 2, 8, 4, 2);
-
-        assert_eq!(width, 16);
-        assert_eq!(height, 4);
-        assert_eq!(left_pad, 0);
-        assert_eq!(top_pad, 0);
-        assert_eq!(tile.len(), 16 * 4 * 4);
-        assert_eq!(&tile[0..8], &[0xff, 0xff, 0xff, 255, 0xff, 0xff, 0xff, 128]);
-    }
-
-    #[test]
-    fn gpu_glyph_tile_expands_for_right_overhang() {
-        let pixels = [255u8, 255, 255, 255];
-        let glyph = crate::font::GlyphData {
-            pixels: &pixels,
-            width: 4,
-            height: 1,
-            format: GlyphFormat::Alpha,
-            bearing_x: 6,
-            bearing_y: 1,
-        };
-
-        let (_tile, width, height, left_pad, top_pad) = build_gpu_glyph_tile(&glyph, 1, 8, 4, 1);
-
-        assert_eq!(width, 10);
-        assert_eq!(height, 4);
-        assert_eq!(left_pad, 0);
-        assert_eq!(top_pad, 0);
-    }
-
-    #[test]
-    fn gpu_glyph_tile_preserves_left_overhang() {
-        let pixels = [255u8, 255, 255, 255];
-        let glyph = crate::font::GlyphData {
-            pixels: &pixels,
-            width: 4,
-            height: 1,
-            format: GlyphFormat::Alpha,
-            bearing_x: -2,
-            bearing_y: 1,
-        };
-
-        let (_tile, width, height, left_pad, top_pad) = build_gpu_glyph_tile(&glyph, 1, 8, 4, 1);
-
-        assert_eq!(width, 10);
-        assert_eq!(height, 4);
-        assert_eq!(left_pad, 2);
-        assert_eq!(top_pad, 0);
-    }
-
-    #[test]
-    fn gpu_glyph_tile_preserves_top_overhang() {
-        let pixels = [255u8, 255, 255, 255];
-        let glyph = crate::font::GlyphData {
-            pixels: &pixels,
-            width: 2,
-            height: 2,
-            format: GlyphFormat::Alpha,
-            bearing_x: 0,
-            bearing_y: 5,
-        };
-
-        let (_tile, width, height, left_pad, top_pad) = build_gpu_glyph_tile(&glyph, 1, 8, 4, 1);
-
-        assert_eq!(width, 8);
-        assert_eq!(height, 6);
-        assert_eq!(left_pad, 0);
-        assert_eq!(top_pad, 2);
-    }
-
-    #[test]
-    fn prefers_non_srgb_surface_format_when_available() {
-        let capabilities = wgpu::SurfaceCapabilities {
-            formats: vec![
-                wgpu::TextureFormat::Bgra8UnormSrgb,
-                wgpu::TextureFormat::Bgra8Unorm,
-            ],
-            present_modes: vec![wgpu::PresentMode::Fifo],
-            alpha_modes: vec![wgpu::CompositeAlphaMode::Opaque],
-            usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        };
-
-        assert_eq!(
-            select_surface_format(&capabilities, wgpu::TextureFormat::Bgra8UnormSrgb),
-            wgpu::TextureFormat::Bgra8Unorm
-        );
-    }
-
-    #[test]
-    fn requests_transparent_window_only_for_partial_opacity() {
-        assert!(transparency_requested(0.9));
-        assert!(transparency_requested(0.0));
-        assert!(!transparency_requested(1.0));
-        assert!(!transparency_requested(1.5));
-    }
-
-    #[test]
-    fn clamps_background_alpha_into_unit_interval() {
-        assert_eq!(clamp_background_alpha(-0.5), 0.0);
-        assert_eq!(clamp_background_alpha(0.0), 0.0);
-        assert_eq!(clamp_background_alpha(0.25), 0.25);
-        assert_eq!(clamp_background_alpha(1.0), 1.0);
-        assert_eq!(clamp_background_alpha(1.5), 1.0);
-    }
-
-    #[test]
-    fn surface_profile_aggregates_compositor_and_handterm_work() {
-        let profile = GpuSurfaceCreateProfile {
-            window_create: Duration::from_millis(11),
-            ime_setup: Duration::from_millis(2),
-            surface_create: Duration::from_millis(13),
-            default_config: Duration::from_millis(3),
-            capabilities: Duration::from_millis(17),
-            configure: Duration::from_millis(19),
-            atlas_texture: Duration::from_millis(5),
-            uniform_buffer: Duration::from_millis(7),
-            instance_buffers: Duration::from_millis(23),
-            bind_group: Duration::from_millis(29),
-            pipeline_lookup: Duration::from_millis(31),
-            total: Duration::from_millis(160),
-            ..GpuSurfaceCreateProfile::default()
-        };
-
-        assert_eq!(profile.compositor_facing_total(), Duration::from_millis(60));
-        assert_eq!(profile.handterm_setup_total(), Duration::from_millis(100));
-        assert_eq!(profile.unaccounted_total(), Duration::ZERO);
-    }
-
-    #[test]
-    fn surface_profile_unaccounted_total_saturates_at_zero() {
-        let profile = GpuSurfaceCreateProfile {
-            window_create: Duration::from_millis(5),
-            surface_create: Duration::from_millis(5),
-            capabilities: Duration::from_millis(5),
-            configure: Duration::from_millis(5),
-            ime_setup: Duration::from_millis(5),
-            default_config: Duration::from_millis(5),
-            atlas_texture: Duration::from_millis(5),
-            uniform_buffer: Duration::from_millis(5),
-            instance_buffers: Duration::from_millis(5),
-            bind_group: Duration::from_millis(5),
-            pipeline_lookup: Duration::from_millis(5),
-            total: Duration::from_millis(10),
-            ..GpuSurfaceCreateProfile::default()
-        };
-
-        assert_eq!(profile.unaccounted_total(), Duration::ZERO);
-    }
-
-    #[test]
-    fn prefers_premultiplied_alpha_when_transparency_is_requested() {
-        let capabilities = wgpu::SurfaceCapabilities {
-            formats: vec![wgpu::TextureFormat::Bgra8Unorm],
-            present_modes: vec![wgpu::PresentMode::Fifo],
-            alpha_modes: vec![
-                wgpu::CompositeAlphaMode::Opaque,
-                wgpu::CompositeAlphaMode::PreMultiplied,
-            ],
-            usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        };
-
-        assert_eq!(
-            select_alpha_mode(&capabilities, true),
-            wgpu::CompositeAlphaMode::PreMultiplied
-        );
-        assert_eq!(
-            select_alpha_mode(&capabilities, false),
-            wgpu::CompositeAlphaMode::Opaque
-        );
-    }
-
-    #[test]
-    fn falls_back_to_auto_alpha_when_thats_all_the_compositor_offers() {
-        let capabilities = wgpu::SurfaceCapabilities {
-            formats: vec![wgpu::TextureFormat::Bgra8Unorm],
-            present_modes: vec![wgpu::PresentMode::Fifo],
-            alpha_modes: vec![wgpu::CompositeAlphaMode::Auto],
-            usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        };
-
-        assert_eq!(
-            select_alpha_mode(&capabilities, true),
-            wgpu::CompositeAlphaMode::Auto
-        );
-    }
-
-    #[test]
-    fn falls_back_to_opaque_alpha_when_compositor_has_no_transparent_mode() {
-        let capabilities = wgpu::SurfaceCapabilities {
-            formats: vec![wgpu::TextureFormat::Bgra8Unorm],
-            present_modes: vec![wgpu::PresentMode::Fifo],
-            alpha_modes: vec![wgpu::CompositeAlphaMode::Opaque],
-            usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        };
-
-        assert_eq!(
-            select_alpha_mode(&capabilities, true),
-            wgpu::CompositeAlphaMode::Opaque
-        );
-    }
-
-    #[test]
-    fn build_surface_config_reuses_preferred_defaults_without_capabilities() {
-        let size = winit::dpi::PhysicalSize::new(800, 600);
-        let defaults = GpuSurfaceDefaults {
-            format: wgpu::TextureFormat::Bgra8Unorm,
-            present_mode: wgpu::PresentMode::Mailbox,
-            alpha_mode: wgpu::CompositeAlphaMode::PreMultiplied,
-        };
-
-        let (config, reused) = build_surface_config(size, true, Some(defaults), None)
-            .expect("preferred defaults should build a surface config");
-
-        assert!(reused);
-        assert_eq!(config.width, 800);
-        assert_eq!(config.height, 600);
-        assert_eq!(config.format, defaults.format);
-        assert_eq!(config.present_mode, defaults.present_mode);
-        assert_eq!(config.alpha_mode, defaults.alpha_mode);
-    }
-
-    #[test]
-    fn build_surface_config_uses_capabilities_when_defaults_absent() {
-        let size = winit::dpi::PhysicalSize::new(640, 480);
-        let capabilities = wgpu::SurfaceCapabilities {
-            formats: vec![
-                wgpu::TextureFormat::Bgra8UnormSrgb,
-                wgpu::TextureFormat::Bgra8Unorm,
-            ],
-            present_modes: vec![wgpu::PresentMode::Fifo, wgpu::PresentMode::AutoVsync],
-            alpha_modes: vec![
-                wgpu::CompositeAlphaMode::Opaque,
-                wgpu::CompositeAlphaMode::PostMultiplied,
-            ],
-            usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        };
-
-        let (config, reused) = build_surface_config(size, true, None, Some(&capabilities))
-            .expect("capabilities should build a surface config");
-
-        assert!(!reused);
-        assert_eq!(config.width, 640);
-        assert_eq!(config.height, 480);
-        assert_eq!(config.format, wgpu::TextureFormat::Bgra8Unorm);
-        assert_eq!(config.present_mode, wgpu::PresentMode::Fifo);
-        assert_eq!(config.alpha_mode, wgpu::CompositeAlphaMode::PostMultiplied);
-    }
-
-    #[test]
-    fn gpu_framebuffer_matches_cpu_for_emoji_and_shade_transcript() {
-        assert_gpu_framebuffer_matches_cpu(16, 4, EMOJI_AND_SHADE_TRANSCRIPT, |terminal, idx| {
-            if idx == EMOJI_AND_SHADE_TRANSCRIPT.len() - 1 {
-                assert_eq!(terminal.grid.cell_grapheme_at(0, 7), Some("❤️"));
-                assert_eq!(terminal.grid.cell_grapheme_at(0, 10), Some("👨‍💻"));
-            }
-        });
-    }
-
-    #[test]
-    fn gpu_framebuffer_matches_cpu_for_generic_emoji_probe() {
-        let chunks: &[&[u8]] = &[
-            "A🪸B A🫠B A🫡B\r\n".as_bytes(),
-            "A🩷B A😀B A❤️B\r\n".as_bytes(),
-            "A👨‍💻B A🇺🇸B A👍🏻B A1️⃣B".as_bytes(),
-        ];
-
-        assert_gpu_framebuffer_matches_cpu(32, 4, chunks, |terminal, idx| {
-            if idx == chunks.len() - 1 {
-                assert_eq!(terminal.grid.cell_char(0, 3), 'B');
-                assert_eq!(terminal.grid.cell_char(1, 3), 'B');
-                assert_eq!(terminal.grid.cell_char(2, 3), 'B');
-                assert_eq!(terminal.grid.cell_grapheme_at(1, 11), Some("❤️"));
-                assert_eq!(terminal.grid.cell_grapheme_at(2, 1), Some("👨‍💻"));
-                assert_eq!(terminal.grid.cell_grapheme_at(2, 6), Some("🇺🇸"));
-                assert_eq!(terminal.grid.cell_grapheme_at(2, 11), Some("👍🏻"));
-                assert_eq!(terminal.grid.cell_grapheme_at(2, 16), Some("1️⃣"));
-            }
-        });
-    }
-
-    #[test]
-    fn gpu_framebuffer_matches_cpu_for_jcode_like_glyph_probe() {
-        let chunks: &[&[u8]] = &[
-            "⟨client⟩\r\n".as_bytes(),
-            "Ancient Coral 🪸\r\n".as_bytes(),
-            "● an  ● or  ● oa  ● cu  ● cp  ● ge(oauth)  ○ ag\r\n".as_bytes(),
-            "⠼ connecting… 3.6s · websocket/persistent-fresh 󰌘".as_bytes(),
-        ];
-
-        assert_gpu_framebuffer_matches_cpu(64, 6, chunks, |terminal, idx| {
-            if idx == chunks.len() - 1 {
-                assert_eq!(terminal.grid.cell_char(1, 14), '🪸');
-                assert_eq!(terminal.grid.cell_char(3, 0), '⠼');
-                assert_eq!(terminal.grid.cell_char(3, 48), '󰌘');
-            }
-        });
-    }
-
-    #[test]
-    fn gpu_framebuffer_matches_cpu_for_generic_emoji_probe_at_high_dpi() {
-        let chunks: &[&[u8]] = &[
-            "A🪸B A🫠B A🫡B\r\n".as_bytes(),
-            "A🩷B A😀B A❤️B\r\n".as_bytes(),
-            "A👨‍💻B A🇺🇸B A👍🏻B A1️⃣B".as_bytes(),
-        ];
-
-        for dpi in [144u32, 217] {
-            assert_gpu_framebuffer_matches_cpu_with_dpi(32, 4, dpi, chunks, |terminal, idx| {
-                if idx == chunks.len() - 1 {
-                    assert_eq!(terminal.grid.cell_char(0, 3), 'B');
-                    assert_eq!(terminal.grid.cell_char(1, 3), 'B');
-                    assert_eq!(terminal.grid.cell_char(2, 3), 'B');
-                    assert_eq!(terminal.grid.cell_grapheme_at(1, 11), Some("❤️"));
-                    assert_eq!(terminal.grid.cell_grapheme_at(2, 1), Some("👨‍💻"));
-                    assert_eq!(terminal.grid.cell_grapheme_at(2, 6), Some("🇺🇸"));
-                    assert_eq!(terminal.grid.cell_grapheme_at(2, 11), Some("👍🏻"));
-                    assert_eq!(terminal.grid.cell_grapheme_at(2, 16), Some("1️⃣"));
-                }
-            });
-        }
-    }
-
-    #[test]
-    fn gpu_framebuffer_matches_cpu_for_digit_probe_at_high_dpi() {
-        let chunks: &[&[u8]] = &[
-            "0123456789\r\n".as_bytes(),
-            "9876543210\r\n".as_bytes(),
-            "1111111111 0000000000".as_bytes(),
-        ];
-
-        for dpi in [144u32, 217] {
-            assert_gpu_framebuffer_matches_cpu_with_dpi(24, 4, dpi, chunks, |_terminal, _idx| {});
-        }
-    }
-
-    #[test]
-    fn gpu_framebuffer_matches_cpu_for_selection_highlight() {
-        let config = AppConfig::default();
-        let mut atlas =
-            GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, 96)
-                .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, 96))
-                .expect("should load font atlas for GPU framebuffer selection parity");
-        let mut terminal = Terminal::new(12, 2);
-        let mut cpu = OffscreenRenderer::new(12, 2, &atlas);
-
-        terminal.process(b"select me\r\nsecond row");
-        terminal.grid.selection = Some(crate::grid::Selection {
-            start_col: 0,
-            start_row: 0,
-            end_col: 5,
-            end_row: 0,
-        });
-
-        cpu.reset();
-        cpu.render(&mut terminal, &mut atlas, &config);
-        let gpu = render_like_gpu(&mut terminal, &mut atlas, &config);
-
-        assert_eq!(
-            gpu, cpu.pixels,
-            "GPU framebuffer should match CPU output for a visible selection highlight"
-        );
-    }
-
-    #[test]
-    fn gpu_framebuffer_matches_cpu_for_incremental_typing() {
-        let config = AppConfig::default();
-        let mut atlas =
-            GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, 96)
-                .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, 96))
-                .expect("should load font atlas for GPU incremental typing parity");
-        let mut terminal = Terminal::new(32, 2);
-        let mut cpu = OffscreenRenderer::new(32, 2, &atlas);
-
-        terminal.process(b"\x1b[38;5;10m>\x1b[0m ");
-        cpu.render(&mut terminal, &mut atlas, &config);
-
-        for &byte in b"echo hello world" {
-            terminal.process(&[byte]);
-            cpu.reset();
-            cpu.render(&mut terminal, &mut atlas, &config);
-            let gpu = render_like_gpu(&mut terminal, &mut atlas, &config);
-            assert_eq!(
-                gpu, cpu.pixels,
-                "GPU framebuffer should match CPU output after typing byte {byte:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn gpu_framebuffer_matches_cpu_for_line_repaint() {
-        let config = AppConfig::default();
-        let mut atlas =
-            GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, 96)
-                .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, 96))
-                .expect("should load font atlas for GPU line repaint parity");
-        let mut terminal = Terminal::new(32, 2);
-        let mut cpu = OffscreenRenderer::new(32, 2, &atlas);
-
-        terminal.process(b"\x1b[38;5;10m>\x1b[0m build");
-        cpu.render(&mut terminal, &mut atlas, &config);
-
-        terminal.process(b"\r\x1b[2K\x1b[38;5;196merror:\x1b[0m failed");
-        cpu.reset();
-        cpu.render(&mut terminal, &mut atlas, &config);
-        let gpu = render_like_gpu(&mut terminal, &mut atlas, &config);
-
-        assert_eq!(
-            gpu, cpu.pixels,
-            "GPU framebuffer should match CPU output after a line repaint"
-        );
-    }
-
-    #[test]
-    fn gpu_framebuffer_matches_cpu_for_resize_driven_layout_change() {
-        let config = AppConfig::default();
-        let mut atlas =
-            GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, 96)
-                .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, 96))
-                .expect("should load font atlas for GPU resize parity");
-        let mut terminal = Terminal::new(8, 2);
-        let mut cpu = OffscreenRenderer::new(8, 2, &atlas);
-
-        terminal.process(b"alpha\r\nbeta gamma");
-        terminal.resize(5, 3);
-        terminal.process(b"\x1b[2J\x1b[H123\r\n45");
-        terminal.cursor_visible = false;
-
-        cpu.resize_pixels(
-            terminal.cols as usize * atlas.cell_width,
-            terminal.rows as usize * atlas.cell_height,
-        );
-        cpu.render(&mut terminal, &mut atlas, &config);
-        let gpu = render_like_gpu(&mut terminal, &mut atlas, &config);
-
-        assert_eq!(
-            gpu, cpu.pixels,
-            "GPU framebuffer should match CPU output after a resize-driven layout change"
-        );
-    }
-
-    #[test]
-    fn gpu_framebuffer_matches_cpu_for_full_screen_repaint() {
-        let config = AppConfig::default();
-        let mut atlas =
-            GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, 96)
-                .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, 96))
-                .expect("should load font atlas for GPU full-screen repaint parity");
-        let mut terminal = Terminal::new(32, 6);
-        let mut cpu = OffscreenRenderer::new(32, 6, &atlas);
-
-        terminal.process(
-            b"\x1b[?1049h\
-              one\r\n\
-              two\r\n\
-              three\r\n\
-              four\r\n\
-              five\r\n",
-        );
-        cpu.render(&mut terminal, &mut atlas, &config);
-
-        terminal.process(
-            b"\x1b[2J\x1b[H\
-              \x1b[38;5;39mstatus\x1b[0m\r\n\
-              alpha beta gamma\r\n\
-              delta epsilon\r\n\
-              zeta eta theta\r\n\
-              iota kappa\r\n",
-        );
-        cpu.reset();
-        cpu.render(&mut terminal, &mut atlas, &config);
-        let gpu = render_like_gpu(&mut terminal, &mut atlas, &config);
-
-        assert_eq!(
-            gpu, cpu.pixels,
-            "GPU framebuffer should match CPU output after a full-screen repaint"
-        );
-    }
-
-    #[test]
-    fn gpu_framebuffer_matches_cpu_for_scrollback_selection_interaction() {
-        let config = AppConfig::default();
-        let mut atlas =
-            GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, 96)
-                .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, 96))
-                .expect("should load font atlas for GPU scrollback selection parity");
-        let mut terminal = Terminal::new_with_scrollback(8, 2, 8);
-        let mut cpu = OffscreenRenderer::new(8, 2, &atlas);
-
-        terminal.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
-        terminal.grid.scroll_offset = 1;
-        terminal.grid.selection = Some(crate::grid::Selection {
-            start_col: 0,
-            start_row: 0,
-            end_col: 2,
-            end_row: 1,
-        });
-        terminal.cursor_visible = false;
-
-        cpu.reset();
-        cpu.render(&mut terminal, &mut atlas, &config);
-        let gpu = render_like_gpu(&mut terminal, &mut atlas, &config);
-
-        assert_eq!(
-            gpu, cpu.pixels,
-            "GPU framebuffer should match CPU output for scrollback + selection interaction"
-        );
-    }
-
-    #[test]
-    fn gpu_framebuffer_matches_cpu_for_cursor_styles() {
-        let config = AppConfig::default();
-        let mut atlas =
-            GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, 96)
-                .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, 96))
-                .expect("should load font atlas for GPU cursor-style parity");
-
-        for cursor_style in [
-            crate::terminal::CursorStyle::Bar,
-            crate::terminal::CursorStyle::Underline,
-        ] {
-            let mut terminal = Terminal::new(8, 2);
-            let mut cpu = OffscreenRenderer::new(8, 2, &atlas);
-            terminal.process(b"cursor");
-            terminal.cursor_style = cursor_style;
-
-            cpu.reset();
-            cpu.render(&mut terminal, &mut atlas, &config);
-            let gpu = render_like_gpu(&mut terminal, &mut atlas, &config);
-
-            assert_eq!(
-                gpu, cpu.pixels,
-                "GPU framebuffer should match CPU output for cursor style {:?}",
-                cursor_style
-            );
-        }
-    }
-
-    #[test]
-    fn gpu_fractional_scroll_framebuffer_shifts_rows_by_partial_cell_height() {
-        let config = AppConfig::default();
-        let mut atlas =
-            GlyphAtlas::with_family_dpi(&config.style.font_family, config.style.font_size, 96)
-                .or_else(|_| GlyphAtlas::new_with_dpi(config.style.font_size, 96))
-                .expect("should load font atlas for fractional scroll framebuffer test");
-        let mut terminal = Terminal::new_with_scrollback(2, 2, 8);
-        terminal.process(
-            b"\x1b[41m  \x1b[0m\r\n\
-              \x1b[42m  \x1b[0m\r\n\
-              \x1b[44m  \x1b[0m\r\n",
-        );
-
-        let width = terminal.cols as usize * atlas.cell_width;
-        let cell_h = atlas.cell_height;
-        assert!(cell_h >= 4, "expected at least 4 px cell height");
-
-        let integer_scroll = render_like_gpu_with_scroll(&mut terminal, &mut atlas, &config, 1.0);
-        let fractional_scroll =
-            render_like_gpu_with_scroll(&mut terminal, &mut atlas, &config, 0.25);
-        let baseline = render_like_gpu_with_scroll(&mut terminal, &mut atlas, &config, 0.0);
-
-        let x = atlas.cell_width + (atlas.cell_width / 2);
-
-        let top_color = sample_rgb(&integer_scroll, width, x, cell_h / 2);
-        let middle_color = sample_rgb(&integer_scroll, width, x, cell_h + cell_h / 2);
-        let bottom_color = sample_rgb(&baseline, width, x, cell_h + cell_h / 2);
-
-        assert_ne!(
-            top_color, middle_color,
-            "expected distinct older/current row colors"
-        );
-        assert_ne!(
-            middle_color, bottom_color,
-            "expected distinct current/newer row colors"
-        );
-
-        let mut runs: Vec<(u32, usize, usize)> = Vec::new();
-        for y in 0..(cell_h * 2) {
-            let color = sample_rgb(&fractional_scroll, width, x, y);
-            if let Some((run_color, _start, end)) = runs.last_mut()
-                && *run_color == color
-            {
-                *end = y + 1;
-            } else {
-                runs.push((color, y, y + 1));
-            }
-        }
-
-        assert_eq!(
-            runs.len(),
-            3,
-            "fractional scroll should produce exactly three visible color bands, got {runs:?}",
-        );
-        assert_eq!(
-            runs[0].0, top_color,
-            "top band should come from the older row"
-        );
-        assert_eq!(
-            runs[1].0, middle_color,
-            "middle band should come from the current row"
-        );
-        assert_eq!(
-            runs[2].0, bottom_color,
-            "bottom band should come from the newer row"
-        );
-        assert!(
-            runs.iter()
-                .all(|(_, start, end)| end.saturating_sub(*start) >= 2),
-            "each visible band should span at least two pixels: {runs:?}",
-        );
-    }
-
-    #[test]
-    fn gpu_framebuffer_matches_cpu_for_starship_prompt_transcript() {
-        assert_gpu_framebuffer_matches_cpu(80, 24, STARSHIP_PROMPT_TRANSCRIPT, |terminal, idx| {
-            if idx == STARSHIP_PROMPT_TRANSCRIPT.len() - 1 {
-                let row = (0..80)
-                    .filter_map(|col| match terminal.grid.cell_char(1, col) {
-                        ' ' | '\0' => None,
-                        ch => Some(ch),
-                    })
-                    .collect::<String>();
-                assert!(row.contains("jeremy"));
-            }
-        });
-    }
-
-    #[test]
-    fn gpu_framebuffer_matches_cpu_for_tui_help_image_transcript() {
-        assert_gpu_framebuffer_matches_cpu(
-            32,
-            8,
-            TUI_HELP_WITH_IMAGE_TRANSCRIPT,
-            |terminal, idx| {
-                if idx == 2 {
-                    assert_eq!(terminal.kitty_placements().len(), 1);
-                }
-                if idx == TUI_HELP_WITH_IMAGE_TRANSCRIPT.len() - 1 {
-                    assert!(terminal.kitty_placements().is_empty());
-                    assert!(
-                        terminal.kitty_image(5).is_some(),
-                        "image metadata should still exist even after the visible placement is cleared"
-                    );
-                }
-            },
-        );
-    }
-}
+mod tests;

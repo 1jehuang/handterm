@@ -3,7 +3,7 @@ name = "handterm"
 version = "0.1.0"
 edition = "2024"
 build = "build.rs"
-description = "Wayland-native terminal focused on low latency"
+description = "Cross-platform terminal emulator (Wayland and macOS/Metal) focused on low latency and resource efficiency"
 license = "MIT"
 repository = "https://github.com/1jehuang/handterm"
 
@@ -11,51 +11,84 @@ repository = "https://github.com/1jehuang/handterm"
 members = [
     ".",
     "handterm-common",
-    "handterm-server",
-    "handterm-client",
-    "handterm-client-cpu",
-    "handterm-client-gpu",
 ]
 resolver = "2"
 
+[workspace.dependencies]
+anyhow = "1.0.103"
+serde = { version = "1.0.217", features = ["derive"] }
+bincode = "1.3.3"
+unicode-width = "0.2"
+unicode-segmentation = "1.12.0"
+
 [dependencies]
-anyhow = "1.0.95"
+anyhow = { workspace = true }
 clap = { version = "4.5.28", features = ["derive"] }
 dirs = "6.0.0"
 freetype-rs = { version = "0.38", optional = true }
 fontconfig = { version = "0.7", optional = true }
 handterm-common = { path = "handterm-common" }
-nix = { version = "0.30.1", features = ["term", "process", "signal", "fs", "poll"] }
-serde = { version = "1.0.217", features = ["derive"] }
+nix = { version = "0.30.1", features = ["term", "process", "fs", "poll", "signal"] }
+serde = { workspace = true }
 serde_json = "1.0"
 softbuffer = { version = "0.4.6", optional = true }
 toml = "0.8.20"
-unicode-width = "0.2"
-unicode-segmentation = "1.12.0"
+unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }
 rustybuzz = { version = "0.20", optional = true }
 wgpu = { version = "28.0.0", optional = true }
 bytemuck = { version = "1.21", features = ["derive"], optional = true }
 pollster = { version = "0.4", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 winit = { version = "0.30.9", default-features = false, features = ["wayland", "rwh_06", "wayland-dlopen"] }
-bincode = "1.3.3"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+winit = { version = "0.30.9", default-features = false, features = ["rwh_06"] }
 
 [features]
-default = ["cpu", "gpu", "local-fonts", "ligatures", "standalone", "daemon-client", "daemon-server", "cli"]
+default = ["cpu", "gpu", "local-fonts", "ligatures", "standalone", "cli"]
 cpu = ["dep:softbuffer"]
 gpu = ["dep:wgpu", "dep:bytemuck", "dep:pollster"]
 local-fonts = ["dep:freetype-rs", "dep:fontconfig"]
 ligatures = ["dep:rustybuzz", "local-fonts"]
 standalone = []
-daemon-client = []
-daemon-server = []
-cli = []
+cli = ["standalone"]
+
+# The binary entry point requires the CLI (src/main.rs calls handterm::run_cli),
+# so skip building it for feature combos without `cli`.
+[[bin]]
+name = "handterm"
+path = "src/main.rs"
+required-features = ["cli"]
 
 [dev-dependencies]
 assert_cmd = "2.0.16"
 predicates = "3.1.3"
 tempfile = "3.15.0"
 
+[[example]]
+name = "render_gamut"
+required-features = ["local-fonts"]
+
 [profile.release]
 lto = true
 strip = true
 codegen-units = 1
+
+# Fast iteration profile for the optimization swarm: optimized enough to be
+# representative for hot-path microbenchmarks, but builds far faster than the
+# full LTO release profile. Final benchmark gating still uses `--release`.
+[profile.quick]
+inherits = "release"
+lto = false
+codegen-units = 16
+strip = false
+
+# Released wayland-scanner versions still resolve a vulnerable quick-xml.
+# This local patch is the published 0.31.8 source with its quick-xml requirement
+# raised to 0.41 and the minimal parser API adaptation from upstream security
+# commit d07c4f91 for RUSTSEC-2026-0194 and RUSTSEC-2026-0195. Remove it once a
+# compatible crates.io release contains that fix.
+[patch.crates-io]
+wayland-scanner = { path = "vendor/wayland-scanner" }

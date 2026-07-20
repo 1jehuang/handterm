@@ -1,0 +1,6 @@
+*.json
+*.raw.txt
+*.png
+*.ppm
+compare_live.txt
+!baseline.json

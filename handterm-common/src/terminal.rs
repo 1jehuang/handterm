@@ -545,7 +545,9 @@ impl Terminal {
                                     self.grid.write_bytes(&data[run_start..i]);
                                 }
                                 i += 1;
-                                self.handle_action(next_action);
+                                if !matches!(next_action, Action::Nop) {
+                                    self.handle_action(next_action);
+                                }
                                 break;
                             }
                         }
@@ -559,7 +561,9 @@ impl Terminal {
                     }
                 }
                 _ => {
-                    self.handle_action(action);
+                    if !matches!(action, Action::Nop) {
+                        self.handle_action(action);
+                    }
                 }
             }
         }
@@ -572,6 +576,23 @@ impl Terminal {
             self.charset_g1
         };
         cs == Charset::DecSpecialGraphics
+    }
+
+    /// Copy the parser's current CSI params into a fixed-size stack array.
+    ///
+    /// The private-mode set/reset handlers (`CSI ? Pm h/l`) need to iterate the
+    /// params while also mutating `self`, which conflicts with borrowing the
+    /// parser's slice. Copying onto the stack avoids both the borrow conflict
+    /// and the per-call heap allocation that `params().to_vec()` incurred on
+    /// this steady-state path (mode toggles like `?25h`/`?25l` are extremely
+    /// common in interactive output).
+    #[inline]
+    fn copy_params(&self) -> ([u16; crate::parser::MAX_PARAMS], usize) {
+        let params = self.parser.params();
+        let mut out = [0u16; crate::parser::MAX_PARAMS];
+        let n = params.len();
+        out[..n].copy_from_slice(params);
+        (out, n)
     }
 
     fn write_bytes_translated(&mut self, bytes: &[u8]) {
@@ -745,8 +766,8 @@ impl Terminal {
             }
             // Private mode set
             (b'?', b'h') => {
-                let params: Vec<u16> = self.parser.params().to_vec();
-                for param in &params {
+                let (params, n) = self.copy_params();
+                for param in &params[..n] {
                     match param {
                         1 => self.application_cursor_keys = true,
                         7 => self.grid.autowrap = true,
@@ -772,8 +793,8 @@ impl Terminal {
             }
             // Private mode reset
             (b'?', b'l') => {
-                let params: Vec<u16> = self.parser.params().to_vec();
-                for param in &params {
+                let (params, n) = self.copy_params();
+                for param in &params[..n] {
                     match param {
                         1 => self.application_cursor_keys = false,
                         7 => self.grid.autowrap = false,
@@ -864,49 +885,43 @@ impl Terminal {
                 27 => self.grid.set_inverse(false),
                 29 => self.grid.set_strikethrough(false),
                 30..=37 => self.grid.set_fg((params[i] - 30) as u32),
-                38 => {
-                    if i + 1 < params.len() {
-                        if params[i + 1] == 5 && i + 2 < params.len() {
-                            self.grid.set_fg(params[i + 2] as u32);
-                            i += 2;
-                        } else if params[i + 1] == 2 && i + 4 < params.len() {
-                            let r = params[i + 2] as u8;
-                            let g = params[i + 3] as u8;
-                            let b = params[i + 4] as u8;
-                            self.grid.set_fg_rgb(r, g, b);
-                            i += 4;
-                        }
+                38 if i + 1 < params.len() => {
+                    if params[i + 1] == 5 && i + 2 < params.len() {
+                        self.grid.set_fg(params[i + 2] as u32);
+                        i += 2;
+                    } else if params[i + 1] == 2 && i + 4 < params.len() {
+                        let r = params[i + 2] as u8;
+                        let g = params[i + 3] as u8;
+                        let b = params[i + 4] as u8;
+                        self.grid.set_fg_rgb(r, g, b);
+                        i += 4;
                     }
                 }
                 39 => self.grid.set_fg(0),
                 40..=47 => self.grid.set_bg((params[i] - 40) as u32),
-                48 => {
-                    if i + 1 < params.len() {
-                        if params[i + 1] == 5 && i + 2 < params.len() {
-                            self.grid.set_bg(params[i + 2] as u32);
-                            i += 2;
-                        } else if params[i + 1] == 2 && i + 4 < params.len() {
-                            let r = params[i + 2] as u8;
-                            let g = params[i + 3] as u8;
-                            let b = params[i + 4] as u8;
-                            self.grid.set_bg_rgb(r, g, b);
-                            i += 4;
-                        }
+                48 if i + 1 < params.len() => {
+                    if params[i + 1] == 5 && i + 2 < params.len() {
+                        self.grid.set_bg(params[i + 2] as u32);
+                        i += 2;
+                    } else if params[i + 1] == 2 && i + 4 < params.len() {
+                        let r = params[i + 2] as u8;
+                        let g = params[i + 3] as u8;
+                        let b = params[i + 4] as u8;
+                        self.grid.set_bg_rgb(r, g, b);
+                        i += 4;
                     }
                 }
                 49 => self.grid.set_bg(0),
-                58 => {
-                    if i + 1 < params.len() {
-                        if params[i + 1] == 5 && i + 2 < params.len() {
-                            self.grid.set_underline_color(params[i + 2] as u32);
-                            i += 2;
-                        } else if params[i + 1] == 2 && i + 4 < params.len() {
-                            let r = params[i + 2] as u8;
-                            let g = params[i + 3] as u8;
-                            let b = params[i + 4] as u8;
-                            self.grid.set_underline_color_rgb(r, g, b);
-                            i += 4;
-                        }
+                58 if i + 1 < params.len() => {
+                    if params[i + 1] == 5 && i + 2 < params.len() {
+                        self.grid.set_underline_color(params[i + 2] as u32);
+                        i += 2;
+                    } else if params[i + 1] == 2 && i + 4 < params.len() {
+                        let r = params[i + 2] as u8;
+                        let g = params[i + 3] as u8;
+                        let b = params[i + 4] as u8;
+                        self.grid.set_underline_color_rgb(r, g, b);
+                        i += 4;
                     }
                 }
                 59 => self.grid.reset_underline_color(),
@@ -956,17 +971,13 @@ impl Terminal {
                     }
                 }
                 b"1" => {}
-                b"10" => {
-                    if payload == b"?" {
-                        self.response_buf
-                            .extend_from_slice(b"\x1b]10;rgb:cd/d6/f4\x1b\\");
-                    }
+                b"10" if payload == b"?" => {
+                    self.response_buf
+                        .extend_from_slice(b"\x1b]10;rgb:cd/d6/f4\x1b\\");
                 }
-                b"11" => {
-                    if payload == b"?" {
-                        self.response_buf
-                            .extend_from_slice(b"\x1b]11;rgb:00/00/00\x1b\\");
-                    }
+                b"11" if payload == b"?" => {
+                    self.response_buf
+                        .extend_from_slice(b"\x1b]11;rgb:00/00/00\x1b\\");
                 }
                 b"52" => {
                     if let Some(semi2) = payload.iter().position(|&b| b == b';') {
@@ -1551,6 +1562,27 @@ mod tests {
     }
 
     #[test]
+    fn combined_private_mode_set_applies_all_params() {
+        // A single CSI ? Pm h with several params must toggle every mode,
+        // exercising the no-alloc stack `copy_params` path with n > 1.
+        let mut t = Terminal::new(80, 24);
+        t.process(b"\x1b[?25l"); // hide cursor first so we can observe it flip back
+        assert!(!t.cursor_visible);
+
+        t.process(b"\x1b[?25;7;1;2004h");
+        assert!(t.cursor_visible, "DECTCEM show");
+        assert!(t.grid.autowrap, "autowrap on");
+        assert!(t.application_cursor_keys, "app cursor keys on");
+        assert!(t.bracketed_paste_mode(), "bracketed paste on");
+
+        t.process(b"\x1b[?25;7;1;2004l");
+        assert!(!t.cursor_visible);
+        assert!(!t.grid.autowrap);
+        assert!(!t.application_cursor_keys);
+        assert!(!t.bracketed_paste_mode());
+    }
+
+    #[test]
     fn fish_startup_queries_no_leak() {
         let mut t = Terminal::new(80, 24);
 
@@ -1835,7 +1867,10 @@ mod tests {
         assert_eq!(
             t.drain_control_strings(),
             vec![
-                ControlStringEvent::Osc(OscEvent::Raw(b"0;Title".to_vec())),
+                ControlStringEvent::Osc(OscEvent::Title {
+                    raw: b"0;Title".to_vec(),
+                    title: "Title".to_string(),
+                }),
                 ControlStringEvent::Dcs(DcsEvent::Generic(b"+q12".to_vec())),
                 ControlStringEvent::Apc(ApcEvent::KittyGraphics(b"i=7,a=d".to_vec())),
             ]

@@ -82,16 +82,68 @@ pub struct WindowConfig {
     pub rows: u16,
     pub remember_window_size: bool,
     pub confirm_os_window_close: bool,
+    /// Draw the OS titlebar/window chrome (close/minimize/zoom buttons).
+    /// Off by default for a clean, tiling-WM-friendly look.
+    pub decorations: bool,
+    /// Blank padding between the window edge and the cell grid, in points
+    /// (scaled by display DPI). Keeps the first row/column clear of rounded
+    /// window corners. Matches ghostty's window-padding default of 2.
+    pub padding: f32,
+    /// Where a new window spawns: "center" (centered on the primary
+    /// monitor, extra windows cascade), "auto" (let the OS place it), or an
+    /// explicit `[x, y]` top-left offset from the primary monitor origin in
+    /// physical pixels.
+    pub position: WindowPosition,
+}
+
+/// Initial window placement policy. Serialized as either a preset string
+/// (`"center"`, `"auto"`) or a two-element `[x, y]` array of physical pixel
+/// offsets from the primary monitor origin.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum WindowPosition {
+    Preset(WindowPositionPreset),
+    Fixed(i32, i32),
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WindowPositionPreset {
+    /// Let the OS choose the spawn position (winit default behavior).
+    Auto,
+    /// Center the window on the primary monitor; additional windows are
+    /// offset slightly so they do not stack exactly on top of each other.
+    Center,
+}
+
+impl Default for WindowPosition {
+    fn default() -> Self {
+        Self::Preset(WindowPositionPreset::Center)
+    }
 }
 
 impl Default for WindowConfig {
     fn default() -> Self {
         Self {
-            columns: 80,
-            rows: 24,
+            // A comfortable working size: wide enough for split panes and
+            // long log lines, tall enough for real work, while still leaving
+            // generous margins when centered on a 1080p-and-up display.
+            columns: 120,
+            rows: 32,
             remember_window_size: false,
             confirm_os_window_close: false,
+            decorations: false,
+            padding: 2.0,
+            position: WindowPosition::default(),
         }
+    }
+}
+
+impl WindowConfig {
+    /// Padding in physical pixels for a display of the given DPI
+    /// (96 = 1x scale).
+    pub fn padding_px(&self, dpi: u32) -> u32 {
+        (self.padding.max(0.0) * dpi as f32 / 96.0).round() as u32
     }
 }
 
@@ -170,8 +222,12 @@ mod tests {
         assert_eq!(cfg.style.font_size, 11.0);
         assert_eq!(cfg.style.background_opacity, 0.9);
         assert_eq!(cfg.style.background_blur, 20);
-        assert_eq!(cfg.window.columns, 80);
-        assert_eq!(cfg.window.rows, 24);
+        assert_eq!(cfg.window.columns, 120);
+        assert_eq!(cfg.window.rows, 32);
+        assert_eq!(
+            cfg.window.position,
+            WindowPosition::Preset(WindowPositionPreset::Center)
+        );
         assert_eq!(cfg.scrollback.lines, 10_000);
         assert!(cfg.scrollback.smooth);
         assert_eq!(cfg.scrollback.smooth_speed, 3.0);
@@ -192,10 +248,68 @@ mod tests {
         assert_eq!(cfg.style.background.to_string(), "#111111");
         assert_eq!(cfg.style.foreground.to_string(), "#cdd6f4");
         assert_eq!(cfg.window.columns, 100);
-        assert_eq!(cfg.window.rows, 24);
+        assert_eq!(cfg.window.rows, 32);
         assert!(cfg.scrollback.smooth);
         assert_eq!(cfg.scrollback.smooth_speed, 3.0);
         assert!(cfg.scrollback.scrollbar);
+    }
+
+    #[test]
+    fn parses_window_position_presets_and_fixed_offsets() {
+        let center: AppConfig = toml::from_str(
+            r##"
+            [window]
+            position = "center"
+        "##,
+        )
+        .expect("center should parse");
+        assert_eq!(
+            center.window.position,
+            WindowPosition::Preset(WindowPositionPreset::Center)
+        );
+
+        let auto: AppConfig = toml::from_str(
+            r##"
+            [window]
+            position = "auto"
+        "##,
+        )
+        .expect("auto should parse");
+        assert_eq!(
+            auto.window.position,
+            WindowPosition::Preset(WindowPositionPreset::Auto)
+        );
+
+        let fixed: AppConfig = toml::from_str(
+            r##"
+            [window]
+            position = [100, -50]
+        "##,
+        )
+        .expect("fixed offsets should parse");
+        assert_eq!(fixed.window.position, WindowPosition::Fixed(100, -50));
+    }
+
+    #[test]
+    fn rejects_malformed_window_position() {
+        assert!(
+            toml::from_str::<AppConfig>(
+                r##"
+            [window]
+            position = "upper-left"
+        "##,
+            )
+            .is_err()
+        );
+        assert!(
+            toml::from_str::<AppConfig>(
+                r##"
+            [window]
+            position = [1, 2, 3]
+        "##,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -246,5 +360,190 @@ mod tests {
         let content = fs::read_to_string(&path).expect("config should be readable");
         assert!(content.contains("JetBrainsMono Nerd Font Light"));
         assert!(content.contains("background = \"#000000\""));
+    }
+
+    #[test]
+    fn save_default_if_missing_does_not_overwrite_existing_config() {
+        let temp = repo_local_tempdir();
+        let path = temp.path().join("config.toml");
+        fs::write(&path, "# user config\n").expect("seed file should write");
+
+        let written = AppConfig::save_default_if_missing(Some(&path)).expect("should succeed");
+        assert_eq!(written, path);
+        assert_eq!(
+            fs::read_to_string(&path).expect("file should be readable"),
+            "# user config\n",
+            "an existing config must never be clobbered"
+        );
+    }
+
+    #[test]
+    fn load_falls_back_to_defaults_when_file_is_missing() {
+        let temp = repo_local_tempdir();
+        let path = temp.path().join("does-not-exist.toml");
+        let cfg = AppConfig::load(Some(&path)).expect("missing config should not be an error");
+        assert_eq!(cfg, AppConfig::default());
+    }
+
+    #[test]
+    fn load_parses_empty_file_as_defaults() {
+        let temp = repo_local_tempdir();
+        let path = temp.path().join("config.toml");
+        fs::write(&path, "").expect("empty file should write");
+        let cfg = AppConfig::load(Some(&path)).expect("empty config should parse");
+        assert_eq!(cfg, AppConfig::default());
+    }
+
+    #[test]
+    fn load_reports_malformed_toml_with_path_context() {
+        let temp = repo_local_tempdir();
+        let path = temp.path().join("config.toml");
+        fs::write(&path, "[style\nbackground = ").expect("file should write");
+
+        let err = AppConfig::load(Some(&path)).expect_err("malformed toml must fail");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(&path.display().to_string()),
+            "error should name the offending file, got: {message}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_wrong_types() {
+        let temp = repo_local_tempdir();
+        for (name, raw) in [
+            ("string columns", "[window]\ncolumns = \"eighty\"\n"),
+            ("negative rows", "[window]\nrows = -1\n"),
+            ("non-color background", "[style]\nbackground = \"red\"\n"),
+            ("string bool", "[scrollback]\nsmooth = \"yes\"\n"),
+            ("array font size", "[style]\nfont_size = [11.0]\n"),
+        ] {
+            let path = temp.path().join("config.toml");
+            fs::write(&path, raw).expect("file should write");
+            assert!(
+                AppConfig::load(Some(&path)).is_err(),
+                "{name} should fail to parse"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_keys_are_tolerated() {
+        // None of the config structs opt into deny_unknown_fields, so a config
+        // written for a newer handterm (or with a typo) still loads with the
+        // recognized values applied. This pins that forward-compat behavior.
+        let raw = r##"
+            future_top_level_key = true
+
+            [style]
+            background = "#222222"
+            some_future_style = "fancy"
+
+            [window]
+            columnz = 999
+        "##;
+
+        let cfg: AppConfig = toml::from_str(raw).expect("unknown keys should not fail parsing");
+        assert_eq!(cfg.style.background.to_string(), "#222222");
+        // The misspelled key is ignored; the real field keeps its default.
+        assert_eq!(cfg.window.columns, 120);
+    }
+
+    #[test]
+    fn every_documented_field_roundtrips_through_toml() {
+        // Use non-default values everywhere so a field that silently fails to
+        // serialize or deserialize cannot hide behind its default.
+        let original = AppConfig {
+            style: StyleConfig {
+                background: HexColor::new(0x12, 0x34, 0x56),
+                foreground: HexColor::new(0x65, 0x43, 0x21),
+                cursor: HexColor::new(0xab, 0xcd, 0xef),
+                background_opacity: 0.5,
+                background_blur: 7,
+                font_family: "Test Mono".to_string(),
+                font_size: 13.5,
+            },
+            window: WindowConfig {
+                columns: 132,
+                rows: 50,
+                remember_window_size: true,
+                confirm_os_window_close: true,
+                decorations: true,
+                padding: 4.5,
+                position: WindowPosition::Fixed(120, 60),
+            },
+            performance: PerformanceConfig {
+                repaint_delay_ms: 8,
+                input_delay_ms: 2,
+                sync_to_monitor: false,
+            },
+            scrollback: ScrollbackConfig {
+                lines: 42,
+                smooth: false,
+                smooth_speed: 1.5,
+                scrollbar: false,
+            },
+        };
+        let default = AppConfig::default();
+        assert_ne!(original.style, default.style);
+        assert_ne!(original.window, default.window);
+        assert_ne!(original.performance, default.performance);
+        assert_ne!(original.scrollback, default.scrollback);
+
+        let serialized = toml::to_string_pretty(&original).expect("config should serialize");
+        let parsed: AppConfig = toml::from_str(&serialized).expect("config should re-parse");
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn full_config_roundtrips_through_load() {
+        // The same round-trip through the real file-based load path.
+        let temp = repo_local_tempdir();
+        let path = temp.path().join("config.toml");
+        let original = AppConfig {
+            window: WindowConfig {
+                columns: 100,
+                rows: 30,
+                ..WindowConfig::default()
+            },
+            ..AppConfig::default()
+        };
+        fs::write(
+            &path,
+            toml::to_string_pretty(&original).expect("config should serialize"),
+        )
+        .expect("config should write");
+
+        let loaded = AppConfig::load(Some(&path)).expect("config should load");
+        assert_eq!(loaded, original);
+    }
+
+    #[test]
+    fn padding_px_scales_with_dpi_and_clamps_negatives() {
+        let window = WindowConfig {
+            padding: 2.0,
+            ..WindowConfig::default()
+        };
+        assert_eq!(window.padding_px(96), 2, "96 dpi is 1x scale");
+        assert_eq!(window.padding_px(192), 4, "192 dpi is 2x scale");
+        assert_eq!(window.padding_px(144), 3, "fractional scale rounds");
+
+        let negative = WindowConfig {
+            padding: -5.0,
+            ..WindowConfig::default()
+        };
+        assert_eq!(
+            negative.padding_px(96),
+            0,
+            "negative padding must clamp to zero, not wrap"
+        );
+    }
+
+    #[test]
+    fn resolve_config_path_prefers_override() {
+        let override_path = Path::new("/tmp/custom-handterm.toml");
+        let resolved =
+            resolve_config_path(Some(override_path)).expect("override path should resolve");
+        assert_eq!(resolved, override_path);
     }
 }

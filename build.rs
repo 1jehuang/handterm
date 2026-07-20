@@ -2,7 +2,12 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/packed-refs");
     println!("cargo:rerun-if-env-changed=HANDTERM_GIT_COMMIT");
+
+    if let Some(reference) = current_git_reference() {
+        println!("cargo:rerun-if-changed=.git/{reference}");
+    }
 
     let git_commit = std::env::var("HANDTERM_GIT_COMMIT")
         .ok()
@@ -10,6 +15,12 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_string());
 
     println!("cargo:rustc-env=HANDTERM_GIT_COMMIT={git_commit}");
+}
+
+fn current_git_reference() -> Option<String> {
+    let head = std::fs::read_to_string(".git/HEAD").ok()?;
+    let reference = head.trim().strip_prefix("ref: ")?;
+    (!reference.is_empty()).then(|| reference.to_string())
 }
 
 fn detect_git_commit() -> Option<String> {

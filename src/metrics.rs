@@ -17,10 +17,14 @@ use crate::pty::PtyChild;
 #[cfg(feature = "cpu")]
 use crate::render::OffscreenRenderer;
 use crate::terminal::Terminal;
+// Only the cpu/gpu transcript-replay benches drive these workloads.
+#[cfg(any(feature = "cpu", feature = "gpu"))]
 use crate::workloads::{
-    EMOJI_AND_SHADE_TRANSCRIPT, PROMPT_PREFIX, STARSHIP_PROMPT_TRANSCRIPT,
-    TUI_HELP_WITH_IMAGE_TRANSCRIPT, TYPING_WORKLOAD,
+    EMOJI_AND_SHADE_TRANSCRIPT, STARSHIP_PROMPT_TRANSCRIPT, TUI_HELP_WITH_IMAGE_TRANSCRIPT,
 };
+// Only the cpu-feature render benchmark drives these workloads.
+#[cfg(feature = "cpu")]
+use crate::workloads::{PROMPT_PREFIX, TYPING_WORKLOAD};
 use anyhow::{Result, bail};
 use std::time::{Duration, Instant};
 
@@ -360,7 +364,6 @@ fn bench_gpu_frame_pipeline(cols: u16, rows: u16) -> (f64, f64, f64, f64, f64, f
                 base_fg: 0xffffff,
                 base_bg: 0x000000,
                 base_fg_f: [1.0, 1.0, 1.0, 1.0],
-                background_alpha: 1.0,
                 cell_w: 8.0,
                 cell_h: 16.0,
                 viewport_offset_y: 0.0,
@@ -486,7 +489,6 @@ fn bench_gpu_transcript_replay() -> (f64, f64, f64) {
         base_fg: 0xffffff,
         base_bg: 0x000000,
         base_fg_f: [1.0, 1.0, 1.0, 1.0],
-        background_alpha: 1.0,
         cell_w: 8.0,
         cell_h: 16.0,
         viewport_offset_y: 0.0,

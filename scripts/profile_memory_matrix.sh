@@ -5,12 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="${HANDTERM_PROFILE_OUT:-$ROOT/profile_out}"
 mkdir -p "$OUT_DIR"
 OUT_FILE="$OUT_DIR/memory_matrix.txt"
-SOCKET="${HANDTERM_PROFILE_SOCKET:-/tmp/handterm-profile.sock}"
-
 HANDTERM_BIN="$ROOT/target/release/handterm"
-CLIENT_CPU_BIN="$ROOT/target/release/handterm-client-cpu"
-CLIENT_GPU_BIN="$ROOT/target/release/handterm-client-gpu"
-SERVER_BIN="$ROOT/target/release/handterm-server"
 
 cargo build -q --release --workspace --manifest-path "$ROOT/Cargo.toml"
 
@@ -72,34 +67,10 @@ measure_window_cmd() {
   sleep 0.3
 }
 
-cleanup_server() {
-  if [[ -n "${SERVER_PID:-}" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
-    kill "$SERVER_PID" 2>/dev/null || true
-    wait "$SERVER_PID" 2>/dev/null || true
-  fi
-  rm -f "$SOCKET"
-}
-
 : > "$OUT_FILE"
 printf 'handterm memory matrix (%s)\n\n' "$(date --iso-8601=seconds)" | tee -a "$OUT_FILE"
 
 measure_window_cmd "standalone-gpu" "$HANDTERM_BIN" --standalone --backend gpu
 measure_window_cmd "standalone-cpu" "$HANDTERM_BIN" --standalone --backend cpu
-
-trap cleanup_server EXIT
-rm -f "$SOCKET"
-"$SERVER_BIN" --socket "$SOCKET" >/tmp/handterm-server-memory.log 2>&1 &
-SERVER_PID=$!
-for _ in $(seq 1 200); do
-  [[ -S "$SOCKET" ]] && break
-  sleep 0.01
-done
-if [[ ! -S "$SOCKET" ]]; then
-  echo "server socket did not appear" | tee -a "$OUT_FILE"
-  exit 1
-fi
-measure_pid "server-only" "$SERVER_PID"
-measure_window_cmd "daemon-client-gpu" "$CLIENT_GPU_BIN" --socket "$SOCKET"
-measure_window_cmd "daemon-client-cpu" "$CLIENT_CPU_BIN" --socket "$SOCKET"
 
 printf '\nresults saved to %s\n' "$OUT_FILE" | tee -a "$OUT_FILE"

@@ -3,6 +3,12 @@ set -euo pipefail
 
 BIN="${BIN:-./target/debug/handterm}"
 BACKEND="${BACKEND:-gpu}"
+
+if [[ "$(uname -s)" != "Linux" ]]; then
+  echo "SKIP: input dedupe integration requires a Linux Wayland session"
+  exit 0
+fi
+
 REAL_RUNTIME="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR must be set}"
 REAL_WAYLAND="${WAYLAND_DISPLAY:?WAYLAND_DISPLAY must be set}"
 TMPDIR="$(mktemp -d)"

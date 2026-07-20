@@ -1,8 +1,5 @@
 use crate::ipc::{IpcAction, Request, Response};
 use crate::terminal::Terminal;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use winit::event_loop::EventLoopProxy;
 
 pub fn handle_ipc_request(terminal: &mut Terminal, req: &Request) -> (Response, IpcAction) {
     let target_window = req
@@ -178,60 +175,5 @@ pub fn handle_ipc_request(terminal: &mut Terminal, req: &Request) -> (Response, 
             Response::err(format!("unknown command: {}", req.cmd)),
             IpcAction::None,
         ),
-    }
-}
-
-pub fn spawn_pty_watcher<E: Clone + Send + 'static>(
-    thread_name: &str,
-    pty_fd: i32,
-    ipc_fd: i32,
-    proxy: EventLoopProxy<E>,
-    event: E,
-    stop: Arc<AtomicBool>,
-) {
-    let thread_name = thread_name.to_string();
-    std::thread::Builder::new()
-        .name(thread_name)
-        .spawn(move || fd_watcher_thread(pty_fd, ipc_fd, proxy, event, stop))
-        .expect("failed to spawn pty watcher thread");
-}
-
-fn fd_watcher_thread<E: Clone + Send + 'static>(
-    primary_fd: i32,
-    secondary_fd: i32,
-    proxy: EventLoopProxy<E>,
-    event: E,
-    stop: Arc<AtomicBool>,
-) {
-    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
-    use std::os::fd::BorrowedFd;
-
-    let mut fds = Vec::with_capacity(2);
-    fds.push(PollFd::new(
-        unsafe { BorrowedFd::borrow_raw(primary_fd) },
-        PollFlags::POLLIN | PollFlags::POLLHUP,
-    ));
-    if secondary_fd >= 0 {
-        fds.push(PollFd::new(
-            unsafe { BorrowedFd::borrow_raw(secondary_fd) },
-            PollFlags::POLLIN,
-        ));
-    }
-
-    while !stop.load(Ordering::Relaxed) {
-        match poll(&mut fds, PollTimeout::from(100u16)) {
-            Ok(0) => continue,
-            Ok(_) => {
-                let _ = proxy.send_event(event.clone());
-                if fds[0]
-                    .revents()
-                    .is_some_and(|revents| revents.contains(PollFlags::POLLHUP))
-                {
-                    break;
-                }
-            }
-            Err(nix::errno::Errno::EINTR) => continue,
-            Err(_) => break,
-        }
     }
 }

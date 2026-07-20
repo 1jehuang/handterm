@@ -142,31 +142,27 @@ fn bytes_need_grapheme_clusters(bytes: &[u8]) -> bool {
                     return true;
                 }
             }
-            0xEF if i + 2 < bytes.len() => {
-                if bytes[i + 1] == 0xB8
-                    && (matches!(bytes[i + 2], 0x8E | 0x8F)
-                        || (0xA0..=0xAF).contains(&bytes[i + 2]))
-                {
+            0xEF if i + 2 < bytes.len()
+                && bytes[i + 1] == 0xB8
+                && (matches!(bytes[i + 2], 0x8E | 0x8F)
+                    || (0xA0..=0xAF).contains(&bytes[i + 2])) =>
+            {
+                return true;
+            }
+            0xF0 if i + 3 < bytes.len() && bytes[i + 1] == 0x9F => {
+                if bytes[i + 2] == 0x87 {
+                    return true;
+                }
+                if bytes[i + 2] == 0x8F && (0xBB..=0xBF).contains(&bytes[i + 3]) {
                     return true;
                 }
             }
-            0xF0 if i + 3 < bytes.len() => {
-                if bytes[i + 1] == 0x9F {
-                    if bytes[i + 2] == 0x87 {
-                        return true;
-                    }
-                    if bytes[i + 2] == 0x8F && (0xBB..=0xBF).contains(&bytes[i + 3]) {
-                        return true;
-                    }
-                }
-            }
-            0xF3 if i + 3 < bytes.len() => {
-                if bytes[i + 1] == 0xA0
-                    && bytes[i + 2] == 0x81
-                    && (0x81..=0xBF).contains(&bytes[i + 3])
-                {
-                    return true;
-                }
+            0xF3 if i + 3 < bytes.len()
+                && bytes[i + 1] == 0xA0
+                && bytes[i + 2] == 0x81
+                && (0x81..=0xBF).contains(&bytes[i + 3]) =>
+            {
+                return true;
             }
             _ => {}
         }
@@ -197,6 +193,12 @@ pub struct Grid {
     cursor_row: usize,
     cells: Vec<Cell>,
     graphemes: Vec<Option<Box<str>>>,
+    /// Latched once the grid (or its scrollback) has ever stored a real
+    /// multi-codepoint grapheme cluster. While this is `false` every entry in
+    /// `graphemes`/`scrollback_graphemes` is known to be `None`, so the hot
+    /// ASCII/BMP write and scroll paths can skip all `Option<Box<str>>`
+    /// maintenance (clears, clones, fills) entirely.
+    has_graphemes: bool,
     top_row: usize,
     current_fg: u32,
     current_bg: u32,
@@ -254,6 +256,7 @@ impl Grid {
             cursor_row: 0,
             cells: vec![Cell::BLANK; total_cells],
             graphemes: vec![None; total_cells],
+            has_graphemes: false,
             top_row: 0,
             current_fg: COLOR_DEFAULT,
             current_bg: COLOR_DEFAULT,
@@ -301,8 +304,10 @@ impl Grid {
             let dst_start = r * new_cols;
             new_cells[dst_start..dst_start + copy_cols]
                 .copy_from_slice(&self.cells[src_start..src_start + copy_cols]);
-            new_graphemes[dst_start..dst_start + copy_cols]
-                .clone_from_slice(&self.graphemes[src_start..src_start + copy_cols]);
+            if self.has_graphemes {
+                new_graphemes[dst_start..dst_start + copy_cols]
+                    .clone_from_slice(&self.graphemes[src_start..src_start + copy_cols]);
+            }
         }
 
         self.cells = new_cells;
@@ -434,11 +439,6 @@ impl Grid {
     }
 
     #[allow(dead_code)]
-    pub fn has_any_dirty(&self) -> bool {
-        self.all_dirty || self.dirty.iter().any(|&w| w != 0)
-    }
-
-    #[allow(dead_code)]
     pub fn dirty_cell_count(&self) -> usize {
         if self.all_dirty {
             return self.rows * self.cols;
@@ -480,6 +480,9 @@ impl Grid {
         }
         let idx = self.cell_index_at(row, col);
         self.cells[idx] = cell;
+        if grapheme.is_some() {
+            self.has_graphemes = true;
+        }
         self.graphemes[idx] = grapheme;
         self.mark_dirty(idx);
     }
@@ -536,6 +539,31 @@ impl Grid {
 
     pub fn scrollback_len(&self) -> usize {
         self.scrollback_len
+    }
+
+    /// Number of cells currently backed by the lazily-allocated scrollback
+    /// grapheme ring. Stays `0` for pure-text terminals; exposed for tests and
+    /// memory introspection.
+    #[allow(dead_code)]
+    pub fn scrollback_graphemes_capacity(&self) -> usize {
+        self.scrollback_graphemes.len()
+    }
+
+    /// Approximate heap bytes retained by the scrollback ring: the cell array
+    /// plus the (lazily allocated) parallel grapheme ring and any boxed cluster
+    /// strings it points at. For pure ASCII/BMP output the grapheme ring stays
+    /// empty, so this reports only the dense cell array.
+    #[allow(dead_code)]
+    pub fn scrollback_memory_bytes(&self) -> usize {
+        let cell_bytes = self.scrollback.capacity() * std::mem::size_of::<Cell>();
+        let ring_bytes =
+            self.scrollback_graphemes.capacity() * std::mem::size_of::<Option<Box<str>>>();
+        let string_bytes: usize = self
+            .scrollback_graphemes
+            .iter()
+            .filter_map(|g| g.as_ref().map(|s| s.len()))
+            .sum();
+        cell_bytes + ring_bytes + string_bytes
     }
 
     pub fn cell_at_scrollback_offset(&self, scroll_offset: usize, row: usize, col: usize) -> &Cell {
@@ -742,13 +770,27 @@ impl Grid {
         let run_len = run.len();
         let cols = self.cols;
         let rows = self.rows;
-        let fg = self.current_fg;
-        let bg = self.current_bg;
-        let attrs = self.current_attrs;
-        let ucol = self.current_underline_color;
-        let ustyle = self.current_underline_style;
-        let hlink = self.current_hyperlink_id;
         let is_full_scroll = self.scroll_top == 0 && self.scroll_bottom == rows;
+        // Build the style template once. Each cell in the run differs only in
+        // `ch`, so we materialize the shared attributes into a single `Cell`
+        // value and write the whole 24-byte struct in one store per cell. This
+        // lets the compiler emit wide stores instead of eight field writes.
+        let mut template = Cell {
+            ch: b' ' as u32,
+            fg: self.current_fg,
+            bg: self.current_bg,
+            underline_color: self.current_underline_color,
+            hyperlink_id: self.current_hyperlink_id,
+            attrs: self.current_attrs,
+            flags: 0,
+            underline_style: self.current_underline_style,
+            _pad: [0; 3],
+        };
+        // Only the BMP/ASCII fast path runs here, so the grapheme slots for the
+        // written cells must end up `None`. When the grid has never stored a
+        // grapheme cluster they are already `None`, so we can skip touching the
+        // grapheme array entirely.
+        let clear_graphemes = self.has_graphemes;
 
         while ri < run_len {
             if self.cursor_row >= rows {
@@ -783,34 +825,15 @@ impl Grid {
             unsafe {
                 let base_ptr = self.cells.as_mut_ptr().add(dest_start);
                 let src_ptr = run.as_ptr().add(ri);
-                let mut j = 0;
-                while j + 4 <= chunk_len {
-                    for k in 0..4 {
-                        let cell = &mut *base_ptr.add(j + k);
-                        cell.ch = *src_ptr.add(j + k) as u32;
-                        cell.fg = fg;
-                        cell.bg = bg;
-                        cell.attrs = attrs;
-                        cell.underline_color = ucol;
-                        cell.underline_style = ustyle;
-                        cell.hyperlink_id = hlink;
-                        cell.flags = 0;
-                        *self.graphemes.get_unchecked_mut(dest_start + j + k) = None;
-                    }
-                    j += 4;
+                for j in 0..chunk_len {
+                    template.ch = *src_ptr.add(j) as u32;
+                    *base_ptr.add(j) = template;
                 }
-                while j < chunk_len {
-                    let cell = &mut *base_ptr.add(j);
-                    cell.ch = *src_ptr.add(j) as u32;
-                    cell.fg = fg;
-                    cell.bg = bg;
-                    cell.attrs = attrs;
-                    cell.underline_color = ucol;
-                    cell.underline_style = ustyle;
-                    cell.hyperlink_id = hlink;
-                    cell.flags = 0;
-                    *self.graphemes.get_unchecked_mut(dest_start + j) = None;
-                    j += 1;
+                if clear_graphemes {
+                    let g_ptr = self.graphemes.as_mut_ptr().add(dest_start);
+                    for j in 0..chunk_len {
+                        *g_ptr.add(j) = None;
+                    }
                 }
             }
 
@@ -831,48 +854,71 @@ impl Grid {
         let old_top = self.top_row;
         let blank_start = old_top * cols;
 
-        if self.scrollback_max == 0 {
-            self.cells[blank_start..blank_start + cols].fill(Cell::BLANK);
-            self.graphemes[blank_start..blank_start + cols].fill(None);
-            self.top_row = (old_top + 1) % self.rows;
-            self.all_dirty = true;
-            return;
-        }
-
-        if self.scrollback_len < self.scrollback_max {
-            let needed = (self.scrollback_len + 1) * cols;
-            if self.scrollback.len() < needed {
-                self.scrollback.resize(needed, Cell::BLANK);
-                self.scrollback_graphemes.resize(needed, None);
-            }
-            let dest = self.scrollback_len * cols;
-            self.scrollback[dest..dest + cols]
-                .copy_from_slice(&self.cells[blank_start..blank_start + cols]);
-            for col in 0..cols {
-                self.scrollback_graphemes[dest + col] = self.graphemes[blank_start + col].clone();
-            }
-            self.scrollback_len += 1;
-        } else {
-            let dest = self.scrollback_head * cols;
-            self.scrollback[dest..dest + cols]
-                .copy_from_slice(&self.cells[blank_start..blank_start + cols]);
-            for col in 0..cols {
-                self.scrollback_graphemes[dest + col] = self.graphemes[blank_start + col].clone();
-            }
-            self.scrollback_head = (self.scrollback_head + 1) % self.scrollback_max;
-        }
+        self.push_row_into_scrollback(blank_start);
 
         self.cells[blank_start..blank_start + cols].fill(Cell::BLANK);
-        self.graphemes[blank_start..blank_start + cols].fill(None);
+        if self.has_graphemes {
+            self.graphemes[blank_start..blank_start + cols].fill(None);
+        }
         self.top_row = (old_top + 1) % self.rows;
         self.all_dirty = true;
     }
 
+    /// Copy the physical row beginning at `row_start` into the scrollback ring.
+    ///
+    /// The parallel `scrollback_graphemes` ring is only materialized once the
+    /// grid has actually stored a grapheme cluster (`has_graphemes`). For the
+    /// overwhelmingly common pure-text terminal, this keeps the 16-byte/cell
+    /// grapheme ring empty, saving real RSS proportional to scrollback depth.
+    #[inline]
+    fn push_row_into_scrollback(&mut self, row_start: usize) {
+        if self.scrollback_max == 0 {
+            return;
+        }
+        let cols = self.cols;
+
+        let dest = if self.scrollback_len < self.scrollback_max {
+            let needed = (self.scrollback_len + 1) * cols;
+            if self.scrollback.len() < needed {
+                self.scrollback.resize(needed, Cell::BLANK);
+            }
+            let dest = self.scrollback_len * cols;
+            self.scrollback_len += 1;
+            dest
+        } else {
+            let dest = self.scrollback_head * cols;
+            self.scrollback_head = (self.scrollback_head + 1) % self.scrollback_max;
+            dest
+        };
+
+        self.scrollback[dest..dest + cols]
+            .copy_from_slice(&self.cells[row_start..row_start + cols]);
+
+        if self.has_graphemes {
+            if self.scrollback_graphemes.len() < self.scrollback.len() {
+                self.scrollback_graphemes
+                    .resize(self.scrollback.len(), None);
+            }
+            for col in 0..cols {
+                self.scrollback_graphemes[dest + col] = self.graphemes[row_start + col].clone();
+            }
+        }
+    }
+
     pub fn put_char(&mut self, ch: u32) {
         let width = if let Some(c) = char::from_u32(ch) {
-            unicode_width::UnicodeWidthChar::width(c)
-                .unwrap_or(1)
-                .clamp(1, 2)
+            match unicode_width::UnicodeWidthChar::width(c) {
+                Some(0) => {
+                    // Zero-width codepoint (combining mark, variation
+                    // selector, ZWJ, keycap combiner, ...): it modifies the
+                    // previously written cell instead of occupying its own.
+                    let mut buf = [0u8; 4];
+                    self.merge_zero_width_into_previous_cell(c.encode_utf8(&mut buf));
+                    return;
+                }
+                Some(w) => w.clamp(1, 2),
+                None => 1,
+            }
         } else {
             1
         };
@@ -880,17 +926,99 @@ impl Grid {
     }
 
     pub fn put_grapheme(&mut self, grapheme: &str) {
+        let measured = unicode_width::UnicodeWidthStr::width(grapheme);
+        if measured == 0 {
+            // A zero-width cluster (e.g. a lone combining mark, or a
+            // `VS16 + U+20E3` keycap fragment split from its base by chunked
+            // input) attaches to the previously written cell.
+            self.merge_zero_width_into_previous_cell(grapheme);
+            return;
+        }
         let ch = grapheme
             .chars()
             .next()
             .map(|c| c as u32)
             .unwrap_or(b' ' as u32);
-        let width = unicode_width::UnicodeWidthStr::width(grapheme).clamp(1, 2);
+        let width = measured.clamp(1, 2);
         self.put_cluster_parts(
             ch,
             width,
             needs_grapheme_storage(grapheme).then(|| grapheme.into()),
         );
+    }
+
+    /// Appends a zero-width codepoint/cluster to the most recently written
+    /// cell, forming (or extending) a grapheme cluster there. If the merged
+    /// cluster gains emoji presentation and becomes wide (e.g. `U+2764` +
+    /// `VS16`), the cell is widened in place when the next column is
+    /// available.
+    fn merge_zero_width_into_previous_cell(&mut self, zero_width: &str) {
+        if self.cursor_row >= self.rows || self.cols == 0 {
+            return;
+        }
+
+        // The most recently written cell: with a pending wrap the cursor
+        // still points at it; otherwise it is the cell left of the cursor.
+        let mut col = if self.pending_wrap {
+            self.cursor_col
+        } else if self.cursor_col > 0 {
+            self.cursor_col - 1
+        } else {
+            // Nothing on this row to attach to; drop the mark.
+            return;
+        };
+
+        let mut idx = self.cell_index_at(self.cursor_row, col);
+        // Attach to the head of a wide pair, not its continuation.
+        if self.cells[idx].flags & FLAG_WIDE_CONT != 0 && col > 0 {
+            col -= 1;
+            idx -= 1;
+        }
+
+        let existing = if self.has_graphemes {
+            self.graphemes[idx].as_deref()
+        } else {
+            None
+        };
+        let mut merged = match existing {
+            Some(cluster) => String::from(cluster),
+            None => match char::from_u32(self.cells[idx].ch) {
+                Some(base) => String::from(base),
+                None => return,
+            },
+        };
+        merged.push_str(zero_width);
+
+        // Re-measure: a variation selector can upgrade a narrow text-style
+        // glyph to a wide emoji-presentation cluster.
+        let new_width = unicode_width::UnicodeWidthStr::width(merged.as_str()).clamp(1, 2);
+        self.has_graphemes = true;
+        self.graphemes[idx] = Some(merged.into_boxed_str());
+        self.mark_dirty(idx);
+
+        if new_width == 2
+            && self.cells[idx].flags & FLAG_WIDE == 0
+            && !self.pending_wrap
+            && col + 1 < self.cols
+        {
+            self.cells[idx].flags |= FLAG_WIDE;
+            let mut cont = self.cells[idx];
+            cont.ch = 0;
+            cont.flags = FLAG_WIDE_CONT;
+            let idx2 = idx + 1;
+            self.cells[idx2] = cont;
+            self.graphemes[idx2] = None;
+            self.mark_dirty(idx2);
+            // Step the cursor past the new continuation cell when it was
+            // sitting immediately after the head.
+            if self.cursor_col == col + 1 {
+                self.cursor_col += 1;
+                if self.cursor_col >= self.cols {
+                    self.pending_wrap = true;
+                    self.cursor_col = self.cols - 1;
+                }
+            }
+        }
     }
 
     fn put_cluster_parts(&mut self, ch: u32, width: usize, grapheme: Option<Box<str>>) {
@@ -923,7 +1051,9 @@ impl Grid {
             }
             let idx = self.cell_index_at(self.cursor_row, self.cursor_col);
             self.cells[idx] = Cell::BLANK;
-            self.graphemes[idx] = None;
+            if self.has_graphemes {
+                self.graphemes[idx] = None;
+            }
             self.cursor_col = 0;
             if self.cursor_row + 1 >= self.scroll_bottom {
                 self.scroll_up();
@@ -932,33 +1062,40 @@ impl Grid {
             }
         }
 
+        // Materialize the shared style once and write the whole 24-byte Cell in
+        // one store instead of eight separate field assignments.
+        let mut cell = Cell {
+            ch,
+            fg: self.current_fg,
+            bg: self.current_bg,
+            underline_color: self.current_underline_color,
+            hyperlink_id: self.current_hyperlink_id,
+            attrs: self.current_attrs,
+            flags: if width == 2 { FLAG_WIDE } else { 0 },
+            underline_style: self.current_underline_style,
+            _pad: [0; 3],
+        };
+
         let idx = self.cell_index_at(self.cursor_row, self.cursor_col);
-        let cell = &mut self.cells[idx];
-        cell.ch = ch;
-        cell.fg = self.current_fg;
-        cell.bg = self.current_bg;
-        cell.attrs = self.current_attrs;
-        cell.underline_color = self.current_underline_color;
-        cell.underline_style = self.current_underline_style;
-        cell.hyperlink_id = self.current_hyperlink_id;
-        cell.flags = if width == 2 { FLAG_WIDE } else { 0 };
-        self.graphemes[idx] = grapheme;
+        self.cells[idx] = cell;
+        if grapheme.is_some() {
+            self.has_graphemes = true;
+            self.graphemes[idx] = grapheme;
+        } else if self.has_graphemes {
+            self.graphemes[idx] = None;
+        }
         self.mark_dirty(idx);
 
         self.cursor_col += 1;
 
         if width == 2 && self.cursor_col < self.cols {
             let idx2 = self.cell_index_at(self.cursor_row, self.cursor_col);
-            let cell2 = &mut self.cells[idx2];
-            cell2.ch = 0;
-            cell2.fg = self.current_fg;
-            cell2.bg = self.current_bg;
-            cell2.attrs = self.current_attrs;
-            cell2.underline_color = self.current_underline_color;
-            cell2.underline_style = self.current_underline_style;
-            cell2.hyperlink_id = self.current_hyperlink_id;
-            cell2.flags = FLAG_WIDE_CONT;
-            self.graphemes[idx2] = None;
+            cell.ch = 0;
+            cell.flags = FLAG_WIDE_CONT;
+            self.cells[idx2] = cell;
+            if self.has_graphemes {
+                self.graphemes[idx2] = None;
+            }
             self.mark_dirty(idx2);
             self.cursor_col += 1;
         }
@@ -1060,8 +1197,18 @@ impl Grid {
         let start = phys * self.cols;
         let end = start + self.cols;
         self.cells[start..end].fill(Cell::BLANK);
-        self.graphemes[start..end].fill(None);
+        self.clear_graphemes(start, end);
         self.mark_dirty_range(start, self.cols);
+    }
+
+    /// Reset the grapheme slots in `start..end` to `None`. When the grid has
+    /// never stored a grapheme cluster the slots are already `None`, so this is
+    /// a no-op and we skip touching the parallel array entirely.
+    #[inline(always)]
+    fn clear_graphemes(&mut self, start: usize, end: usize) {
+        if self.has_graphemes {
+            self.graphemes[start..end].fill(None);
+        }
     }
 
     pub fn erase_line_right(&mut self) {
@@ -1073,7 +1220,7 @@ impl Grid {
         let end = phys * self.cols + self.cols;
         let len = end - start;
         self.cells[start..end].fill(Cell::BLANK);
-        self.graphemes[start..end].fill(None);
+        self.clear_graphemes(start, end);
         self.mark_dirty_range(start, len);
     }
 
@@ -1087,7 +1234,7 @@ impl Grid {
         let actual_end = end.min(start + self.cols);
         let len = actual_end - start;
         self.cells[start..actual_end].fill(Cell::BLANK);
-        self.graphemes[start..actual_end].fill(None);
+        self.clear_graphemes(start, actual_end);
         self.mark_dirty_range(start, len);
     }
 
@@ -1104,7 +1251,7 @@ impl Grid {
         let end = (start + n).min(phys * self.cols + self.cols);
         let len = end - start;
         self.cells[start..end].fill(Cell::BLANK);
-        self.graphemes[start..end].fill(None);
+        self.clear_graphemes(start, end);
         self.mark_dirty_range(start, len);
     }
 
@@ -1133,10 +1280,12 @@ impl Grid {
         let move_count = self.cols - col - n;
         if move_count > 0 {
             self.cells.copy_within(src..src + move_count, dest);
-            clone_optional_slice(&mut self.graphemes, src, dest, move_count);
+            if self.has_graphemes {
+                clone_optional_slice(&mut self.graphemes, src, dest, move_count);
+            }
         }
         self.cells[src..src + n].fill(Cell::BLANK);
-        self.graphemes[src..src + n].fill(None);
+        self.clear_graphemes(src, src + n);
         self.mark_dirty_range(row_start + col, self.cols - col);
     }
 
@@ -1153,11 +1302,13 @@ impl Grid {
         let move_count = self.cols - col - n;
         if move_count > 0 {
             self.cells.copy_within(src..src + move_count, dest);
-            clone_optional_slice(&mut self.graphemes, src, dest, move_count);
+            if self.has_graphemes {
+                clone_optional_slice(&mut self.graphemes, src, dest, move_count);
+            }
         }
         let blank_start = row_start + self.cols - n;
         self.cells[blank_start..row_start + self.cols].fill(Cell::BLANK);
-        self.graphemes[blank_start..row_start + self.cols].fill(None);
+        self.clear_graphemes(blank_start, row_start + self.cols);
         self.mark_dirty_range(row_start + col, self.cols - col);
     }
 
@@ -1191,54 +1342,30 @@ impl Grid {
             let blank_start = old_top * self.cols;
             let cols = self.cols;
 
-            if self.scrollback_max == 0 {
-                self.cells[blank_start..blank_start + cols].fill(Cell::BLANK);
-                self.graphemes[blank_start..blank_start + cols].fill(None);
-                self.top_row = (self.top_row + 1) % self.rows;
-                self.all_dirty = true;
-                return;
-            }
-
-            if self.scrollback_len < self.scrollback_max {
-                let needed = (self.scrollback_len + 1) * cols;
-                if self.scrollback.len() < needed {
-                    self.scrollback.resize(needed, Cell::BLANK);
-                    self.scrollback_graphemes.resize(needed, None);
-                }
-                let dest = self.scrollback_len * cols;
-                self.scrollback[dest..dest + cols]
-                    .copy_from_slice(&self.cells[blank_start..blank_start + cols]);
-                for col in 0..cols {
-                    self.scrollback_graphemes[dest + col] =
-                        self.graphemes[blank_start + col].clone();
-                }
-                self.scrollback_len += 1;
-            } else {
-                let dest = self.scrollback_head * cols;
-                self.scrollback[dest..dest + cols]
-                    .copy_from_slice(&self.cells[blank_start..blank_start + cols]);
-                for col in 0..cols {
-                    self.scrollback_graphemes[dest + col] =
-                        self.graphemes[blank_start + col].clone();
-                }
-                self.scrollback_head = (self.scrollback_head + 1) % self.scrollback_max;
-            }
+            self.push_row_into_scrollback(blank_start);
 
             self.cells[blank_start..blank_start + cols].fill(Cell::BLANK);
-            self.graphemes[blank_start..blank_start + cols].fill(None);
+            if self.has_graphemes {
+                self.graphemes[blank_start..blank_start + cols].fill(None);
+            }
             self.top_row = (self.top_row + 1) % self.rows;
         } else {
             let cols = self.cols;
+            let has_graphemes = self.has_graphemes;
             for r in self.scroll_top..self.scroll_bottom.saturating_sub(1) {
                 let src = self.physical_row(r + 1) * cols;
                 let dst = self.physical_row(r) * cols;
                 self.cells.copy_within(src..src + cols, dst);
-                clone_optional_slice(&mut self.graphemes, src, dst, cols);
+                if has_graphemes {
+                    clone_optional_slice(&mut self.graphemes, src, dst, cols);
+                }
             }
             let last = self.physical_row(self.scroll_bottom.saturating_sub(1));
             let start = last * self.cols;
             self.cells[start..start + self.cols].fill(Cell::BLANK);
-            self.graphemes[start..start + self.cols].fill(None);
+            if has_graphemes {
+                self.graphemes[start..start + self.cols].fill(None);
+            }
         }
         self.all_dirty = true;
     }
@@ -1249,16 +1376,21 @@ impl Grid {
         }
 
         let cols = self.cols;
+        let has_graphemes = self.has_graphemes;
         for r in (self.scroll_top + 1..self.scroll_bottom).rev() {
             let src = self.physical_row(r - 1) * cols;
             let dst = self.physical_row(r) * cols;
             self.cells.copy_within(src..src + cols, dst);
-            clone_optional_slice(&mut self.graphemes, src, dst, cols);
+            if has_graphemes {
+                clone_optional_slice(&mut self.graphemes, src, dst, cols);
+            }
         }
         let first = self.physical_row(self.scroll_top);
         let start = first * self.cols;
         self.cells[start..start + self.cols].fill(Cell::BLANK);
-        self.graphemes[start..start + self.cols].fill(None);
+        if has_graphemes {
+            self.graphemes[start..start + self.cols].fill(None);
+        }
         self.all_dirty = true;
     }
 
@@ -1291,15 +1423,6 @@ impl Grid {
             self.current_attrs |= ATTR_ITALIC;
         } else {
             self.current_attrs &= !ATTR_ITALIC;
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn set_underline(&mut self, on: bool) {
-        if on {
-            self.current_attrs |= ATTR_UNDERLINE;
-        } else {
-            self.current_attrs &= !ATTR_UNDERLINE;
         }
     }
 
@@ -1642,5 +1765,114 @@ mod tests {
         assert!(!g.row_has_dirty_cells(0));
         assert!(g.row_has_dirty_cells(1));
         assert!(!g.row_has_dirty_cells(2));
+    }
+
+    #[test]
+    fn pure_ascii_grid_never_materializes_grapheme_ring() {
+        // A grid that only ever sees ASCII/BMP text must keep both the live
+        // grapheme array semantically empty and the scrollback grapheme ring
+        // unallocated, which is the basis for the lazy-grapheme memory win.
+        let mut g = Grid::new(8, 2, [0xff; 3], [0; 3]);
+        for i in 0..50u8 {
+            // Short lines (well under 8 cols) avoid the pending-wrap quirk so
+            // each logical line maps to exactly one scrollback row.
+            let line = format!("hi{}\r\n", (b'a' + (i % 26)) as char);
+            g.write_bytes(line.as_bytes());
+        }
+        assert!(
+            !g.has_graphemes,
+            "ASCII-only grid should not latch graphemes"
+        );
+        assert_eq!(
+            g.scrollback_graphemes_capacity(),
+            0,
+            "scrollback grapheme ring should stay unallocated for ASCII-only output"
+        );
+        assert!(g.scrollback_len() > 0);
+        // Scrolled-out content must still read back as the original text.
+        assert_eq!(g.cell_at_scrollback_offset(1, 0, 0).char_display(), 'h');
+        assert_eq!(g.cell_at_scrollback_offset(1, 0, 1).char_display(), 'i');
+        assert_eq!(g.cell_grapheme_at_scrollback_offset(1, 0, 0), None);
+    }
+
+    #[test]
+    fn grapheme_clusters_survive_scrolling_into_scrollback() {
+        // Once a grapheme cluster is written, it must be preserved when the row
+        // is pushed into scrollback even though the ring is lazily allocated.
+        let mut g = Grid::new(8, 2, [0xff; 3], [0; 3]);
+        g.write_bytes("👨‍💻ab\r\n".as_bytes());
+        assert!(g.has_graphemes, "writing a cluster must latch graphemes");
+        // Push the cluster row off the screen into scrollback.
+        for _ in 0..4 {
+            g.write_bytes(b"x\r\n");
+        }
+        assert!(g.scrollback_len() >= 1);
+        // The very first scrolled-back line should still carry the cluster.
+        let depth = g.scrollback_len();
+        assert_eq!(
+            g.cell_grapheme_at_scrollback_offset(depth, 0, 0),
+            Some("👨‍💻"),
+            "grapheme cluster must be retained in scrollback"
+        );
+    }
+
+    #[test]
+    fn ascii_run_template_preserves_active_style() {
+        // The templated ASCII fast path must apply the current SGR style to
+        // every cell in a run, including across a wrap boundary.
+        let mut g = Grid::new(4, 2, [0xff; 3], [0; 3]);
+        g.set_fg(0x0102_0304);
+        g.set_bg(0x0a0b_0c0d);
+        g.set_bold(true);
+        g.write_bytes(b"abcdef");
+        for (r, c) in [(0, 0), (0, 3), (1, 0), (1, 1)] {
+            let cell = g.cell_at(r, c);
+            assert_eq!(cell.fg, 0x0102_0304, "fg at {r},{c}");
+            assert_eq!(cell.bg, 0x0a0b_0c0d, "bg at {r},{c}");
+            assert_eq!(cell.attrs, super::ATTR_BOLD, "attrs at {r},{c}");
+            assert_eq!(cell.flags, 0, "flags at {r},{c}");
+        }
+    }
+
+    #[test]
+    fn ascii_run_clears_stale_grapheme_after_latch() {
+        // If a grapheme has been latched, overwriting a former cluster cell with
+        // ASCII text must clear the stored grapheme so it does not leak through.
+        let mut g = Grid::new(8, 1, [0xff; 3], [0; 3]);
+        g.write_bytes("👨‍💻".as_bytes());
+        assert_eq!(g.cell_grapheme_at(0, 0), Some("👨‍💻"));
+        g.set_cursor(0, 0);
+        g.write_bytes(b"hello");
+        assert_eq!(g.cell_char(0, 0), 'h');
+        assert_eq!(g.cell_grapheme_at(0, 0), None);
+        assert_eq!(g.cell_grapheme_at(0, 1), None);
+    }
+
+    #[test]
+    fn full_ascii_scrollback_keeps_grapheme_ring_unallocated() {
+        // Fill a full 10k-line, 80-col scrollback with pure ASCII and confirm
+        // the parallel grapheme ring is never allocated. Old behavior eagerly
+        // grew scrollback_graphemes to match scrollback (16 bytes/cell), i.e.
+        // ~12.8 MB for this geometry; the lazy ring keeps that at zero.
+        let cols = 80usize;
+        let lines = super::DEFAULT_SCROLLBACK_MAX;
+        let mut g = Grid::new(cols as u16, 2, [0xff; 3], [0; 3]);
+        for _ in 0..(lines + 50) {
+            g.write_bytes(b"x\r\n");
+        }
+        assert_eq!(g.scrollback_len(), lines);
+        assert_eq!(
+            g.scrollback_graphemes_capacity(),
+            0,
+            "ASCII-only scrollback must not allocate the grapheme ring"
+        );
+        let option_box_bytes = std::mem::size_of::<Option<Box<str>>>();
+        let saved = lines * cols * option_box_bytes;
+        assert!(
+            saved >= 12_000_000,
+            "expected the lazy ring to avoid >=12MB, computed {saved} bytes"
+        );
+        // The dense cell array is still retained, as expected.
+        assert!(g.scrollback_memory_bytes() >= lines * cols);
     }
 }

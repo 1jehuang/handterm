@@ -2,13 +2,14 @@
 
 # handterm
 
-A Wayland-native terminal emulator focused on reaching the theoretical limits of performance and resource efficiency.
+A terminal emulator for Wayland and macOS (Metal) focused on reaching the theoretical limits of performance and resource efficiency.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org)
 [![Wayland](https://img.shields.io/badge/wayland-native-green.svg)](https://wayland.freedesktop.org)
+[![macOS](https://img.shields.io/badge/macOS-Metal-lightgrey.svg)](https://developer.apple.com/metal/)
 
-Rust workspace split across 6 packages. Single-process host architecture for low-overhead multi-window scaling.
+Rust workspace with 2 crates (`handterm` + `handterm-common`). Single-process host architecture for low-overhead multi-window scaling.
 
 ![handterm screenshot](assets/screenshot.png)
 
@@ -30,11 +31,12 @@ All measurements below refer to the **current host-based handterm architecture**
 
 ### What the numbers mean now
 
-Handterm currently has three relevant local architectures:
+Handterm currently has two local architectures:
 
 1. **CPU host** — one process, many CPU-rendered windows
 2. **GPU host** — one process, many GPU-rendered windows
-3. **daemon mode** — server plus separate thin clients (**still implemented, but soft-deprecated for normal local use** and no longer the best local low-RAM path)
+
+(An earlier daemon/thin-client mode was removed after profiling showed the single-process host was the better local low-RAM path.)
 
 ### Current measured memory
 
@@ -44,7 +46,6 @@ Handterm currently has three relevant local architectures:
 |-------|-------------:|----------------:|
 | handterm CPU host | ~37 MB | ~20 MB |
 | **handterm GPU host** | **~61 MB** | **~1-2 MB** |
-| handterm daemon server-only | ~4.4 MB | N/A |
 
 The current best local low-RAM path is the **shared-GPU host**. It pays a large fixed first-window cost once, then scales cheaply for additional windows.
 
@@ -137,9 +138,8 @@ foot's high VSZ is from mmap'd font files and Wayland protocol buffers; most is 
 | foot --server + footclient | 25 MB (server) + 1.6 MB | +1.6 MB |
 | handterm CPU host | ~37 MB | ~20 MB |
 | **handterm GPU host** | **~61 MB** | **~1-2 MB** |
-| handterm daemon mode | ~4.4 MB server-only | current clients still too heavy |
 
-Handterm still has a daemon/thin-client implementation, but it is now **soft-deprecated** for normal local use. After profiling both approaches, the most promising low-RAM local architecture is the **shared-GPU single-process host**. In current live measurements, the first GPU host window pays the full GPU/runtime cost once, and each additional window adds only about **1-2 MB RSS**.
+Handterm previously had a daemon/thin-client implementation, but it has been **removed**. After profiling both approaches, the most promising low-RAM local architecture is the **shared-GPU single-process host**. In current live measurements, the first GPU host window pays the full GPU/runtime cost once, and each additional window adds only about **1-2 MB RSS**.
 
 Measured shared-GPU host scaling on this machine/session:
 
@@ -164,7 +164,7 @@ That puts the incremental cost in roughly the **1-2 MB/window** range after the 
 | Ligatures | ✅ | ✅ | - | ✅ | ✅ |
 | Sixel graphics | - | ✅ | - | - | ✅ |
 | Kitty image protocol | partial* | - | - | ✅ | ✅ |
-| Daemon mode | ✅ | ✅ | - | - | - |
+| Daemon mode | - | ✅ | - | - | - |
 | Single-process multi-window host | ✅ | - | - | ✅ | ✅ |
 | Tabs | - | - | - | ✅ | ✅ |
 | Splits/panes | - | - | - | ✅ | ✅ |
@@ -174,7 +174,7 @@ That puts the incremental cost in roughly the **1-2 MB/window** range after the 
 | Kitty keyboard protocol | partial* | ✅ | - | ✅ | ✅ |
 | IPC / remote control | ✅ | - | - | ✅ | - |
 | X11 support | - | - | ✅ | ✅ | ✅ |
-| macOS support | - | - | ✅ | ✅ | ✅ |
+| macOS support | ✅\* | - | ✅ | ✅ | ✅ |
 | Font shaping engine | rustybuzz | harfbuzz | built-in | harfbuzz | harfbuzz |
 | Config format | TOML | INI | TOML | conf | custom |
 | Scrollback (default) | 10,000 | 10,000 | 10,000 | 2,000 | 10,000 |
@@ -203,7 +203,7 @@ Current workspace snapshot from this repository:
 
 | Terminal | Lines of code | Language | Packaging / dependencies |
 |----------|-------------:|:--------:|:------------------------:|
-| **handterm** | **~24,200** | Rust | 6 local workspace crates, 341 resolved Cargo packages |
+| **handterm** | **~24,200** | Rust | 2 local workspace crates, ~340 resolved Cargo packages |
 | alacritty | ~34,000 | Rust | ~100+ crates |
 | foot | ~55,000 | C | system libs only |
 | kitty | ~116,000 | C + Python | system libs + Python stdlib |
@@ -297,6 +297,8 @@ handterm @ send-key-event '{"key":"shift","physical_key":"shift_right","kind":"p
 
 ## Install
 
+### Linux (Wayland)
+
 Requires Wayland, FreeType, and Fontconfig.
 
 ```bash
@@ -309,6 +311,42 @@ cargo build --release
 ```
 
 This default build includes both CPU and GPU frontends. Plain local `handterm` now follows the **host path by default**: when a compatible host is already running, repeated launches reuse that host and open another window in the same process instead of spawning a full new renderer process.
+
+### macOS
+
+handterm runs on macOS (Apple Silicon tested) using the GPU renderer on **Metal**
+(via `wgpu`) and a native `winit` window. The terminal core, PTY, IPC remote
+control, and single-process multi-window host all work the same as on Linux.
+
+Install the build/runtime prerequisites with Homebrew:
+
+```bash
+brew install pkg-config freetype fontconfig
+# Recommended default font (matches the bundled config):
+brew install --cask font-jetbrains-mono-nerd-font
+```
+
+Then build, pointing `pkg-config` at the Homebrew FreeType/Fontconfig:
+
+```bash
+export PKG_CONFIG_PATH="$(brew --prefix freetype)/lib/pkgconfig:$(brew --prefix fontconfig)/lib/pkgconfig"
+cargo build --release
+./target/release/handterm
+```
+
+Platform notes:
+
+- Clipboard uses `pbcopy`/`pbpaste`; `open` is used for URLs (instead of
+  `wl-copy`/`wl-paste`/`xdg-open`).
+- Font discovery uses the Homebrew `fontconfig` CLIs (`fc-list`/`fc-match`).
+  Apple's universal `LastResort` placeholder font is intentionally skipped so
+  genuinely missing glyphs are not rendered as labeled boxes.
+- Color-emoji fallback retries across the font's fixed bitmap strikes, since
+  `Apple Color Emoji` ships some glyphs only at larger sizes.
+
+\* macOS support covers the standalone/host GPU path. The Wayland-specific
+window `app_id` is a no-op, and the CPU `softbuffer` backend follows macOS
+presentation semantics.
 
 ### Build with GPU rendering only
 
@@ -344,8 +382,12 @@ cursor = "#f5e0dc"
 background_opacity = 0.9
 
 [window]
-columns = 80
-rows = 24
+columns = 120
+rows = 32
+# Spawn position: "center" (default; centered on the primary monitor, extra
+# windows cascade), "auto" (OS decides), or [x, y] physical-pixel offsets
+# from the monitor origin. Wayland compositors ignore position hints.
+position = "center"
 
 [scrollback]
 lines = 10000
@@ -366,7 +408,7 @@ sync_to_monitor = true
 
 `scrollback.scrollbar` controls a thin right-edge overlay scrollbar. It is enabled by default and does not consume a terminal column.
 
-This currently applies to the standalone/shared-GPU host path. CPU rendering still uses whole-row scrollback presentation, and remote thin clients do not yet have a protocol for server-owned smooth scrollback surfaces.
+This currently applies to the standalone/shared-GPU host path. CPU rendering still uses whole-row scrollback presentation.
 
 ## Architecture
 
@@ -399,7 +441,7 @@ handterm-common/
   src/
     grid.rs       Cell storage / scrollback
     parser.rs     VT parser
-    protocol.rs   daemon protocol types
+    protocol.rs   window/terminal sync protocol types
     terminal.rs   terminal state machine
 
 src/
@@ -410,9 +452,6 @@ src/
   frontend.rs     shared scheduling/input helpers
   pty.rs          PTY spawn and I/O
   ipc.rs          host IPC server
-  daemon.rs       daemon/server runtime
-  remote_app.rs   CPU thin client
-  remote_gpu_app.rs GPU thin client
 ```
 
 ## Development
@@ -428,7 +467,7 @@ cargo run -- print-config
 
 See [OPTIMIZATION.md](OPTIMIZATION.md) for the full performance roadmap.
 
-**Architecture status:** the default and recommended path is the single-process host architecture. Daemon/thin-client mode remains available for compatibility and experimentation, but is soft-deprecated.
+**Architecture status:** handterm is a single-process host architecture. The earlier daemon/thin-client mode was removed after the host path proved better for normal local use.
 
 | Phase | Goal | Status |
 |-------|------|--------|
@@ -436,8 +475,7 @@ See [OPTIMIZATION.md](OPTIMIZATION.md) for the full performance roadmap.
 | GPU rendering | wgpu backend with instanced shaders | ✅ |
 | Single-process CPU host | Shared-process multi-window CPU runtime | ✅ |
 | Shared-GPU host | Low-overhead multi-window GPU runtime | ✅ |
-| Server/client mode | Daemon architecture like foot --server | ✅ implemented, soft-deprecated |
-| Workspace split | Thin client/server/common Cargo packages | ✅ foundation implemented |
+| Server/client mode | Daemon architecture like foot --server | removed (host path won) |
 | Startup/per-window polish | Push toward theoretical window-overhead floor | in progress |
 
 **Current best path:** shared-GPU host at roughly **~1-2 MB per extra window** after the first window. The remaining work is shaving startup cost and pushing the incremental slope down further.

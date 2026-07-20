@@ -82,6 +82,10 @@ struct RasterizedGlyph {
 }
 
 impl GlyphAtlas {
+    pub fn dpi(&self) -> u32 {
+        self.dpi
+    }
+
     pub fn new(font_size_pt: f64) -> Result<Self> {
         Self::new_with_dpi(font_size_pt, 96)
     }
@@ -145,7 +149,8 @@ impl GlyphAtlas {
         let metrics = face.size_metrics().context("no size metrics")?;
         let cell_height = (metrics.height >> 6) as usize;
         let baseline = (-metrics.descender >> 6) as usize;
-        let cell_width = measure_cell_width(&face).context("failed to measure cell width")?;
+        let cell_width = measure_cell_width_cached(path, font_size_pt, dpi, &face)
+            .context("failed to measure cell width")?;
 
         let fallback_paths: Vec<String> = find_emoji_font_paths()?
             .into_iter()
@@ -694,6 +699,8 @@ impl GlyphAtlas {
 
     fn rasterize_grapheme_fallback(&mut self, grapheme: &str) -> Option<RasterizedGlyph> {
         let ch = grapheme.chars().find(|ch| !ch.is_control())? as u32;
+        // Only the local-fonts fallback chain below sizes glyphs by grapheme span.
+        #[cfg(feature = "local-fonts")]
         let span_cells = grapheme_span_cells(grapheme);
 
         let glyph = procedural_glyph(ch, self.cell_width, self.cell_height, self.baseline);
@@ -950,6 +957,58 @@ fn rasterize_fallback_glyph(
     cell_height: usize,
     span_cells: usize,
 ) -> Option<RasterizedGlyph> {
+    if let Some(glyph) =
+        rasterize_fallback_at_current_strike(face, ch, cell_width, cell_height, span_cells)
+    {
+        return Some(glyph);
+    }
+
+    // Color emoji fonts (notably macOS `Apple Color Emoji`) sometimes only ship
+    // bitmap artwork for a given glyph at a subset of their fixed strikes. When
+    // the strike selected for the configured font size has an empty bitmap for
+    // this codepoint, retry at the other available strikes (smallest first) and
+    // let `normalize_fixed_size_glyph` downscale the larger artwork into the
+    // cell. The original strike selection is restored afterwards so ordinary
+    // glyphs keep rendering at the configured size.
+    if !face.has_fixed_sizes() {
+        return None;
+    }
+
+    let original_ppem = face.size_metrics().map(|m| i32::from(m.y_ppem));
+    let mut result = None;
+    for index in fixed_strike_indices_by_ppem(face) {
+        if face.select_size(index).is_err() {
+            continue;
+        }
+        if let Some(glyph) =
+            rasterize_fallback_at_current_strike(face, ch, cell_width, cell_height, span_cells)
+        {
+            result = Some(glyph);
+            break;
+        }
+    }
+
+    if let Some(ppem) = original_ppem {
+        restore_fixed_strike_by_ppem(face, ppem);
+    }
+
+    result
+}
+
+#[cfg(feature = "local-fonts")]
+fn rasterize_fallback_at_current_strike(
+    face: &freetype::Face,
+    ch: u32,
+    cell_width: usize,
+    cell_height: usize,
+    span_cells: usize,
+) -> Option<RasterizedGlyph> {
+    // The face must actually map this codepoint. `load_char` on an unmapped
+    // codepoint silently loads glyph 0 (the `.notdef` box), which would make
+    // every fallback face claim coverage for everything and paint tofu boxes
+    // instead of letting the next fallback (or fontconfig lookup) resolve a
+    // real glyph.
+    face.get_char_index(ch as usize)?;
     let glyph = rasterize_char(face, ch, LoadFlag::RENDER | LoadFlag::COLOR)?;
     Some(normalize_fixed_size_glyph(
         face,
@@ -957,6 +1016,52 @@ fn rasterize_fallback_glyph(
         span_cells.saturating_mul(cell_width).max(1),
         cell_height.max(1),
     ))
+}
+
+/// Fixed-strike indices of a bitmap font, ordered by ascending pixel size so
+/// retries prefer the smallest strike that still contains real artwork (which
+/// requires the least downscaling).
+#[cfg(feature = "local-fonts")]
+fn fixed_strike_indices_by_ppem(face: &freetype::Face) -> Vec<i32> {
+    let raw = face.raw();
+    let count = raw.num_fixed_sizes.max(0) as usize;
+    if count == 0 || raw.available_sizes.is_null() {
+        return Vec::new();
+    }
+    let mut sizes: Vec<(i32, i64)> = (0..count)
+        .map(|index| {
+            let strike = unsafe { *raw.available_sizes.add(index) };
+            (index as i32, strike.y_ppem)
+        })
+        .collect();
+    sizes.sort_by_key(|&(_, ppem)| ppem);
+    sizes.into_iter().map(|(index, _)| index).collect()
+}
+
+/// Re-select the fixed strike whose pixel size is closest to `ppem` (in
+/// pixels), used to restore the configured size after a fallback retry.
+#[cfg(feature = "local-fonts")]
+fn restore_fixed_strike_by_ppem(face: &freetype::Face, ppem: i32) {
+    let raw = face.raw();
+    let count = raw.num_fixed_sizes.max(0) as usize;
+    if count == 0 || raw.available_sizes.is_null() {
+        return;
+    }
+    let target = i64::from(ppem);
+    let mut best_index = 0i32;
+    let mut best_error = i64::MAX;
+    for index in 0..count {
+        let strike = unsafe { *raw.available_sizes.add(index) };
+        // `available_sizes[*].y_ppem` is in 26.6 fixed point; size metrics
+        // report pixels, so divide to compare like-for-like.
+        let strike_ppem = strike.y_ppem / 64;
+        let error = (strike_ppem - target).abs();
+        if error < best_error {
+            best_error = error;
+            best_index = index as i32;
+        }
+    }
+    let _ = face.select_size(best_index);
 }
 
 #[cfg(feature = "local-fonts")]
@@ -1132,13 +1237,59 @@ fn text_load_flags() -> LoadFlag {
 fn measure_cell_width(face: &freetype::Face) -> Result<usize> {
     let mut max_advance = 0usize;
 
+    // Measuring the cell width only needs each sample glyph's horizontal
+    // advance, which FreeType computes from the loaded outline metrics. The
+    // `RENDER` bit forces a full rasterization of all ~95 sample glyphs purely
+    // to throw the bitmaps away, so omit it here (keeping the same light hinting
+    // target) to keep advances identical while avoiding the rasterization cost.
     for ch in CELL_WIDTH_SAMPLE_TEXT.chars() {
-        face.load_char(ch as usize, text_load_flags())
+        face.load_char(ch as usize, LoadFlag::TARGET_LIGHT)
             .with_context(|| format!("failed to load sample glyph U+{:04X}", ch as u32))?;
         max_advance = max_advance.max((face.glyph().advance().x >> 6) as usize);
     }
 
     Ok(max_advance.max(1))
+}
+
+/// Cell width measurement reads the advance of a representative monospace
+/// sample set, which means loading ~95 glyphs from FreeType on every startup.
+/// The result only depends on the resolved font file plus the configured size
+/// and DPI, so cache it on disk (validated against the font file's
+/// mtime+length) and only re-measure when the cache is missing or stale.
+#[cfg(feature = "local-fonts")]
+fn measure_cell_width_cached(
+    path: &str,
+    font_size_pt: f64,
+    dpi: u32,
+    face: &freetype::Face,
+) -> Result<usize> {
+    let signature = font_file_signature(path);
+    if let Some(signature) = signature.as_deref()
+        && let Some(width) = load_cached_cell_width(path, font_size_pt, dpi, signature)
+    {
+        return Ok(width);
+    }
+
+    let width = measure_cell_width(face)?;
+    if let Some(signature) = signature.as_deref() {
+        save_cached_cell_width(path, font_size_pt, dpi, signature, width);
+    }
+    Ok(width)
+}
+
+/// A cheap fingerprint of the font file (modification time + length) used to
+/// invalidate cached cell-width measurements when the font is replaced, e.g.
+/// after an OS update.
+#[cfg(feature = "local-fonts")]
+fn font_file_signature(path: &str) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    Some(format!("{mtime}:{}", meta.len()))
 }
 
 #[cfg(feature = "local-fonts")]
@@ -1502,7 +1653,8 @@ fn measure_font_metrics_from_path(
     let metrics = face.size_metrics().context("no size metrics")?;
     let cell_height = (metrics.height >> 6) as usize;
     let baseline = (-metrics.descender >> 6) as usize;
-    let cell_width = measure_cell_width(&face).context("failed to measure cell width")?;
+    let cell_width = measure_cell_width_cached(path, font_size_pt, dpi, &face)
+        .context("failed to measure cell width")?;
 
     Ok(FontBootstrapMetrics {
         font_path: path.to_string(),
@@ -1514,6 +1666,23 @@ fn measure_font_metrics_from_path(
 
 #[cfg(feature = "local-fonts")]
 fn find_emoji_font_paths() -> Result<Vec<String>> {
+    // Emoji/symbol fallback fonts are system-global (independent of the primary
+    // family, size, and DPI), and discovering them requires initializing
+    // fontconfig plus several `fc.find` lookups. On macOS that fontconfig
+    // bootstrap dominates first-window atlas startup (~12-15ms), so cache the
+    // resolved paths to disk and only fall back to fontconfig when the cache is
+    // absent or stale.
+    if let Some(cached) = load_cached_emoji_font_paths() {
+        return Ok(cached);
+    }
+
+    let paths = discover_emoji_font_paths()?;
+    save_cached_emoji_font_paths(&paths);
+    Ok(paths)
+}
+
+#[cfg(feature = "local-fonts")]
+fn discover_emoji_font_paths() -> Result<Vec<String>> {
     let fc = fontconfig::Fontconfig::new().context("failed to init fontconfig")?;
     let mut paths = Vec::new();
     let mut seen = HashSet::new();
@@ -1537,6 +1706,16 @@ fn find_emoji_font_paths() -> Result<Vec<String>> {
 
 #[cfg(feature = "local-fonts")]
 fn find_system_fallback_font_path(ch: u32) -> Option<String> {
+    // Prefer `fc-list :charset=<cp>`: it enumerates every font whose charset
+    // actually covers the codepoint. This is more reliable than `fc-match`,
+    // which on macOS frequently returns the universal `LastResort` placeholder
+    // font (covering all codepoints with labeled boxes) even when a real
+    // covering font exists. We skip LastResort so genuinely missing glyphs fall
+    // through to `.notdef`/grapheme handling instead of rendering a box.
+    if let Some(path) = fc_list_charset(ch) {
+        return Some(path);
+    }
+
     let pattern = format!(":charset={ch:x}");
     let output = std::process::Command::new("fc-match")
         .arg(pattern)
@@ -1550,10 +1729,42 @@ fn find_system_fallback_font_path(ch: u32) -> Option<String> {
 
     let path = String::from_utf8(output.stdout).ok()?;
     let path = path.lines().next()?.trim();
-    if path.is_empty() {
+    if path.is_empty() || is_last_resort_font(path) {
         return None;
     }
     Some(path.to_string())
+}
+
+/// Use `fc-list :charset=<cp>` to find a real font covering `ch`, skipping the
+/// universal `LastResort` placeholder font. Returns the first usable path.
+fn fc_list_charset(ch: u32) -> Option<String> {
+    let pattern = format!(":charset={ch:x}");
+    let output = std::process::Command::new("fc-list")
+        .arg(pattern)
+        .arg("file")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8(output.stdout).ok()?;
+    text.lines()
+        .map(|line| line.trim().trim_end_matches(':').trim())
+        .filter(|path| !path.is_empty() && !is_last_resort_font(path))
+        .map(ToString::to_string)
+        .next()
+}
+
+/// Apple's `LastResort` font (and its dotted-name variant) covers the entire
+/// Unicode range with placeholder glyphs, so it must not be used as a genuine
+/// fallback face.
+fn is_last_resort_font(path: &str) -> bool {
+    path.rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .to_ascii_lowercase()
+        .contains("lastresort")
 }
 
 fn should_try_emoji_fallback(ch: u32) -> bool {
@@ -1585,6 +1796,28 @@ fn handterm_cache_dir() -> Option<std::path::PathBuf> {
     dirs::cache_dir().map(|dir| dir.join("handterm"))
 }
 
+/// Atomically replace a cache file's contents.
+///
+/// The font caches live in a shared directory (`~/Library/Caches/handterm` on
+/// macOS) and several handterm processes can run concurrently. A plain
+/// `fs::write` truncates the file and writes in place, so a concurrent reader
+/// can observe a torn/empty file. Writing to a unique temp file and renaming it
+/// over the target makes each update observably all-or-nothing.
+fn atomic_write_cache(cache: &std::path::Path, content: &str) -> std::io::Result<()> {
+    if let Some(parent) = cache.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = cache.with_extension(format!("tmp.{}", std::process::id()));
+    std::fs::write(&tmp, content)?;
+    match std::fs::rename(&tmp, cache) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(err)
+        }
+    }
+}
+
 fn font_cache_path_in(cache_dir: &std::path::Path) -> std::path::PathBuf {
     cache_dir.join("font_path")
 }
@@ -1599,6 +1832,152 @@ fn font_metrics_cache_path_in(cache_dir: &std::path::Path) -> std::path::PathBuf
 
 fn font_metrics_cache_path() -> Option<std::path::PathBuf> {
     handterm_cache_dir().map(|dir| font_metrics_cache_path_in(&dir))
+}
+
+fn emoji_font_cache_path_in(cache_dir: &std::path::Path) -> std::path::PathBuf {
+    cache_dir.join("emoji_fonts_v1")
+}
+
+fn emoji_font_cache_path() -> Option<std::path::PathBuf> {
+    handterm_cache_dir().map(|dir| emoji_font_cache_path_in(&dir))
+}
+
+/// Marker stored as the first line of the emoji-font cache so an intentionally
+/// empty list (a system with no emoji fonts) is distinguishable from a missing
+/// or truncated cache file.
+const EMOJI_FONT_CACHE_HEADER: &str = "emoji_fonts_v1";
+
+fn load_cached_emoji_font_paths_from(cache: &std::path::Path) -> Option<Vec<String>> {
+    let content = std::fs::read_to_string(cache).ok()?;
+    let mut lines = content.lines();
+    if lines.next()? != EMOJI_FONT_CACHE_HEADER {
+        return None;
+    }
+    let mut paths = Vec::new();
+    for line in lines {
+        let path = line.trim();
+        if path.is_empty() {
+            continue;
+        }
+        // A stale entry (font removed/relocated, e.g. after an OS update)
+        // invalidates the whole cache so discovery re-runs and rewrites it.
+        if !std::path::Path::new(path).exists() {
+            return None;
+        }
+        paths.push(path.to_string());
+    }
+    Some(paths)
+}
+
+fn load_cached_emoji_font_paths() -> Option<Vec<String>> {
+    let cache = emoji_font_cache_path()?;
+    load_cached_emoji_font_paths_from(&cache)
+}
+
+fn save_cached_emoji_font_paths_to(
+    cache: &std::path::Path,
+    paths: &[String],
+) -> std::io::Result<()> {
+    if let Some(parent) = cache.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut content = String::from(EMOJI_FONT_CACHE_HEADER);
+    content.push('\n');
+    for path in paths {
+        content.push_str(path);
+        content.push('\n');
+    }
+    atomic_write_cache(cache, &content)
+}
+
+fn save_cached_emoji_font_paths(paths: &[String]) {
+    let Some(cache) = emoji_font_cache_path() else {
+        return;
+    };
+    let _ = save_cached_emoji_font_paths_to(&cache, paths);
+}
+
+fn cell_width_cache_path_in(cache_dir: &std::path::Path) -> std::path::PathBuf {
+    cache_dir.join("cell_width_v1")
+}
+
+fn cell_width_cache_path() -> Option<std::path::PathBuf> {
+    handterm_cache_dir().map(|dir| cell_width_cache_path_in(&dir))
+}
+
+/// Key identifying a single cached cell-width measurement. Width depends on the
+/// resolved font file, the configured size, and the DPI; the file signature
+/// guards against the underlying font being replaced.
+fn cell_width_cache_key(path: &str, font_size_pt: f64, dpi: u32, signature: &str) -> String {
+    format!("{path}\t{font_size_pt:.2}\t{dpi}\t{signature}")
+}
+
+fn load_cached_cell_width_from(
+    cache: &std::path::Path,
+    path: &str,
+    font_size_pt: f64,
+    dpi: u32,
+    signature: &str,
+) -> Option<usize> {
+    let key = cell_width_cache_key(path, font_size_pt, dpi, signature);
+    let content = std::fs::read_to_string(cache).ok()?;
+    for line in content.lines() {
+        if let Some((cached_key, width)) = line.rsplit_once('\t')
+            && cached_key == key
+            && let Ok(width) = width.parse::<usize>()
+        {
+            return Some(width.max(1));
+        }
+    }
+    None
+}
+
+fn load_cached_cell_width(
+    path: &str,
+    font_size_pt: f64,
+    dpi: u32,
+    signature: &str,
+) -> Option<usize> {
+    let cache = cell_width_cache_path()?;
+    load_cached_cell_width_from(&cache, path, font_size_pt, dpi, signature)
+}
+
+fn save_cached_cell_width_to(
+    cache: &std::path::Path,
+    path: &str,
+    font_size_pt: f64,
+    dpi: u32,
+    signature: &str,
+    width: usize,
+) -> std::io::Result<()> {
+    if let Some(parent) = cache.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let key = cell_width_cache_key(path, font_size_pt, dpi, signature);
+    // The font-file signature is part of the key, so previous entries for the
+    // same path/size/dpi with a stale signature are dropped here to keep the
+    // cache from growing without bound across font updates.
+    let stale_prefix = format!("{path}\t{font_size_pt:.2}\t{dpi}\t");
+    let mut lines = std::fs::read_to_string(cache)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| {
+            let entry_key = line.rsplit_once('\t').map(|(k, _)| k).unwrap_or(line);
+            entry_key != key && !entry_key.starts_with(&stale_prefix)
+        })
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    lines.push(format!("{key}\t{width}"));
+    let mut content = lines.join("\n");
+    content.push('\n');
+    atomic_write_cache(cache, &content)
+}
+
+fn save_cached_cell_width(path: &str, font_size_pt: f64, dpi: u32, signature: &str, width: usize) {
+    let Some(cache) = cell_width_cache_path() else {
+        return;
+    };
+    let _ = save_cached_cell_width_to(&cache, path, font_size_pt, dpi, signature, width);
 }
 
 fn load_cached_font_path_from(cache: &std::path::Path, family: &str) -> Option<String> {
@@ -1695,7 +2074,7 @@ fn save_cached_font_path_to(
     lines.push(format!("{family}={path}"));
     let mut content = lines.join("\n");
     content.push('\n');
-    std::fs::write(cache, content)
+    atomic_write_cache(cache, &content)
 }
 
 fn save_cached_font_path(family: &str, path: &str) {
@@ -1740,7 +2119,7 @@ fn save_cached_font_metrics_to(
     lines.push(entry.trim_end().to_string());
     let mut content = lines.join("\n");
     content.push('\n');
-    std::fs::write(cache, content)
+    atomic_write_cache(cache, &content)
 }
 
 fn save_cached_font_metrics(
@@ -1792,6 +2171,135 @@ mod tests {
         assert_eq!(
             font_metrics_cache_path_in(cache_dir),
             cache_dir.join("font_metrics_v1")
+        );
+        assert_eq!(
+            emoji_font_cache_path_in(cache_dir),
+            cache_dir.join("emoji_fonts_v1")
+        );
+        assert_eq!(
+            cell_width_cache_path_in(cache_dir),
+            cache_dir.join("cell_width_v1")
+        );
+    }
+
+    #[test]
+    fn emoji_font_cache_roundtrips_existing_paths() {
+        let temp = repo_local_tempdir();
+        let cache = emoji_font_cache_path_in(temp.path());
+
+        // Use real, existing files so the load-time existence check passes.
+        let a = temp.path().join("emoji-a.ttf");
+        let b = temp.path().join("emoji-b.ttf");
+        std::fs::write(&a, b"a").expect("font stub a should write");
+        std::fs::write(&b, b"b").expect("font stub b should write");
+        let paths = vec![
+            a.to_string_lossy().into_owned(),
+            b.to_string_lossy().into_owned(),
+        ];
+
+        save_cached_emoji_font_paths_to(&cache, &paths).expect("emoji cache should write");
+        assert_eq!(load_cached_emoji_font_paths_from(&cache), Some(paths));
+    }
+
+    #[test]
+    fn empty_emoji_font_cache_is_distinct_from_missing() {
+        let temp = repo_local_tempdir();
+        let cache = emoji_font_cache_path_in(temp.path());
+
+        // Missing file -> None (caller should re-discover).
+        assert_eq!(load_cached_emoji_font_paths_from(&cache), None);
+
+        // Explicitly empty list -> Some(empty) so a system with no emoji fonts
+        // is not re-discovered on every startup.
+        save_cached_emoji_font_paths_to(&cache, &[]).expect("empty emoji cache should write");
+        assert_eq!(load_cached_emoji_font_paths_from(&cache), Some(Vec::new()));
+    }
+
+    #[test]
+    fn emoji_font_cache_invalidates_when_a_path_is_missing() {
+        let temp = repo_local_tempdir();
+        let cache = emoji_font_cache_path_in(temp.path());
+        let present = temp.path().join("present.ttf");
+        std::fs::write(&present, b"x").expect("present font should write");
+
+        save_cached_emoji_font_paths_to(
+            &cache,
+            &[
+                present.to_string_lossy().into_owned(),
+                temp.path().join("gone.ttf").to_string_lossy().into_owned(),
+            ],
+        )
+        .expect("emoji cache should write");
+
+        // A stale entry (font removed) invalidates the whole cache so discovery
+        // re-runs against fontconfig and rewrites it.
+        assert_eq!(load_cached_emoji_font_paths_from(&cache), None);
+    }
+
+    #[test]
+    fn emoji_font_cache_rejects_unknown_header() {
+        let temp = repo_local_tempdir();
+        let cache = emoji_font_cache_path_in(temp.path());
+        std::fs::write(&cache, "garbage\n/fonts/whatever.ttf\n")
+            .expect("cache file should be writable");
+        assert_eq!(load_cached_emoji_font_paths_from(&cache), None);
+    }
+
+    #[test]
+    fn cell_width_cache_roundtrips_and_replaces_stale_signatures() {
+        let temp = repo_local_tempdir();
+        let cache = cell_width_cache_path_in(temp.path());
+
+        save_cached_cell_width_to(&cache, "/fonts/mono.ttf", 11.0, 96, "sig-1", 8)
+            .expect("first cell width entry should write");
+        assert_eq!(
+            load_cached_cell_width_from(&cache, "/fonts/mono.ttf", 11.0, 96, "sig-1"),
+            Some(8)
+        );
+
+        // A different DPI is a separate key and coexists.
+        save_cached_cell_width_to(&cache, "/fonts/mono.ttf", 11.0, 192, "sig-1", 16)
+            .expect("hidpi cell width entry should write");
+        assert_eq!(
+            load_cached_cell_width_from(&cache, "/fonts/mono.ttf", 11.0, 192, "sig-1"),
+            Some(16)
+        );
+
+        // Re-measuring with a new font signature replaces the stale entry for
+        // the same path/size/dpi rather than accumulating.
+        save_cached_cell_width_to(&cache, "/fonts/mono.ttf", 11.0, 96, "sig-2", 9)
+            .expect("updated cell width entry should write");
+        assert_eq!(
+            load_cached_cell_width_from(&cache, "/fonts/mono.ttf", 11.0, 96, "sig-1"),
+            None
+        );
+        assert_eq!(
+            load_cached_cell_width_from(&cache, "/fonts/mono.ttf", 11.0, 96, "sig-2"),
+            Some(9)
+        );
+        // The 192-DPI entry is untouched by the 96-DPI rewrite.
+        assert_eq!(
+            load_cached_cell_width_from(&cache, "/fonts/mono.ttf", 11.0, 192, "sig-1"),
+            Some(16)
+        );
+
+        let content = std::fs::read_to_string(&cache).expect("cache should be readable");
+        assert_eq!(
+            content.lines().filter(|l| !l.is_empty()).count(),
+            2,
+            "stale same-key entries should be pruned: {content:?}"
+        );
+    }
+
+    #[test]
+    fn cell_width_cache_misses_on_signature_mismatch() {
+        let temp = repo_local_tempdir();
+        let cache = cell_width_cache_path_in(temp.path());
+        save_cached_cell_width_to(&cache, "/fonts/mono.ttf", 11.0, 96, "sig-1", 8)
+            .expect("cell width entry should write");
+        assert_eq!(
+            load_cached_cell_width_from(&cache, "/fonts/mono.ttf", 11.0, 96, "sig-other"),
+            None
         );
     }
 
@@ -2392,6 +2900,18 @@ mod tests {
             .chars()
             .map(|(charcode, _)| charcode as u32)
             .filter(|&ch| should_try_emoji_fallback(ch))
+            // Variation selectors (U+FE00-FE0F) and ZWJ are default-ignorable:
+            // they modify the preceding cluster and have no visible glyph of
+            // their own. Lone regional indicators (U+1F1E6-1F1FF) only carry
+            // artwork as flag *pairs* in color emoji fonts. The atlas
+            // correctly refuses to resolve all of these to a standalone
+            // raster (previously they only "resolved" by rasterizing another
+            // font's .notdef box, which painted tofu).
+            .filter(|&ch| {
+                !(0xFE00..=0xFE0F).contains(&ch)
+                    && ch != 0x200D
+                    && !(0x1F1E6..=0x1F1FF).contains(&ch)
+            })
             .take(512)
             .collect();
 

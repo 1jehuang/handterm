@@ -279,6 +279,12 @@ pub struct FrameDecision {
     pub wait_until: Option<Instant>,
 }
 
+impl FrameDecision {
+    pub fn blocks_periodic_redraw(self) -> bool {
+        self.wait_until.is_some()
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RedrawWork {
     pub changed: bool,
@@ -1181,6 +1187,52 @@ mod tests {
             heavy: false,
         });
         assert!(decision.request_redraw);
+    }
+
+    #[test]
+    fn frame_scheduler_coalesces_already_processed_heavy_pty_bursts() {
+        let start = Instant::now();
+        let frame_interval = Duration::from_millis(8);
+        let mut scheduler = FrameScheduler::default();
+        let heavy = RedrawWork {
+            changed: true,
+            heavy: true,
+        };
+
+        assert!(!scheduler.mark_io_processed(start, frame_interval, heavy));
+        assert!(!scheduler.mark_io_processed(
+            start + Duration::from_millis(2),
+            frame_interval,
+            heavy,
+        ));
+
+        let decision = scheduler.prepare_redraw(
+            start + frame_interval + Duration::from_millis(2),
+            RedrawWork::default,
+        );
+        assert!(decision.request_redraw);
+        assert!(decision.wait_until.is_none());
+        assert!(!decision.blocks_periodic_redraw());
+    }
+
+    #[test]
+    fn deferred_heavy_frame_blocks_periodic_redraw_sources() {
+        let start = Instant::now();
+        let frame_interval = Duration::from_millis(8);
+        let mut scheduler = FrameScheduler::default();
+
+        assert!(!scheduler.mark_io_processed(
+            start,
+            frame_interval,
+            RedrawWork {
+                changed: true,
+                heavy: true,
+            },
+        ));
+        let decision = scheduler.prepare_redraw(start, RedrawWork::default);
+
+        assert!(!decision.request_redraw);
+        assert!(decision.blocks_periodic_redraw());
     }
 
     #[test]

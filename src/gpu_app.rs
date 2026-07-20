@@ -11,7 +11,7 @@ use crate::gpu_runtime::{
     GpuSurfaceState, SharedGpuContext, SharedGpuInitProfile, create_shared_gpu_context_profiled,
     create_surface_state_for_window_with_shared_profiled_with_defaults,
     create_window_attributes_for_metrics, render_surface_state_profiled_with_scroll,
-    render_surface_state_with_scroll, resize_surface_state,
+    render_surface_state_with_scroll, resize_surface_state, resume_surface_state,
 };
 use crate::host_commands::{
     HostControlRequest, host_list_windows_response, parse_host_control_request,
@@ -39,9 +39,6 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, NamedKey};
 use winit::window::WindowId as WinitWindowId;
 
-type SharedGpuInitResult = Result<(Arc<SharedGpuContext>, SharedGpuInitProfile)>;
-type SharedGpuInitTask = std::thread::JoinHandle<SharedGpuInitResult>;
-
 #[derive(Debug, Clone)]
 enum GpuAppEvent {
     PtyReadable(u64),
@@ -50,6 +47,33 @@ enum GpuAppEvent {
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 const HOT_MODE_DURATION: Duration = Duration::from_millis(160);
+const IPC_CLIENT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const MAX_PTY_BYTES_PER_EVENT: usize = 1024 * 1024;
+
+fn earlier_deadline(current: Option<Instant>, candidate: Instant) -> Option<Instant> {
+    Some(current.map_or(candidate, |existing| existing.min(candidate)))
+}
+
+/// Convert a winit scale factor into the integer DPI value the font/atlas stack
+/// expects (96 DPI per 1.0 scale). Uses the same truncating conversion the GPU
+/// host has always used so atlas-cache keys stay identical to prior behavior.
+fn dpi_from_scale_factor(scale_factor: f64) -> u32 {
+    (96.0 * scale_factor).max(1.0) as u32
+}
+
+/// Pick a usable display scale factor from the available monitor handles,
+/// preferring the primary monitor. Returns `None` when no monitor reports a
+/// positive, finite scale (e.g. a headless event loop), in which case the
+/// caller falls back to probing via a hidden window.
+fn monitor_scale_factor(
+    primary: Option<f64>,
+    available: impl IntoIterator<Item = f64>,
+) -> Option<f64> {
+    let usable = |scale: &f64| scale.is_finite() && *scale > 0.0;
+    primary
+        .filter(usable)
+        .or_else(|| available.into_iter().find(usable))
+}
 
 pub fn run(config: AppConfig, startup_command: Option<String>) -> Result<()> {
     let shared_init_task = Some(GpuApp::spawn_shared_init_task());
@@ -77,6 +101,12 @@ pub fn run(config: AppConfig, startup_command: Option<String>) -> Result<()> {
         .context("failed while running app")
 }
 
+/// Result of the background shared-GPU-context initialization: the context
+/// itself plus timing/profiling data captured during creation.
+type SharedGpuInit = (Arc<SharedGpuContext>, SharedGpuInitProfile);
+/// Handle to the background thread performing shared GPU initialization.
+type SharedGpuInitTask = std::thread::JoinHandle<Result<SharedGpuInit>>;
+
 struct GpuApp {
     config: AppConfig,
     startup_command: Option<String>,
@@ -91,6 +121,7 @@ struct GpuApp {
     ipc_watcher_started: bool,
     ipc_watcher_stop: Option<Arc<AtomicBool>>,
     atlas_cache: HashMap<u32, GlyphAtlas>,
+    suspended: bool,
 }
 
 struct GpuWindowState {
@@ -197,7 +228,7 @@ impl SyntheticInputTarget for GpuWindowState {
 
 impl GpuApp {
     fn spawn_shared_init_task() -> SharedGpuInitTask {
-        std::thread::spawn(|| -> SharedGpuInitResult { create_shared_gpu_context_profiled() })
+        std::thread::spawn(|| -> Result<SharedGpuInit> { create_shared_gpu_context_profiled() })
     }
 
     fn new(
@@ -221,6 +252,7 @@ impl GpuApp {
             ipc_watcher_started: false,
             ipc_watcher_stop: None,
             atlas_cache: HashMap::new(),
+            suspended: false,
         }
     }
 
@@ -344,22 +376,34 @@ impl GpuApp {
         }
     }
 
-    fn resolve_dpi(&self, event_loop: &ActiveEventLoop) -> u32 {
+    fn resolve_dpi(&self, event_loop: &ActiveEventLoop) -> Result<u32> {
         if let Some(id) = self.focused_window
             && let Some(winit_id) = self.window_ids.get(&id)
             && let Some(state) = self.windows.get(winit_id)
         {
-            return (96.0 * state.renderer.window.scale_factor()) as u32;
+            return Ok(dpi_from_scale_factor(state.renderer.window.scale_factor()));
         }
         if let Some(state) = self.windows.values().next() {
-            return (96.0 * state.renderer.window.scale_factor()) as u32;
+            return Ok(dpi_from_scale_factor(state.renderer.window.scale_factor()));
+        }
+        // First window: read the display scale factor directly from a monitor
+        // handle instead of creating (and immediately destroying) a throwaway
+        // probe window. On macOS this resolves to `NSScreen.backingScaleFactor`
+        // without any compositor window round-trip, which removes ~20ms from
+        // first-window startup. Fall back to a probe window only if no monitor
+        // is reported (e.g. headless without a display).
+        if let Some(scale) = monitor_scale_factor(
+            event_loop.primary_monitor().map(|m| m.scale_factor()),
+            event_loop.available_monitors().map(|m| m.scale_factor()),
+        ) {
+            return Ok(dpi_from_scale_factor(scale));
         }
         let probe_window = event_loop
             .create_window(winit::window::Window::default_attributes().with_visible(false))
-            .expect("probe window should succeed");
-        let dpi = (96.0 * probe_window.scale_factor()) as u32;
+            .context("failed to create invisible probe window while resolving display dpi")?;
+        let dpi = dpi_from_scale_factor(probe_window.scale_factor());
         drop(probe_window);
-        dpi
+        Ok(dpi)
     }
 
     fn ensure_atlas(&mut self, dpi: u32) -> Result<()> {
@@ -410,7 +454,7 @@ impl GpuApp {
                 .or_else(|| Some(Self::spawn_shared_init_task()))
         };
         let before_dpi = Instant::now();
-        let dpi = self.resolve_dpi(event_loop);
+        let dpi = self.resolve_dpi(event_loop)?;
         let dpi_ms = before_dpi.elapsed();
         let atlas_cached = self.atlas_cache.contains_key(&dpi);
         let before_bootstrap = Instant::now();
@@ -444,7 +488,10 @@ impl GpuApp {
                     &self.config,
                     cell_width,
                     cell_height,
+                    dpi,
                     "handterm [gpu host]",
+                    crate::platform::spawn_monitor_geometry(event_loop),
+                    existing_windows,
                 ))
                 .context("window creation should succeed")?,
         );
@@ -465,11 +512,17 @@ impl GpuApp {
             })
             .unwrap_or_default();
         let before_pty = Instant::now();
-        let pty = PtyChild::spawn_default_shell_with_command_and_env(
+        let added_window_cwd = (existing_windows > 0).then(dirs::home_dir).flatten();
+        let pty = PtyChild::spawn_default_shell_with_command_env_and_cwd(
             cols,
             rows,
-            self.startup_command.as_deref(),
+            if existing_windows == 0 {
+                self.startup_command.as_deref()
+            } else {
+                None
+            },
             &native_scroll_env_refs,
+            added_window_cwd.as_deref(),
         )
         .with_context(|| format!("failed to spawn PTY for {cols}x{rows} window"))?;
         let pty_ms = before_pty.elapsed();
@@ -902,7 +955,23 @@ impl GpuApp {
 
 impl ApplicationHandler<GpuAppEvent> for GpuApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.suspended = false;
+        for state in self.windows.values_mut() {
+            if let Err(error) = resume_surface_state(
+                &mut state.renderer,
+                self.config.style.background_opacity < 1.0,
+            ) {
+                eprintln!("handterm gpu host: failed to resume surface: {error:#}");
+            } else {
+                state.renderer.window.request_redraw();
+            }
+        }
         self.ensure_initial_window(event_loop);
+    }
+
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        self.suspended = true;
+        event_loop.set_control_flow(ControlFlow::Wait);
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: GpuAppEvent) {
@@ -914,16 +983,14 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                     state.startup_timing.mark_pty_event(Instant::now());
                     let bytes_read = drain_pty(state);
                     if bytes_read > 0 {
-                        Self::enter_hot_mode(state, Instant::now());
                         let work = crate::frontend::classify_redraw_work(&state.terminal, true);
-                        let should_redraw_now = if self.focused_window == Some(state.id) {
-                            state.scheduler.mark_redraw_needed();
-                            true
-                        } else {
+                        // Large TUI frames are emitted across multiple PTY reads.
+                        // Coalescing heavy damage prevents partially parsed child
+                        // frames from being presented during native pane scrolling.
+                        let should_redraw_now =
                             state
                                 .scheduler
-                                .mark_io_processed(Instant::now(), FRAME_INTERVAL, work)
-                        };
+                                .mark_io_processed(Instant::now(), FRAME_INTERVAL, work);
                         if should_redraw_now {
                             state.renderer.window.request_redraw();
                         }
@@ -953,79 +1020,82 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                 let Some(state) = windows.get_mut(&window_id) else {
                     return;
                 };
-                let atlas = atlas_cache
-                    .get_mut(&state.dpi)
-                    .expect("atlas should exist for window dpi");
+                let Some(atlas) = atlas_cache.get_mut(&state.dpi) else {
+                    eprintln!(
+                        "handterm gpu host: no glyph atlas cached for dpi {}; dropping window event",
+                        state.dpi
+                    );
+                    return;
+                };
 
                 match event {
-                    WindowEvent::Resized(size) => {
-                        if size.width > 0 && size.height > 0 {
-                            let new_cols = (size.width as usize / atlas.cell_width.max(1)) as u16;
-                            let new_rows = (size.height as usize / atlas.cell_height.max(1)) as u16;
-                            let new_cols = new_cols.max(1);
-                            let new_rows = new_rows.max(1);
+                    WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
+                        let pad2 = 2 * self.config.window.padding_px(atlas.dpi()) as usize;
+                        let new_cols = ((size.width as usize).saturating_sub(pad2)
+                            / atlas.cell_width.max(1))
+                            as u16;
+                        let new_rows = ((size.height as usize).saturating_sub(pad2)
+                            / atlas.cell_height.max(1))
+                            as u16;
+                        let new_cols = new_cols.max(1);
+                        let new_rows = new_rows.max(1);
 
-                            resize_surface_state(
-                                &mut state.renderer,
-                                atlas,
-                                size.width,
-                                size.height,
-                                new_cols,
-                                new_rows,
-                            );
+                        resize_surface_state(
+                            &mut state.renderer,
+                            atlas,
+                            size.width,
+                            size.height,
+                            new_cols,
+                            new_rows,
+                            self.config.window.padding_px(atlas.dpi()),
+                        );
 
-                            if new_cols != state.terminal.cols || new_rows != state.terminal.rows {
-                                state.terminal.resize(new_cols, new_rows);
-                                let _ = state.pty.resize(new_cols, new_rows);
-                            }
-
-                            state.renderer.window.request_redraw();
+                        if new_cols != state.terminal.cols || new_rows != state.terminal.rows {
+                            state.terminal.resize(new_cols, new_rows);
+                            let _ = state.pty.resize(new_cols, new_rows);
                         }
+
+                        state.renderer.window.request_redraw();
                     }
                     WindowEvent::ModifiersChanged(new_modifiers) => {
                         state.modifiers = new_modifiers;
                     }
-                    WindowEvent::Ime(Ime::Commit(text)) => {
-                        if !text.is_empty() {
-                            let ime_commit_text = crate::frontend::normalize_ime_dedupe_text(&text)
-                                .unwrap_or_else(|| text.clone());
-                            crate::frontend::trace_input(format!(
-                                "gpu ime-commit raw={:?} normalized={:?}",
-                                text, ime_commit_text
-                            ));
-                            if should_skip_ime_commit_after_key_event(
-                                &mut state.recent_text_key_event,
-                                &ime_commit_text,
-                                Instant::now(),
-                            ) {
-                                crate::frontend::trace_input(
-                                    "gpu ime-commit skipped after key-event dedupe",
-                                );
-                                return;
-                            }
-                            Self::enter_hot_mode(state, Instant::now());
-                            state.pending_ime_commit = Some(ime_commit_text);
-                            let _ = state.pty.write_all(text.as_bytes());
-                            if state.terminal.grid.scroll_offset > 0 {
-                                Self::reset_scrollback_view(state);
-                            }
-                            state.terminal.grid.selection = None;
-                            let changed = drain_pty(state) > 0;
-                            let work =
-                                crate::frontend::classify_redraw_work(&state.terminal, changed);
-                            let should_redraw_now = if *focused_window == Some(state.id) {
-                                state.scheduler.mark_redraw_needed();
-                                true
-                            } else {
-                                state.scheduler.mark_io_processed(
-                                    Instant::now(),
-                                    FRAME_INTERVAL,
-                                    work,
-                                )
-                            };
-                            if should_redraw_now {
-                                state.renderer.window.request_redraw();
-                            }
+                    WindowEvent::Ime(Ime::Commit(text)) if !text.is_empty() => {
+                        let ime_commit_text = crate::frontend::normalize_ime_dedupe_text(&text)
+                            .unwrap_or_else(|| text.clone());
+                        crate::frontend::trace_input(format!(
+                            "gpu ime-commit raw={:?} normalized={:?}",
+                            text, ime_commit_text
+                        ));
+                        if should_skip_ime_commit_after_key_event(
+                            &mut state.recent_text_key_event,
+                            &ime_commit_text,
+                            Instant::now(),
+                        ) {
+                            crate::frontend::trace_input(
+                                "gpu ime-commit skipped after key-event dedupe",
+                            );
+                            return;
+                        }
+                        Self::enter_hot_mode(state, Instant::now());
+                        state.pending_ime_commit = Some(ime_commit_text);
+                        let _ = state.pty.write_all(text.as_bytes());
+                        if state.terminal.grid.scroll_offset > 0 {
+                            Self::reset_scrollback_view(state);
+                        }
+                        state.terminal.grid.selection = None;
+                        let changed = drain_pty(state) > 0;
+                        let work = crate::frontend::classify_redraw_work(&state.terminal, changed);
+                        let should_redraw_now = if *focused_window == Some(state.id) {
+                            state.scheduler.mark_redraw_needed();
+                            true
+                        } else {
+                            state
+                                .scheduler
+                                .mark_io_processed(Instant::now(), FRAME_INTERVAL, work)
+                        };
+                        if should_redraw_now {
+                            state.renderer.window.request_redraw();
                         }
                     }
                     WindowEvent::KeyboardInput { event, .. } => {
@@ -1035,11 +1105,12 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
 
                             if ctrl
                                 && shift
+                                && !event.repeat
                                 && let Key::Character(s) = &event.logical_key
                             {
                                 let ch = s.chars().next().unwrap_or('\0').to_ascii_lowercase();
                                 if ch == 'v' {
-                                    if let Some(text) = paste_from_clipboard() {
+                                    if let Ok(text) = paste_from_clipboard() {
                                         if state.terminal.bracketed_paste_mode() {
                                             let _ = state.pty.write_all(b"\x1b[200~");
                                             let _ = state.pty.write_all(&text);
@@ -1053,7 +1124,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                                 if ch == 'c' {
                                     let text = state.terminal.grid.get_selection_text();
                                     if !text.is_empty() {
-                                        copy_to_clipboard(text.as_bytes());
+                                        let _ = copy_to_clipboard(text.as_bytes());
                                     }
                                     return;
                                 }
@@ -1182,9 +1253,14 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                     WindowEvent::CursorMoved { position, .. } => {
                         let cw = atlas.cell_width.max(1);
                         let ch = atlas.cell_height.max(1);
-                        state.mouse_col = position.x as usize / cw;
-                        state.mouse_row =
-                            Self::mouse_row_for_position(state, position.y, ch, &self.config);
+                        let pad = self.config.window.padding_px(atlas.dpi()) as f64;
+                        state.mouse_col = (position.x - pad).max(0.0) as usize / cw;
+                        state.mouse_row = Self::mouse_row_for_position(
+                            state,
+                            (position.y - pad).max(0.0),
+                            ch,
+                            &self.config,
+                        );
 
                         if state.selecting {
                             if let Some(ref mut sel) = state.terminal.grid.selection {
@@ -1219,7 +1295,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                                         && let Some(url) =
                                             state.terminal.grid.hyperlink_url(cell.hyperlink_id)
                                     {
-                                        open_url(url);
+                                        let _ = open_url(url);
                                         return;
                                     }
                                 }
@@ -1235,7 +1311,7 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                                 state.selecting = false;
                                 let text = state.terminal.grid.get_selection_text();
                                 if !text.is_empty() {
-                                    copy_to_clipboard(text.as_bytes());
+                                    let _ = copy_to_clipboard(text.as_bytes());
                                 }
                             }
                         }
@@ -1267,7 +1343,11 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                                 },
                             )
                         {
-                            Self::enter_hot_mode(state, Instant::now());
+                            // The bridge only queues a command. Jcode's resulting
+                            // PTY damage is the authoritative signal that a new
+                            // frame is ready. Starting host hot-frame scheduling
+                            // here races unchanged retained frames against the
+                            // asynchronous child update and causes visible flicker.
                             return;
                         }
                         if state.terminal.mouse_mode != crate::terminal::MouseMode::Off {
@@ -1307,6 +1387,9 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                         }
                     }
                     WindowEvent::RedrawRequested => {
+                        if self.suspended {
+                            return;
+                        }
                         if self.config.scrollback.smooth {
                             let _ = state.smooth_scroll.advance(
                                 Instant::now(),
@@ -1324,6 +1407,16 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
                                 viewport_scroll,
                             );
                             state.first_frame_logged = true;
+                            // The initial window size was clamped on macOS to stop
+                            // AppKit from auto-growing the fresh window to fill the
+                            // display (which would inflate the GPU drawables). Now
+                            // that the first frame is up at the intended grid size,
+                            // lift the cap so the window is freely resizable again.
+                            #[cfg(target_os = "macos")]
+                            state
+                                .renderer
+                                .window
+                                .set_max_inner_size(None::<winit::dpi::PhysicalSize<u32>>);
                             if let Some(rp) = render_profile {
                                 let open_to_present = state
                                     .open_window_start
@@ -1428,59 +1521,71 @@ impl ApplicationHandler<GpuAppEvent> for GpuApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.suspended {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
         let mut earliest_deadline: Option<Instant> = None;
         let mut redraw_ids = Vec::new();
         let now = Instant::now();
 
         for (winit_id, state) in &mut self.windows {
-            if self.config.scrollback.smooth && state.smooth_scroll.is_animating() {
-                let next_frame_at = state.next_hot_frame_at.unwrap_or(now);
-                if now >= next_frame_at {
-                    redraw_ids.push(*winit_id);
-                    state.next_hot_frame_at = Some(now + FRAME_INTERVAL);
-                } else {
-                    earliest_deadline = Some(match earliest_deadline {
-                        Some(existing) => existing.min(next_frame_at),
-                        None => next_frame_at,
-                    });
-                }
+            let scheduler = &mut state.scheduler;
+            let decision: FrameDecision = scheduler.prepare_redraw(now, RedrawWork::default);
+            if let Some(deadline) = decision.wait_until {
+                earliest_deadline = earlier_deadline(earliest_deadline, deadline);
             }
-            if self.focused_window == Some(state.id)
-                && let Some(hot_until) = state.hot_until
-            {
-                if now < hot_until {
+            if decision.request_redraw {
+                redraw_ids.push(*winit_id);
+            }
+
+            // A scheduler deadline means heavy PTY damage is still being
+            // coalesced. It must take precedence over smooth-scroll and hot-mode
+            // ticks, otherwise either periodic source can present a partially
+            // parsed TUI frame before the defer interval expires.
+            if !decision.blocks_periodic_redraw() {
+                if self.config.scrollback.smooth && state.smooth_scroll.is_animating() {
                     let next_frame_at = state.next_hot_frame_at.unwrap_or(now);
                     if now >= next_frame_at {
                         redraw_ids.push(*winit_id);
                         state.next_hot_frame_at = Some(now + FRAME_INTERVAL);
                     } else {
-                        earliest_deadline = Some(match earliest_deadline {
-                            Some(existing) => existing.min(next_frame_at),
-                            None => next_frame_at,
-                        });
+                        earliest_deadline = earlier_deadline(earliest_deadline, next_frame_at);
                     }
-                } else {
-                    state.hot_until = None;
-                    state.next_hot_frame_at = None;
                 }
-            }
-
-            let scheduler = &mut state.scheduler;
-            let decision: FrameDecision = scheduler.prepare_redraw(now, RedrawWork::default);
-            if let Some(deadline) = decision.wait_until {
-                earliest_deadline = Some(match earliest_deadline {
-                    Some(existing) => existing.min(deadline),
-                    None => deadline,
-                });
-            }
-            if decision.request_redraw {
-                redraw_ids.push(*winit_id);
+                if self.focused_window == Some(state.id)
+                    && let Some(hot_until) = state.hot_until
+                {
+                    if now < hot_until {
+                        let next_frame_at = state.next_hot_frame_at.unwrap_or(now);
+                        if now >= next_frame_at {
+                            redraw_ids.push(*winit_id);
+                            state.next_hot_frame_at = Some(now + FRAME_INTERVAL);
+                        } else {
+                            earliest_deadline = earlier_deadline(earliest_deadline, next_frame_at);
+                        }
+                    } else {
+                        state.hot_until = None;
+                        state.next_hot_frame_at = None;
+                    }
+                }
             }
         }
 
         for winit_id in redraw_ids {
             if let Some(state) = self.windows.get(&winit_id) {
                 state.renderer.window.request_redraw();
+            }
+        }
+
+        // Readiness on the listening socket only covers accepts. Once a client
+        // has connected, a request split across writes may otherwise remain
+        // buffered forever because later bytes do not wake the listener.
+        if self.ipc.as_ref().is_some_and(IpcServer::has_clients) {
+            self.process_ipc_actions(event_loop);
+            if self.ipc.as_ref().is_some_and(IpcServer::has_clients) {
+                earliest_deadline =
+                    earlier_deadline(earliest_deadline, now + IPC_CLIENT_POLL_INTERVAL);
             }
         }
 
@@ -1500,7 +1605,7 @@ fn drain_pty(state: &mut GpuWindowState) -> usize {
     }
 
     let mut total = 0;
-    loop {
+    while total < MAX_PTY_BYTES_PER_EVENT {
         match state.pty.try_read(&mut state.pty_buf) {
             Ok(0) => break,
             Ok(n) => {
@@ -1528,7 +1633,7 @@ fn drain_pty(state: &mut GpuWindowState) -> usize {
         if let Some(b64_data) = state.terminal.take_osc52_clipboard()
             && let Ok(decoded) = base64_decode(&b64_data)
         {
-            copy_to_clipboard(&decoded);
+            let _ = copy_to_clipboard(&decoded);
         }
     }
 
@@ -1567,5 +1672,44 @@ mod tests {
         );
 
         assert!(delta_rows >= 1.0);
+    }
+
+    #[test]
+    fn dpi_from_scale_factor_matches_96_dpi_convention() {
+        assert_eq!(dpi_from_scale_factor(1.0), 96);
+        assert_eq!(dpi_from_scale_factor(2.0), 192);
+        assert_eq!(dpi_from_scale_factor(1.5), 144);
+        // Fractional scales truncate, matching the host's historical behavior so
+        // the atlas-cache key for a given display does not shift.
+        assert_eq!(dpi_from_scale_factor(2.0 + 1.0 / 96.0), 193);
+        // Degenerate scales never collapse to zero DPI.
+        assert_eq!(dpi_from_scale_factor(0.0), 1);
+    }
+
+    #[test]
+    fn monitor_scale_factor_prefers_primary_when_usable() {
+        assert_eq!(
+            monitor_scale_factor(Some(2.0), vec![1.0, 3.0]),
+            Some(2.0),
+            "primary monitor scale should win"
+        );
+    }
+
+    #[test]
+    fn monitor_scale_factor_falls_back_to_first_usable_available() {
+        // No/invalid primary -> first finite, positive available scale is used.
+        assert_eq!(monitor_scale_factor(None, vec![1.5, 2.0]), Some(1.5));
+        assert_eq!(monitor_scale_factor(Some(0.0), vec![2.0]), Some(2.0));
+        assert_eq!(
+            monitor_scale_factor(Some(f64::NAN), vec![0.0, -1.0, 1.25]),
+            Some(1.25)
+        );
+    }
+
+    #[test]
+    fn monitor_scale_factor_returns_none_when_no_display() {
+        // Headless: nothing usable -> caller falls back to a probe window.
+        assert_eq!(monitor_scale_factor(None, Vec::<f64>::new()), None);
+        assert_eq!(monitor_scale_factor(Some(-1.0), vec![0.0]), None);
     }
 }

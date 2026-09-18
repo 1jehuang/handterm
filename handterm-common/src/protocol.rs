@@ -115,7 +115,8 @@ pub struct KittyImageData {
 pub struct KittyImagePlacement {
     pub image_id: u32,
     pub col: u16,
-    pub row: u16,
+    /// Signed live-relative anchor. Peers must use the same wire revision.
+    pub row: i64,
     pub cols: u16,
     pub rows: u16,
 }
@@ -801,7 +802,7 @@ pub fn encode_server_message(message: &ServerMessage) -> Result<Vec<u8>> {
             placements,
         } => {
             let images_bytes: usize = images.iter().map(|i| i.data.len() + 18).sum();
-            let mut buf = Vec::with_capacity(20 + images_bytes + placements.len() * 12);
+            let mut buf = Vec::with_capacity(20 + images_bytes + placements.len() * 18);
             buf.push(8);
             put_u32(&mut buf, *window_id);
             put_u64(&mut buf, *generation);
@@ -816,7 +817,7 @@ pub fn encode_server_message(message: &ServerMessage) -> Result<Vec<u8>> {
             for placement in placements {
                 put_u32(&mut buf, placement.image_id);
                 put_u16(&mut buf, placement.col);
-                put_u16(&mut buf, placement.row);
+                put_u64(&mut buf, placement.row as u64);
                 put_u16(&mut buf, placement.cols);
                 put_u16(&mut buf, placement.rows);
             }
@@ -907,7 +908,7 @@ pub fn decode_server_message(bytes: &[u8]) -> Result<ServerMessage> {
                 placements.push(KittyImagePlacement {
                     image_id: r.u32()?,
                     col: r.u16()?,
-                    row: r.u16()?,
+                    row: r.u64()? as i64,
                     cols: r.u16()?,
                     rows: r.u16()?,
                 });
@@ -1826,5 +1827,25 @@ mod tests {
             bincode::serialize(&server).unwrap().len(),
             varint.serialize(&server).unwrap().len(),
         );
+    }
+
+    #[test]
+    fn kitty_image_state_signed_row_roundtrips() {
+        for row in [i64::MIN, -100_000, -1, 0, 65_536, i64::MAX] {
+            let message = ServerMessage::KittyImageState {
+                window_id: 1,
+                generation: 42,
+                images: vec![],
+                placements: vec![KittyImagePlacement {
+                    image_id: 7,
+                    col: 0,
+                    row,
+                    cols: 1,
+                    rows: 3,
+                }],
+            };
+            let bytes = encode_server_message(&message).unwrap();
+            assert_eq!(decode_server_message(&bytes).unwrap(), message);
+        }
     }
 }

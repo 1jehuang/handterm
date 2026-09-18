@@ -4,8 +4,7 @@ use crate::frontend::{ViewportScroll, VisualState, visual_signature};
 use crate::gpu_frame::{
     AtlasImageRect, CellInfo, CellInstance, FrameBatchStyle, FrameTextBatches, GlyphAtlasEntry,
     ImageInstance, append_scrollbar_overlay_instances, fill_cell_infos,
-    fill_cell_infos_with_scroll, fill_image_instances, fill_image_instances_with_viewport_offset,
-    fill_text_batches,
+    fill_cell_infos_with_scroll, fill_terminal_image_instances_with_scroll, fill_text_batches,
 };
 use crate::terminal::TerminalView;
 use anyhow::{Context, Result};
@@ -47,16 +46,33 @@ pub(crate) struct GpuImageEntry {
     height: u32,
 }
 
+/// Image IDs and pixel generations belong to a terminal, not the shared atlas.
+/// Each standalone window owns one terminal and one surface, so retain its
+/// lookup cache on that surface while sharing the texture and allocator.
+#[derive(Default)]
+struct SurfaceImageCache {
+    images: HashMap<u32, GpuImageEntry>,
+    generation: u64,
+}
+
+impl SurfaceImageCache {
+    fn get(&mut self, generation: u64, image_id: u32) -> Option<&GpuImageEntry> {
+        if self.generation != generation {
+            self.images.clear();
+            self.generation = generation;
+        }
+        self.images.get(&image_id)
+    }
+}
+
 pub struct SharedAtlasState {
     pub(crate) atlas_texture: wgpu::Texture,
     pub(crate) atlas_view: wgpu::TextureView,
     pub(crate) glyph_map: HashMap<u32, GpuGlyphEntry>,
     pub(crate) grapheme_map: HashMap<Box<str>, GpuGlyphEntry>,
-    pub(crate) image_map: HashMap<u32, GpuImageEntry>,
     pub(crate) atlas_cursor_x: u32,
     pub(crate) atlas_cursor_y: u32,
     pub(crate) atlas_row_height: u32,
-    pub(crate) last_kitty_generation: u64,
 }
 
 pub struct SharedGpuContext {
@@ -96,11 +112,9 @@ fn create_shared_atlas_state(device: &wgpu::Device) -> (SharedAtlasState, Durati
             atlas_view,
             glyph_map: HashMap::with_capacity(256),
             grapheme_map: HashMap::with_capacity(32),
-            image_map: HashMap::with_capacity(32),
             atlas_cursor_x: 0,
             atlas_cursor_y: 0,
             atlas_row_height: 0,
-            last_kitty_generation: 0,
         },
         start.elapsed(),
     )
@@ -141,6 +155,7 @@ pub struct GpuSurfaceState {
     frame_cells: Vec<CellInfo>,
     text_batches: FrameTextBatches,
     image_instances: Vec<ImageInstance>,
+    image_cache: SurfaceImageCache,
     pub last_visual_state: Option<VisualState>,
     pub last_presented_signature: Option<u64>,
     pub last_viewport_scroll_quantized: Option<u32>,
@@ -826,6 +841,7 @@ pub fn create_surface_state_for_window_with_shared_profiled_with_defaults(
                 overlay_instances: Vec::with_capacity(4),
             },
             image_instances: Vec::with_capacity(max_image_instances),
+            image_cache: SurfaceImageCache::default(),
             last_visual_state: None,
             last_presented_signature: None,
             last_viewport_scroll_quantized: None,
@@ -1096,52 +1112,36 @@ pub fn render_surface_state_profiled_with_scroll(
         );
     }
 
-    let image_placements = terminal.kitty_placements().to_vec();
     let mut image_instances = std::mem::take(&mut state.image_instances);
-    if viewport_scroll == ViewportScroll::ZERO {
-        fill_image_instances(
-            &image_placements,
-            cell_w,
-            cell_h,
-            &mut image_instances,
-            |placement| {
-                ensure_kitty_image_in_atlas(
-                    &mut atlas_state,
-                    &state.shared.queue,
-                    terminal,
-                    placement.image_id,
-                )
-                .map(|entry| AtlasImageRect {
-                    x: entry.x,
-                    y: entry.y,
-                    width: entry.width,
-                    height: entry.height,
-                })
-            },
-        );
-    } else {
-        fill_image_instances_with_viewport_offset(
-            &image_placements,
-            cell_w,
-            cell_h,
-            viewport_scroll.viewport_offset_y(cell_h),
-            &mut image_instances,
-            |placement| {
-                ensure_kitty_image_in_atlas(
-                    &mut atlas_state,
-                    &state.shared.queue,
-                    terminal,
-                    placement.image_id,
-                )
-                .map(|entry| AtlasImageRect {
-                    x: entry.x,
-                    y: entry.y,
-                    width: entry.width,
-                    height: entry.height,
-                })
-            },
-        );
-    }
+    let image_padding = config.window.padding_px(atlas.dpi()) as f32;
+    fill_terminal_image_instances_with_scroll(
+        terminal,
+        cell_w,
+        cell_h,
+        viewport_scroll,
+        [
+            -image_padding,
+            -image_padding,
+            state.surface_config.width as f32 - image_padding,
+            state.surface_config.height as f32 - image_padding,
+        ],
+        &mut image_instances,
+        |placement| {
+            ensure_kitty_image_in_atlas(
+                &mut atlas_state,
+                &mut state.image_cache,
+                &state.shared.queue,
+                terminal,
+                placement.image_id,
+            )
+            .map(|entry| AtlasImageRect {
+                x: entry.x,
+                y: entry.y,
+                width: entry.width,
+                height: entry.height,
+            })
+        },
+    );
     drop(atlas_state);
 
     state.frame_cells = frame_cells;
@@ -1498,18 +1498,17 @@ fn ensure_grapheme_in_atlas<'a>(
 }
 
 fn ensure_kitty_image_in_atlas<'a>(
-    atlas_state: &'a mut SharedAtlasState,
+    atlas_state: &mut SharedAtlasState,
+    image_cache: &'a mut SurfaceImageCache,
     queue: &wgpu::Queue,
     terminal: &impl TerminalView,
     image_id: u32,
 ) -> Option<&'a GpuImageEntry> {
-    if atlas_state.last_kitty_generation != terminal.kitty_generation() {
-        atlas_state.image_map.clear();
-        atlas_state.last_kitty_generation = terminal.kitty_generation();
-    }
-
-    if atlas_state.image_map.contains_key(&image_id) {
-        return atlas_state.image_map.get(&image_id);
+    if image_cache
+        .get(terminal.kitty_image_generation(), image_id)
+        .is_some()
+    {
+        return image_cache.images.get(&image_id);
     }
 
     let image = terminal.kitty_image(image_id)?;
@@ -1561,8 +1560,8 @@ fn ensure_kitty_image_in_atlas<'a>(
     };
     atlas_state.atlas_cursor_x += image.width + 1;
     atlas_state.atlas_row_height = atlas_state.atlas_row_height.max(image.height + 1);
-    atlas_state.image_map.insert(image_id, entry);
-    atlas_state.image_map.get(&image_id)
+    image_cache.images.insert(image_id, entry);
+    image_cache.images.get(&image_id)
 }
 
 fn select_surface_format(

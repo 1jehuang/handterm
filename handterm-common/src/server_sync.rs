@@ -84,7 +84,7 @@ pub fn kitty_placements_from_wire(placements: &[KittyImagePlacement]) -> Vec<Kit
         .map(|placement| KittyPlacement {
             image_id: placement.image_id,
             col: placement.col as usize,
-            row: placement.row as usize,
+            row: placement.row,
             cols: placement.cols as usize,
             rows: placement.rows as usize,
         })

@@ -21,9 +21,53 @@ pub struct KittyImage {
 pub struct KittyPlacement {
     pub image_id: u32,
     pub col: usize,
-    pub row: usize,
+    /// Live-screen-relative row. Negative anchors refer to retained main-screen history.
+    pub row: i64,
     pub cols: usize,
     pub rows: usize,
+}
+
+/// Allocation-free viewport projection. Items keep their full dimensions and may
+/// begin above or end below the viewport. Renderers resolve pixel sizes and clip,
+/// rather than clamping the origin (which would move/stretch the image).
+pub struct KittyViewportPlacements<'a> {
+    placements: std::slice::Iter<'a, KittyPlacement>,
+    scroll_offset: i64,
+}
+
+impl<'a> KittyViewportPlacements<'a> {
+    pub fn new(placements: &'a [KittyPlacement], scroll_offset: usize) -> Self {
+        Self {
+            placements: placements.iter(),
+            scroll_offset: i64::try_from(scroll_offset).unwrap_or(i64::MAX),
+        }
+    }
+}
+
+impl Iterator for KittyViewportPlacements<'_> {
+    type Item = KittyPlacement;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.placements.next().map(|placement| {
+            let mut projected = placement.clone();
+            projected.row = projected.row.saturating_add(self.scroll_offset);
+            projected
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.placements.size_hint()
+    }
+}
+
+impl ExactSizeIterator for KittyViewportPlacements<'_> {}
+
+impl KittyPlacement {
+    /// Exclusive bottom edge, saturating for caller-supplied extreme dimensions.
+    pub fn bottom_row(&self) -> i64 {
+        self.row
+            .saturating_add(i64::try_from(self.rows.max(1)).unwrap_or(i64::MAX))
+    }
 }
 
 #[derive(Debug, Clone, Default)]

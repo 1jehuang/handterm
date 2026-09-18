@@ -43,23 +43,51 @@ PNG/zlib decoding is bounded in space, not a promise of bounded UI latency.
 
 ## Placement behavior and compatibility
 
-Use `Terminal::kitty_placements()` or `TerminalView::kitty_placements()`, not the
-raw public vector, to paint the current viewport. Live placements move with
-linefeeds, automatic wrap, and scrolling regions, including reverse scrolling.
-A placement is removed when its anchor leaves the scrolling region. Image data
-remains available for another placement. Main-screen placements are hidden and
-saved on alternate-screen entry and restored on exit. Image IDs/data are shared
-between screens, so deletion or replacement also removes stale saved placements.
-Screen switches and placement movement invalidate `kitty_generation()`.
+`KittyPlacement::row` is a signed `i64` live-screen-relative anchor. Full-screen
+upward scrolling on the main screen moves both live and historical anchors, and
+retains placements while any of their rows overlap bounded text history. Region
+scrolling and alternate-screen scrolling do not create image history: placements
+whose anchors leave those regions are removed. Main-screen placements and the
+history viewport are saved on alternate-screen entry and restored on exit.
 
-Full Kitty scrollback anchoring and partial-image clipping are not implemented.
-Placements are entirely suppressed while `grid.scroll_offset != 0`, so live
-images do not float over historical text. Off-screen images are not restored by
-scrolling back. Viewport changes must trigger rendering even if the graphics
-generation did not change. For predictable size, supply explicit `c` and `r`:
-implicit pixel-to-cell sizing remains approximate because core has no font cell
-metrics. This remains a subset of Kitty graphics (direct RGB/RGBA/PNG uploads,
-zlib, basic placement/deletion), not complete protocol conformance.
+Paint with `Terminal::kitty_viewport_placements()` or the equivalent object-safe
+`TerminalView` method. This allocation-free iterator returns placement copies with
+`row + grid.scroll_offset`, preserving signed origins and full dimensions. It does
+not cull, clamp, or crop. Renderers must intersect the resulting geometry with the
+viewport and clip the image, including partial top/bottom overlap, without moving
+or stretching its origin. Smooth-scrolling renderers can use
+`kitty_viewport_placements_at_scroll(sample_offset)` and then apply their
+fractional pixel translation. `kitty_placements()` and the public vector expose
+raw anchors, never a hidden or projected slice. Viewport changes must trigger
+rendering even if graphics generation did not change.
+
+Resize truncates/pads each live and historical text row to the new column width,
+without reflow. It preserves history ring order, graphemes, viewport depth, and
+historical image anchors. Placements anchored beyond the new right/bottom live
+bounds are pruned. ED2 clears visible placements but retains fully historical
+ones. ED3 clears text history and prunes images that no longer overlap retained
+rows, leaving live text intact. Image IDs/data are shared between screens, so
+image deletion or replacement also removes stale saved placements. Last-reference
+history eviction releases the image pixels, but never-placed uploads and
+placement-only deletes retain reusable image data. Existing resource limits cover
+historical placements and saved main-screen placements together.
+
+`kitty_generation()` invalidates placement geometry and screen switches.
+`kitty_image_generation()` changes only when pixel storage changes (including
+reset), allowing image texture caches to skip hashing/uploading on pure scrolls.
+Custom `TerminalView` implementations may override its conservative default,
+which falls back to `kitty_generation()`.
+
+The binary `KittyImagePlacement::row` field is now signed 64-bit rather than
+unsigned 16-bit. Server/client peers must use matching revisions. Negative anchors
+are transmitted intact, not wrapped or clamped. The wire format still does not
+transmit text scrollback, so remote peers can only project history for which their
+own grid has matching text state.
+
+For predictable size, supply explicit `c` and `r`: implicit pixel-to-cell sizing
+remains approximate because core has no font cell metrics. This remains a subset
+of Kitty graphics (direct RGB/RGBA/PNG uploads, zlib, basic placement/deletion), not
+complete protocol conformance.
 
 `COLOR_DEFAULT` is now `0x4000_0000`, distinct from indexed black (`0`). RGB colors
 continue to use `COLOR_FLAG_RGB`. SGR 39/49/59 restore defaults. The xterm 256-color

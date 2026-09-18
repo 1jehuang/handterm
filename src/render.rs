@@ -617,7 +617,7 @@ fn draw_kitty_images(
     cell_w: usize,
     cell_h: usize,
 ) {
-    for placement in terminal.kitty_placements() {
+    for placement in terminal.kitty_viewport_placements() {
         let Some(image) = terminal.kitty_image(placement.image_id) else {
             continue;
         };
@@ -628,26 +628,30 @@ fn draw_kitty_images(
             continue;
         }
 
-        let px_x = placement.col * cell_w;
-        let px_y = placement.row * cell_h;
-        let px_w = placement.cols.max(1) * cell_w;
-        let px_h = placement.rows.max(1) * cell_h;
-        let draw_w = px_w.min(buf_w.saturating_sub(px_x));
-        let draw_h = px_h.min(buf_h.saturating_sub(px_y));
+        // Keep the original signed origin and full destination extent when
+        // sampling. Clipping the extent before scaling would stretch the image
+        // instead of revealing only the visible source pixels.
+        let px_x = placement.col as i128 * cell_w as i128;
+        let px_y = placement.row as i128 * cell_h as i128;
+        let px_w = placement.cols.max(1) as i128 * cell_w as i128;
+        let px_h = placement.rows.max(1) as i128 * cell_h as i128;
+        let x_start = px_x.clamp(0, buf_w as i128) as usize;
+        let y_start = px_y.clamp(0, buf_h as i128) as usize;
+        let x_end = (px_x + px_w).clamp(0, buf_w as i128) as usize;
+        let y_end = (px_y + px_h).clamp(0, buf_h as i128) as usize;
 
-        if draw_w == 0 || draw_h == 0 {
+        if x_start >= x_end || y_start >= y_end {
             continue;
         }
 
-        for dy in 0..draw_h {
-            let src_y = dy * image.height as usize / px_h.max(1);
-            let dst_y = px_y + dy;
+        for dst_y in y_start..y_end {
+            let src_y = ((dst_y as i128 - px_y) * image.height as i128 / px_h) as usize;
             let row_start = dst_y * buf_w;
 
-            for dx in 0..draw_w {
-                let src_x = dx * image.width as usize / px_w.max(1);
+            for dst_x in x_start..x_end {
+                let src_x = ((dst_x as i128 - px_x) * image.width as i128 / px_w) as usize;
                 let src_offset = (src_y * image.width as usize + src_x) * 4;
-                let pixel = &mut buffer[row_start + px_x + dx];
+                let pixel = &mut buffer[row_start + dst_x];
                 blend_rgba(pixel, &image.data[src_offset..src_offset + 4]);
             }
         }
@@ -671,6 +675,63 @@ mod tests {
 
     fn new_atlas(config: &AppConfig) -> GlyphAtlas {
         GlyphAtlas::new(config.style.font_size).expect("should load a monospace font for rendering")
+    }
+
+    fn stripe_image_terminal() -> Terminal {
+        let mut terminal = Terminal::new_with_scrollback(2, 3, 8);
+        // Four vertical source pixels: red, green, blue, white.
+        terminal.process(b"\x1b_Ga=T,i=7,f=32,s=1,v=4,c=1,r=1;/wAA/wD/AP8AAP///////w==\x1b\\");
+        terminal.kitty_placements[0].rows = 4;
+        terminal
+    }
+
+    #[test]
+    fn kitty_image_negative_top_and_bottom_crop_source_without_stretching() {
+        for (row, expected) in [
+            (
+                -1,
+                vec![0x00ff00, 0x00ff00, 0x0000ff, 0x0000ff, 0xffffff, 0xffffff],
+            ),
+            (1, vec![0, 0, 0xff0000, 0xff0000, 0x00ff00, 0x00ff00]),
+            (-4, vec![0; 6]),
+            (3, vec![0; 6]),
+        ] {
+            let mut terminal = stripe_image_terminal();
+            terminal.kitty_placements[0].row = row;
+            let mut pixels = vec![0; 6];
+            draw_kitty_images(&mut pixels, 1, 6, &terminal, 1, 2);
+            assert_eq!(pixels, expected, "image anchor row {row}");
+        }
+    }
+
+    #[test]
+    fn kitty_image_clips_both_edges_and_partial_destination_pixel_row() {
+        let mut terminal = stripe_image_terminal();
+        terminal.kitty_placements[0].row = -1;
+        let mut pixels = vec![0; 3];
+        draw_kitty_images(&mut pixels, 1, 3, &terminal, 1, 2);
+        assert_eq!(pixels, [0x00ff00, 0x00ff00, 0x0000ff]);
+    }
+
+    #[test]
+    fn kitty_image_cpu_scrollback_projection_restores_original_source_top() {
+        let mut terminal = stripe_image_terminal();
+        terminal.process(b"\x1b[3;1H\n");
+        assert_eq!(terminal.kitty_placements()[0].row, -1);
+        let mut pixels = vec![0; 6];
+        draw_kitty_images(&mut pixels, 1, 6, &terminal, 1, 2);
+        assert_eq!(
+            pixels,
+            [0x00ff00, 0x00ff00, 0x0000ff, 0x0000ff, 0xffffff, 0xffffff]
+        );
+
+        terminal.grid.scroll_offset = 1;
+        pixels.fill(0);
+        draw_kitty_images(&mut pixels, 1, 6, &terminal, 1, 2);
+        assert_eq!(
+            pixels,
+            [0xff0000, 0xff0000, 0x00ff00, 0x00ff00, 0x0000ff, 0x0000ff]
+        );
     }
 
     fn new_atlas_with_dpi(config: &AppConfig, dpi: u32) -> GlyphAtlas {

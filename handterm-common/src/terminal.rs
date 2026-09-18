@@ -1,7 +1,9 @@
 use crate::control_strings::{
     ApcEvent, ControlStringEvent, ControlStringState, DcsEvent, OscEvent, SixelEvent,
 };
-pub use crate::graphics::{KittyGraphicsCommand, KittyImage, KittyImageFinalize, KittyPlacement};
+pub use crate::graphics::{
+    KittyGraphicsCommand, KittyImage, KittyImageFinalize, KittyPlacement, KittyViewportPlacements,
+};
 use crate::graphics::{
     KittyUploadState, MAX_KITTY_IMAGE_STORAGE_BYTES, MAX_KITTY_IMAGES, MAX_KITTY_PAYLOAD_BYTES,
     MAX_KITTY_PLACEMENTS, decode_kitty_image_payload,
@@ -66,6 +68,7 @@ pub struct Terminal {
     saved_main_kitty_placements: Option<Vec<KittyPlacement>>,
     kitty_upload: KittyUploadState,
     kitty_generation: u64,
+    kitty_image_generation: u64,
     kitty_keyboard_main_flags: u8,
     kitty_keyboard_alt_flags: u8,
     kitty_keyboard_main_stack: Vec<u8>,
@@ -109,7 +112,18 @@ pub trait TerminalView {
     fn cursor_visible(&self) -> bool;
     fn cursor_style(&self) -> CursorStyle;
     fn kitty_generation(&self) -> u64;
+    /// Raw live-relative anchors, including negative rows in retained history.
     fn kitty_placements(&self) -> &[KittyPlacement];
+    fn kitty_image_generation(&self) -> u64 {
+        self.kitty_generation()
+    }
+    fn kitty_viewport_placements(&self) -> KittyViewportPlacements<'_> {
+        self.kitty_viewport_placements_at_scroll(self.grid().scroll_offset)
+    }
+    /// Explicit sample offset for renderers that apply fractional pixel scrolling.
+    fn kitty_viewport_placements_at_scroll(&self, offset: usize) -> KittyViewportPlacements<'_> {
+        KittyViewportPlacements::new(self.kitty_placements(), offset)
+    }
     fn kitty_image(&self, id: u32) -> Option<&KittyImage>;
     fn content_generation(&self) -> u64 {
         self.grid().generation()
@@ -149,6 +163,10 @@ impl TerminalView for Terminal {
 
     fn kitty_generation(&self) -> u64 {
         self.kitty_generation
+    }
+
+    fn kitty_image_generation(&self) -> u64 {
+        self.kitty_image_generation
     }
 
     fn kitty_placements(&self) -> &[KittyPlacement] {
@@ -204,6 +222,7 @@ impl Terminal {
             saved_main_kitty_placements: None,
             kitty_upload: KittyUploadState::default(),
             kitty_generation: 0,
+            kitty_image_generation: 0,
             kitty_keyboard_main_flags: 0,
             kitty_keyboard_alt_flags: 0,
             kitty_keyboard_main_stack: Vec::with_capacity(8),
@@ -236,12 +255,30 @@ impl Terminal {
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
-        self.cols = cols;
-        self.rows = rows;
+        self.sync_kitty_scroll();
+        self.cols = cols.max(1);
+        self.rows = rows.max(1);
         self.grid.resize(cols, rows);
-        if let Some(ref mut alt) = self.alt_grid {
-            alt.resize(cols, rows);
+        self.sync_kitty_scroll();
+        let mut evicted_images = Vec::new();
+        if let Some(ref mut main) = self.alt_grid {
+            main.resize(cols, rows);
+            if main.take_scroll_damage().is_some() {
+                if let Some(saved) = &mut self.saved_main_kitty_placements {
+                    saved.retain(|placement| {
+                        let keep = Self::placement_in_grid(placement, main);
+                        if !keep {
+                            evicted_images.push(placement.image_id);
+                        }
+                        keep
+                    });
+                    if !evicted_images.is_empty() {
+                        self.kitty_generation = self.kitty_generation.wrapping_add(1);
+                    }
+                }
+            }
         }
+        self.reclaim_evicted_kitty_images(evicted_images);
     }
 
     pub fn drain_responses(&mut self) -> Option<Vec<u8>> {
@@ -380,7 +417,17 @@ impl Terminal {
                 placements,
                 ..
             } => {
-                self.kitty_images = kitty_images_from_wire(images);
+                let images_changed = self.kitty_images.len() != images.len()
+                    || self.kitty_images.iter().zip(images).any(|(old, new)| {
+                        old.id != new.id
+                            || old.width != new.width
+                            || old.height != new.height
+                            || old.data != new.data
+                    });
+                if images_changed {
+                    self.kitty_images = kitty_images_from_wire(images);
+                    self.kitty_image_generation = self.kitty_image_generation.wrapping_add(1);
+                }
                 self.kitty_placements = kitty_placements_from_wire(placements);
                 self.kitty_generation = *generation;
                 self.grid.mark_all_dirty();
@@ -698,10 +745,11 @@ impl Terminal {
             (0, b'J') => match p.param(0, 0) {
                 0 => self.grid.erase_below(),
                 1 => self.grid.erase_above(),
-                2 | 3 => {
+                2 => {
                     self.grid.erase_all();
                     self.clear_visible_kitty_placements();
                 }
+                3 => self.grid.clear_scrollback(),
                 _ => {}
             },
             (0, b'K') => match p.param(0, 0) {
@@ -980,6 +1028,8 @@ impl Terminal {
                 let mut reset =
                     Self::new_with_scrollback(self.cols, self.rows, self.scrollback_limit);
                 reset.set_default_colors(self.default_foreground, self.default_background);
+                reset.kitty_generation = self.kitty_generation.wrapping_add(1);
+                reset.kitty_image_generation = self.kitty_image_generation.wrapping_add(1);
                 *self = reset;
             }
             (0, b'7') => self.save_cursor(),
@@ -1260,7 +1310,7 @@ impl Terminal {
                     self.kitty_placements.push(KittyPlacement {
                         image_id: img_id,
                         col,
-                        row,
+                        row: row as i64,
                         cols: if cols > 0 { cols as usize } else { 1 },
                         rows: if rows_param > 0 {
                             rows_param as usize
@@ -1359,13 +1409,14 @@ impl Terminal {
 
         self.delete_kitty_image(actual_id);
         self.kitty_images.push(image);
+        self.kitty_image_generation = self.kitty_image_generation.wrapping_add(1);
 
         if request.action == b'T' || request.action == 0 {
             let (col, row) = self.grid.cursor_pos();
             self.kitty_placements.push(KittyPlacement {
                 image_id: actual_id,
                 col,
-                row,
+                row: row as i64,
                 cols: if request.cols > 0 {
                     request.cols as usize
                 } else {
@@ -1430,6 +1481,9 @@ impl Terminal {
         let placements_before = self.kitty_placements.len();
         let images_before = self.kitty_images.len();
         self.kitty_images.retain(|i| i.id != img_id);
+        if self.kitty_images.len() != images_before {
+            self.kitty_image_generation = self.kitty_image_generation.wrapping_add(1);
+        }
         self.kitty_placements.retain(|p| p.image_id != img_id);
         if let Some(saved) = &mut self.saved_main_kitty_placements {
             saved.retain(|p| p.image_id != img_id);
@@ -1446,49 +1500,94 @@ impl Terminal {
         &self.kitty_images
     }
 
+    /// Raw live-relative anchors. Use the viewport iterator when painting.
     pub fn kitty_placements(&self) -> &[KittyPlacement] {
-        // Images currently have live-screen anchors, not scrollback anchors.
-        // Never float those live images over unrelated historical text.
-        if self.grid.scroll_offset == 0 {
-            &self.kitty_placements
-        } else {
-            &[]
-        }
+        &self.kitty_placements
+    }
+
+    pub fn kitty_viewport_placements(&self) -> KittyViewportPlacements<'_> {
+        self.kitty_viewport_placements_at_scroll(self.grid.scroll_offset)
+    }
+
+    pub fn kitty_viewport_placements_at_scroll(
+        &self,
+        offset: usize,
+    ) -> KittyViewportPlacements<'_> {
+        KittyViewportPlacements::new(self.kitty_placements(), offset)
     }
 
     pub fn kitty_generation(&self) -> u64 {
         self.kitty_generation
     }
 
+    /// Pixel-storage invalidation only. Placement/viewport/screen changes do not
+    /// require hashing or re-uploading the shared image data.
+    pub fn kitty_image_generation(&self) -> u64 {
+        self.kitty_image_generation
+    }
+
+    fn placement_in_grid(placement: &KittyPlacement, grid: &Grid) -> bool {
+        let oldest = -(i64::try_from(grid.scrollback_len()).unwrap_or(i64::MAX));
+        placement.bottom_row() > oldest
+            && placement.row < grid.rows as i64
+            && placement.col < grid.cols
+    }
+
     fn sync_kitty_scroll(&mut self) {
+        use crate::grid::ScrollDamage;
         let Some(damage) = self.grid.take_scroll_damage() else {
             return;
         };
-        if self.kitty_placements.is_empty() {
-            return;
-        }
         let mut changed = false;
+        let mut evicted_images = Vec::new();
+        let grid = &self.grid;
         self.kitty_placements.retain_mut(|placement| {
-            let crate::grid::ScrollDamage::Region { top, bottom, delta } = damage else {
-                changed = true;
-                return false;
+            let keep = match damage {
+                ScrollDamage::History { rows } => {
+                    placement.row = placement
+                        .row
+                        .saturating_sub(i64::try_from(rows).unwrap_or(i64::MAX));
+                    changed = true;
+                    Self::placement_in_grid(placement, grid)
+                }
+                ScrollDamage::Region { top, bottom, delta } => {
+                    if placement.row < top as i64 || placement.row >= bottom as i64 {
+                        return true;
+                    }
+                    changed = true;
+                    placement.row = placement.row.saturating_add(delta as i64);
+                    placement.row >= top as i64 && placement.row < bottom as i64
+                }
+                ScrollDamage::Prune => Self::placement_in_grid(placement, grid),
+                ScrollDamage::Clear => false,
             };
-            if placement.row < top || placement.row >= bottom {
-                return true;
+            if !keep && matches!(damage, ScrollDamage::History { .. } | ScrollDamage::Prune) {
+                evicted_images.push(placement.image_id);
             }
-            changed = true;
-            let Some(row) = placement.row.checked_add_signed(delta) else {
-                return false;
-            };
-            if row < top || row >= bottom {
-                return false;
-            }
-            placement.row = row;
-            true
+            changed |= !keep;
+            keep
         });
+        self.reclaim_evicted_kitty_images(evicted_images);
         if changed {
             self.kitty_generation = self.kitty_generation.wrapping_add(1);
             self.grid.mark_all_dirty();
+        }
+    }
+
+    fn reclaim_evicted_kitty_images(&mut self, mut evicted_images: Vec<u32>) {
+        // Only images whose placements were evicted are candidates. In particular,
+        // never-placed uploads and placement-only deletes remain reusable.
+        evicted_images.sort_unstable();
+        evicted_images.dedup();
+        for id in evicted_images {
+            let still_placed = self
+                .kitty_placements
+                .iter()
+                .chain(self.saved_main_kitty_placements.iter().flatten())
+                .any(|placement| placement.image_id == id);
+            if !still_placed {
+                self.delete_kitty_image(id);
+            }
         }
     }
 
@@ -1526,9 +1625,13 @@ impl Terminal {
         if self.kitty_placements.is_empty() {
             return;
         }
-        self.kitty_placements.clear();
-        self.kitty_generation = self.kitty_generation.wrapping_add(1);
-        self.grid.mark_all_dirty();
+        let before = self.kitty_placements.len();
+        self.kitty_placements
+            .retain(|placement| placement.bottom_row() <= 0);
+        if self.kitty_placements.len() != before {
+            self.kitty_generation = self.kitty_generation.wrapping_add(1);
+            self.grid.mark_all_dirty();
+        }
     }
 
     fn current_kitty_keyboard_flags_mut(&mut self) -> &mut u8 {
@@ -2432,7 +2535,7 @@ mod tests {
     }
 
     #[test]
-    fn kitty_placements_follow_linefeeds_and_disappear_when_scrolled_off() {
+    fn kitty_placements_follow_linefeeds_into_history() {
         let mut t = Terminal::new(8, 4);
         t.process(b"\x1b[3;1H\x1b_Ga=T,i=7,s=1,v=1;/wAA/w==\x1b\\");
         let generation = t.kitty_generation();
@@ -2440,11 +2543,10 @@ mod tests {
         assert_eq!(t.kitty_placements()[0].row, 1);
         assert_ne!(t.kitty_generation(), generation);
         t.process(b"\n\n");
-        assert!(t.kitty_placements().is_empty());
-        assert!(
-            t.kitty_image(7).is_some(),
-            "scrolling removes placement, not reusable image data"
-        );
+        assert_eq!(t.kitty_placements()[0].row, -1);
+        assert!(t.kitty_image(7).is_some());
+        t.grid.scroll_offset = 1;
+        assert_eq!(t.kitty_viewport_placements().next().unwrap().row, 0);
     }
 
     #[test]
@@ -2476,13 +2578,14 @@ mod tests {
     }
 
     #[test]
-    fn kitty_live_placements_are_not_projected_over_scrollback() {
+    fn kitty_live_placements_project_below_historical_viewport() {
         let mut t = Terminal::new(8, 4);
         t.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
         t.process(b"\x1b_Ga=T,i=7,s=1,v=1;/wAA/w==\x1b\\");
         t.grid.scroll_offset = 1;
-        assert!(t.kitty_placements().is_empty());
-        assert!(TerminalView::kitty_placements(&t).is_empty());
+        assert_eq!(t.kitty_placements()[0].row, 3);
+        assert_eq!(TerminalView::kitty_placements(&t)[0].row, 3);
+        assert_eq!(t.kitty_viewport_placements().next().unwrap().row, 4);
         t.grid.scroll_offset = 0;
         assert_eq!(t.kitty_placements().len(), 1);
         t.process(b"\x1b[?1049h\n\n\n\n\n\x1b[?1049l");
@@ -3090,5 +3193,224 @@ mod tests {
         assert!(modes.in_alt_screen);
         assert_eq!(modes.mouse_mode, 2);
         assert_eq!(modes.kitty_keyboard_flags, 5);
+    }
+
+    #[test]
+    fn kitty_history_partial_edges_and_eviction_follow_text_retention() {
+        let mut t = Terminal::new_with_scrollback(8, 4, 2);
+        t.process(b"\x1b_Ga=T,i=7,s=1,v=1,c=2,r=3;/wAA/w==\x1b\\");
+        let pixels = t.kitty_image_generation();
+        t.process(b"\x1b[4;1H\n\n\n\n");
+        assert_eq!(t.grid.scrollback_len(), 2);
+        assert_eq!(t.kitty_placements()[0].row, -4);
+        t.grid.scroll_offset = 2;
+        let projected = t.kitty_viewport_placements().next().unwrap();
+        assert_eq!((projected.row, projected.rows), (-2, 3));
+        assert_eq!(t.kitty_image_generation(), pixels);
+        t.process(b"\n"); // Bottom edge now equals oldest retained text row.
+        assert!(t.kitty_placements().is_empty());
+        assert!(t.kitty_image(7).is_none());
+        assert_ne!(t.kitty_image_generation(), pixels);
+    }
+
+    #[test]
+    fn kitty_history_scroll_count_is_not_clamped_to_screen_height() {
+        let mut t = Terminal::new_with_scrollback(2, 2, 32);
+        t.process(b"\x1b_Ga=T,i=7,s=1,v=1;/wAA/w==\x1b\\");
+        t.process(b"abcdefghijklmnopqrstuvwx");
+        assert_eq!(t.grid.scrollback_len(), 10);
+        assert_eq!(t.kitty_placements()[0].row, -10);
+        let view: &dyn TerminalView = &t;
+        assert_eq!(
+            view.kitty_viewport_placements_at_scroll(11)
+                .next()
+                .unwrap()
+                .row,
+            1
+        );
+        assert_eq!(
+            t.kitty_placements()[0].row,
+            -10,
+            "projection must not mutate raw anchors"
+        );
+    }
+
+    #[test]
+    fn kitty_region_and_alt_scrolling_never_create_image_history() {
+        let mut t = Terminal::new_with_scrollback(8, 4, 16);
+        t.process(b"\x1b_Ga=T,i=7,s=1,v=1,r=3;/wAA/w==\x1b\\");
+        t.process(b"\x1b[1;3r\x1b[S");
+        assert_eq!(t.grid.scrollback_len(), 0);
+        assert!(t.kitty_placements().is_empty());
+        t.process(b"\x1b[?1049h\x1b_Ga=p,i=7,r=3\x1b\\\x1b[4;1H\n");
+        assert_eq!(t.grid.scrollback_len(), 0);
+        assert!(t.kitty_placements().is_empty());
+        assert!(
+            t.kitty_image(7).is_some(),
+            "non-history removal preserves reusable uploads"
+        );
+        t.process(b"\x1b[?1049l");
+        assert!(t.kitty_placements().is_empty());
+    }
+
+    #[test]
+    fn kitty_history_survives_region_scroll_reverse_index_and_alt_screen() {
+        let mut t = Terminal::new_with_scrollback(8, 4, 16);
+        t.process(b"\x1b_Ga=T,i=7,s=1,v=1;/wAA/w==\x1b\\\x1b[4;1H\n");
+        assert_eq!(t.kitty_placements()[0].row, -1);
+        t.process(b"\x1b[2;3r\x1b[S\x1b[T\x1b[1;1H\x1bM");
+        assert_eq!(t.kitty_placements()[0].row, -1);
+        t.grid.scroll_offset = 1;
+        t.process(b"\x1b[?1049h\x1b[4;1H\n\n\n\x1b[?1049l");
+        assert_eq!(t.grid.scroll_offset, 1);
+        assert_eq!(t.kitty_viewport_placements().next().unwrap().row, 0);
+    }
+
+    #[test]
+    fn kitty_ed2_preserves_history_ed3_clears_history_not_live_text() {
+        let mut t = Terminal::new_with_scrollback(8, 4, 16);
+        t.process(b"\x1b_Ga=T,i=7,s=1,v=1;/wAA/w==\x1b\\\x1b[4;1H\n");
+        t.process(b"\x1b_Ga=T,i=8,s=1,v=1;/wAA/w==\x1b\\\x1b[2J");
+        assert_eq!(t.kitty_placements().len(), 1);
+        assert_eq!(t.kitty_placements()[0].image_id, 7);
+        assert_eq!(t.grid.scrollback_len(), 1);
+        t.process(b"\x1b[1;1Hlive\x1b_Ga=p,i=8\x1b\\");
+        t.grid.scroll_offset = 1;
+        t.process(b"\x1b[3J");
+        assert_eq!(t.grid.scrollback_len(), 0);
+        assert_eq!(t.grid.scroll_offset, 0);
+        assert_eq!(t.grid.cell_char(0, 0), 'l');
+        assert_eq!(t.kitty_placements().len(), 1);
+        assert_eq!(t.kitty_placements()[0].image_id, 8);
+        assert!(t.kitty_image(7).is_none());
+    }
+
+    #[test]
+    fn kitty_eviction_only_reclaims_last_reference_not_unplaced_uploads() {
+        let mut t = Terminal::new_with_scrollback(8, 4, 1);
+        t.process(b"\x1b_Ga=T,i=7,s=1,v=1;/wAA/w==\x1b\\");
+        t.process(b"\x1b[4;1H\x1b_Ga=p,i=7\x1b\\");
+        t.process(b"\x1b_Ga=t,i=8,s=1,v=1;/wAA/w==\x1b\\\n\n");
+        assert_eq!(t.kitty_placements().len(), 1);
+        assert_eq!(t.kitty_placements()[0].row, 1);
+        assert!(t.kitty_image(7).is_some());
+        assert!(t.kitty_image(8).is_some());
+        t.process(b"\n\n\n");
+        assert!(t.kitty_image(7).is_none());
+        assert!(t.kitty_image(8).is_some());
+    }
+
+    #[test]
+    fn kitty_history_delete_and_retransmit_remove_saved_anchors() {
+        for command in [
+            b"\x1b_Ga=d,d=i,i=7\x1b\\".as_slice(),
+            b"\x1b_Ga=t,i=7,s=1,v=1;AP8A/w==\x1b\\".as_slice(),
+        ] {
+            let mut t = Terminal::new_with_scrollback(8, 4, 4);
+            t.process(b"\x1b_Ga=T,i=7,s=1,v=1;/wAA/w==\x1b\\\x1b[4;1H\n\x1b[?1049h");
+            t.process(command);
+            t.process(b"\x1b[?1049l");
+            assert!(t.kitty_placements().is_empty());
+        }
+    }
+
+    #[test]
+    fn kitty_resize_preserves_history_and_prunes_lost_live_anchors() {
+        let mut t = Terminal::new_with_scrollback(8, 4, 4);
+        t.process(b"\x1b_Ga=T,i=7,s=1,v=1;/wAA/w==\x1b\\\x1b[4;1H\n");
+        t.process(b"\x1b_Ga=p,i=7\x1b\\\x1b[1;8H\x1b_Ga=p,i=7\x1b\\");
+        t.grid.scroll_offset = 1;
+        t.resize(8, 4);
+        assert_eq!(t.kitty_placements().len(), 3);
+        t.resize(6, 3);
+        assert_eq!(t.grid.scrollback_len(), 1);
+        assert_eq!(t.grid.scroll_offset, 1);
+        assert_eq!(t.kitty_placements().len(), 1);
+        assert_eq!(t.kitty_placements()[0].row, -1);
+        t.process(b"\x1b[?1049h");
+        t.resize(10, 5);
+        t.process(b"\x1b[?1049l");
+        assert_eq!(t.grid.scrollback_len(), 1);
+        assert_eq!(t.kitty_viewport_placements().next().unwrap().row, 0);
+    }
+
+    #[test]
+    fn kitty_pixel_generation_ignores_geometry_but_survives_reset_same_batch() {
+        let mut t = Terminal::new_with_scrollback(8, 4, 4);
+        t.process(b"\x1b_Ga=T,i=7,s=1,v=1;/wAA/w==\x1b\\");
+        let pixels = t.kitty_image_generation();
+        t.process(b"\x1b[4;1H\n\x1b_Ga=p,i=7\x1b\\\x1b[?1049h\x1b[?1049l");
+        t.grid.scroll_offset = 1;
+        assert_eq!(t.kitty_image_generation(), pixels);
+        t.process(b"\x1b_Ga=d,d=a\x1b\\");
+        assert_eq!(t.kitty_image_generation(), pixels);
+        assert!(t.kitty_image(7).is_some());
+        t.process(b"\x1bc\x1b_Ga=T,i=7,s=1,v=1;AP8A/w==\x1b\\");
+        assert_ne!(t.kitty_image_generation(), pixels);
+        assert_eq!(t.kitty_image(7).unwrap().data, [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn kitty_wire_negative_anchors_and_image_generation() {
+        use crate::protocol::{KittyImageData, KittyImagePlacement};
+        let mut t = Terminal::new(8, 4);
+        let mut message = ServerMessage::KittyImageState {
+            window_id: 1,
+            generation: 1,
+            images: vec![KittyImageData {
+                id: 7,
+                width: 1,
+                height: 1,
+                data: vec![255, 0, 0, 255],
+            }],
+            placements: vec![KittyImagePlacement {
+                image_id: 7,
+                col: 0,
+                row: -3,
+                cols: 1,
+                rows: 4,
+            }],
+        };
+        t.apply_server_message(&message);
+        let pixels = t.kitty_image_generation();
+        assert_eq!(t.kitty_placements()[0].row, -3);
+        if let ServerMessage::KittyImageState {
+            placements,
+            generation,
+            ..
+        } = &mut message
+        {
+            placements[0].row = -4;
+            *generation += 1;
+        }
+        t.apply_server_message(&message);
+        assert_eq!(t.kitty_image_generation(), pixels);
+        assert_eq!(t.kitty_placements()[0].row, -4);
+    }
+
+    #[test]
+    fn kitty_resize_reclaims_saved_orphans_but_preserves_shared_screen_images() {
+        let mut t = Terminal::new_with_scrollback(8, 4, 4);
+        t.process(b"\x1b[1;8H\x1b_Ga=T,i=7,s=1,v=1;/wAA/w==\x1b\\");
+        t.process(b"\x1b[?1049h\x1b_Ga=p,i=7\x1b\\");
+        t.resize(4, 4); // Saved main anchor is lost, alternate placement remains.
+        assert!(t.kitty_image(7).is_some());
+        assert_eq!(t.kitty_placements().len(), 1);
+        t.process(b"\x1b[?1049l");
+        assert!(t.kitty_placements().is_empty());
+
+        t.process(b"\x1b[1;4H\x1b_Ga=p,i=7\x1b\\\x1b[?1049h");
+        t.resize(2, 4); // No remaining reference on either screen.
+        assert!(t.kitty_image(7).is_none());
+        t.process(b"\x1b[?1049l");
+        assert!(t.kitty_placements().is_empty());
+    }
+
+    #[test]
+    fn kitty_zero_history_limit_never_keeps_negative_anchors() {
+        let mut t = Terminal::new_with_scrollback(8, 4, 0);
+        t.process(b"\x1b_Ga=T,i=7,s=1,v=1,r=3;/wAA/w==\x1b\\\x1b[4;1H\n");
+        assert_eq!(t.grid.scrollback_len(), 0);
+        assert!(t.kitty_placements().is_empty());
     }
 }

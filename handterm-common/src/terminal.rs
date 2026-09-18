@@ -46,6 +46,8 @@ pub struct Terminal {
     pub title: Option<String>,
     control_strings: ControlStringState,
     response_buf: Vec<u8>,
+    default_foreground: [u8; 3],
+    default_background: [u8; 3],
     saved_cursor: Option<(usize, usize)>,
     mode_bracketed_paste: bool,
     mode_focus_events: bool,
@@ -182,6 +184,8 @@ impl Terminal {
             title: None,
             control_strings: ControlStringState::default(),
             response_buf: Vec::new(),
+            default_foreground: [0xcd, 0xd6, 0xf4],
+            default_background: [0x00, 0x00, 0x00],
             saved_cursor: None,
             mode_bracketed_paste: false,
             mode_focus_events: false,
@@ -209,6 +213,17 @@ impl Terminal {
 
     pub fn scrollback_limit(&self) -> usize {
         self.scrollback_limit
+    }
+
+    /// Set the embedder's default RGB colors reported by OSC 10/11 queries.
+    ///
+    /// Defaults are foreground `#cdd6f4` and background `#000000`. These settings
+    /// survive terminal resets (RIS) and can be updated when the theme changes.
+    /// Cells retain their default-color markers; the embedder must use the same
+    /// colors when rendering them. Explicit SGR colors are not changed.
+    pub fn set_default_colors(&mut self, foreground: [u8; 3], background: [u8; 3]) {
+        self.default_foreground = foreground;
+        self.default_background = background;
     }
 
     /// Set the frontend-controlled blink phase without changing the terminal's
@@ -962,7 +977,10 @@ impl Terminal {
                 self.grid.line_feed();
             }
             (0, b'c') => {
-                *self = Self::new(self.cols, self.rows);
+                let mut reset =
+                    Self::new_with_scrollback(self.cols, self.rows, self.scrollback_limit);
+                reset.set_default_colors(self.default_foreground, self.default_background);
+                *self = reset;
             }
             (0, b'7') => self.save_cursor(),
             (0, b'8') => self.restore_cursor(),
@@ -991,13 +1009,15 @@ impl Terminal {
                     }
                 }
                 b"1" => {}
-                b"10" if payload == b"?" => {
-                    self.response_buf
-                        .extend_from_slice(b"\x1b]10;rgb:cd/d6/f4\x1b\\");
-                }
-                b"11" if payload == b"?" => {
-                    self.response_buf
-                        .extend_from_slice(b"\x1b]11;rgb:00/00/00\x1b\\");
+                b"10" | b"11" if payload == b"?" => {
+                    let (command, [r, g, b]) = if cmd == b"10" {
+                        (10, self.default_foreground)
+                    } else {
+                        (11, self.default_background)
+                    };
+                    self.response_buf.extend_from_slice(
+                        format!("\x1b]{command};rgb:{r:02x}/{g:02x}/{b:02x}\x1b\\").as_bytes(),
+                    );
                 }
                 b"52" => {
                     if let Some(semi2) = payload.iter().position(|&b| b == b';') {

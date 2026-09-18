@@ -32,9 +32,62 @@ pub enum ControlStringEvent {
 
 const CONTROL_STRING_EVENT_LIMIT: usize = 256;
 
-fn push_bounded<T>(queue: &mut Vec<T>, value: T) {
-    if queue.len() >= CONTROL_STRING_EVENT_LIMIT {
-        queue.remove(0);
+// Each mirrored queue has its own budget. Count-only bounds retained up to
+// hundreds of MiB of 1 MiB APC/DCS events when an embedder did not drain them.
+const CONTROL_STRING_BYTE_LIMIT: usize = 4 * 1024 * 1024;
+
+trait EventBytes {
+    fn allocated_bytes(&self) -> usize;
+}
+
+impl EventBytes for SixelEvent {
+    fn allocated_bytes(&self) -> usize {
+        self.payload.capacity()
+    }
+}
+impl EventBytes for DcsEvent {
+    fn allocated_bytes(&self) -> usize {
+        match self {
+            Self::Generic(data) => data.capacity(),
+            Self::Sixel(event) => event.allocated_bytes(),
+        }
+    }
+}
+impl EventBytes for ApcEvent {
+    fn allocated_bytes(&self) -> usize {
+        match self {
+            Self::Generic(data) | Self::KittyGraphics(data) | Self::Latex(data) => data.capacity(),
+        }
+    }
+}
+impl EventBytes for OscEvent {
+    fn allocated_bytes(&self) -> usize {
+        match self {
+            Self::Raw(raw) => raw.capacity(),
+            Self::Title { raw, title } => raw.capacity().saturating_add(title.capacity()),
+            Self::Clipboard { raw, data } => raw.capacity().saturating_add(data.capacity()),
+        }
+    }
+}
+impl EventBytes for ControlStringEvent {
+    fn allocated_bytes(&self) -> usize {
+        match self {
+            Self::Osc(event) => event.allocated_bytes(),
+            Self::Dcs(event) => event.allocated_bytes(),
+            Self::Apc(event) => event.allocated_bytes(),
+        }
+    }
+}
+
+fn push_bounded<T: EventBytes>(queue: &mut Vec<T>, value: T) {
+    let bytes = value.allocated_bytes();
+    if bytes > CONTROL_STRING_BYTE_LIMIT {
+        return;
+    }
+    let mut retained: usize = queue.iter().map(EventBytes::allocated_bytes).sum();
+    while queue.len() >= CONTROL_STRING_EVENT_LIMIT || retained > CONTROL_STRING_BYTE_LIMIT - bytes
+    {
+        retained -= queue.remove(0).allocated_bytes();
     }
     queue.push(value);
 }
@@ -140,6 +193,35 @@ impl ControlStringState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_budget_bounds_large_events_in_every_mirrored_queue() {
+        let mut state = ControlStringState::default();
+        for value in 0..8 {
+            state.push_apc(ApcEvent::KittyGraphics(vec![value; 1024 * 1024]));
+            state.push_dcs(DcsEvent::Sixel(SixelEvent {
+                payload: vec![value; 1024 * 1024],
+            }));
+            state.push_osc(OscEvent::Raw(vec![value; 1024 * 1024]));
+        }
+        fn check<T: EventBytes>(queue: &[T]) {
+            assert!(!queue.is_empty());
+            assert!(
+                queue.iter().map(EventBytes::allocated_bytes).sum::<usize>()
+                    <= CONTROL_STRING_BYTE_LIMIT
+            );
+        }
+        check(&state.apc_events);
+        check(&state.dcs_events);
+        check(&state.sixel_events);
+        check(&state.osc_events);
+        check(&state.control_string_events);
+        let events = state.drain_apc();
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0], ApcEvent::KittyGraphics(vec![4; 1024 * 1024]));
+        state.push_apc(ApcEvent::Generic(vec![0; CONTROL_STRING_BYTE_LIMIT + 1]));
+        assert!(state.drain_apc().is_empty());
+    }
 
     #[test]
     fn take_returns_none_when_empty() {

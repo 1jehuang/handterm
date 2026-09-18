@@ -36,7 +36,9 @@ pub enum UnderlineStyle {
     Dashed = 5,
 }
 
-pub const COLOR_DEFAULT: u32 = 0;
+/// Default theme color, distinct from every indexed color (including black).
+/// Serialized cells must be exchanged with peers using the same encoding.
+pub const COLOR_DEFAULT: u32 = 0x4000_0000;
 pub const COLOR_FLAG_RGB: u32 = 0x8000_0000;
 
 pub const ATTR_BOLD: u8 = 0x01;
@@ -186,6 +188,19 @@ fn clone_optional_slice<T: Clone>(slice: &mut [Option<T>], src: usize, dest: usi
     }
 }
 
+/// Bounded damage record for overlays. Terminal consumes this between actions.
+/// Mixed direct Grid operations conservatively invalidate overlays instead of
+/// accumulating an unbounded queue of scroll events.
+#[derive(Clone, Copy)]
+pub(crate) enum ScrollDamage {
+    Region {
+        top: usize,
+        bottom: usize,
+        delta: isize,
+    },
+    Clear,
+}
+
 pub struct Grid {
     pub cols: usize,
     pub rows: usize,
@@ -214,6 +229,7 @@ pub struct Grid {
     dirty: Vec<u64>,
     pub all_dirty: bool,
     generation: u64,
+    scroll_damage: Option<ScrollDamage>,
     scrollback: Vec<Cell>,
     scrollback_graphemes: Vec<Option<Box<str>>>,
     scrollback_len: usize,
@@ -272,6 +288,7 @@ impl Grid {
             dirty: vec![!0u64; dirty_words],
             all_dirty: true,
             generation: 1,
+            scroll_damage: None,
             scrollback: Vec::new(),
             scrollback_graphemes: Vec::new(),
             scrollback_len: 0,
@@ -328,6 +345,34 @@ impl Grid {
 
     pub fn cursor_pos(&self) -> (usize, usize) {
         (self.cursor_col, self.cursor_row)
+    }
+
+    pub(crate) fn take_scroll_damage(&mut self) -> Option<ScrollDamage> {
+        self.scroll_damage.take()
+    }
+
+    fn record_scroll(&mut self, delta: isize) {
+        let top = self.scroll_top;
+        let bottom = self.scroll_bottom;
+        self.scroll_damage = Some(match self.scroll_damage {
+            None => ScrollDamage::Region { top, bottom, delta },
+            Some(ScrollDamage::Region {
+                top: old_top,
+                bottom: old_bottom,
+                delta: old_delta,
+            }) if top == old_top
+                && bottom == old_bottom
+                && delta.signum() == old_delta.signum() =>
+            {
+                let height = bottom.saturating_sub(top) as isize;
+                ScrollDamage::Region {
+                    top,
+                    bottom,
+                    delta: old_delta.saturating_add(delta).clamp(-height, height),
+                }
+            }
+            _ => ScrollDamage::Clear,
+        });
     }
 
     #[inline(always)]
@@ -850,6 +895,7 @@ impl Grid {
 
     #[inline(always)]
     fn scroll_up_ring(&mut self) {
+        self.record_scroll(-1);
         let cols = self.cols;
         let old_top = self.top_row;
         let blank_start = old_top * cols;
@@ -1336,6 +1382,7 @@ impl Grid {
         if self.rows == 0 || self.cols == 0 {
             return;
         }
+        self.record_scroll(-1);
 
         if self.scroll_top == 0 && self.scroll_bottom == self.rows {
             let old_top = self.physical_row(0);
@@ -1374,6 +1421,7 @@ impl Grid {
         if self.rows == 0 || self.cols == 0 {
             return;
         }
+        self.record_scroll(1);
 
         let cols = self.cols;
         let has_graphemes = self.has_graphemes;

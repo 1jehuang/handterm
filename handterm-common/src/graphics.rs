@@ -1,3 +1,14 @@
+/// Per-upload base64 bytes, including all continuation chunks.
+pub const MAX_KITTY_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
+/// Maximum normalized RGBA size of one image.
+pub const MAX_KITTY_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+/// Bounds compressed PNG containers as well as raw zlib output.
+pub const MAX_KITTY_DECOMPRESSED_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_KITTY_IMAGE_STORAGE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_KITTY_IMAGES: usize = 1024;
+/// Shared by active and saved main-screen placements.
+pub const MAX_KITTY_PLACEMENTS: usize = 4096;
+
 #[derive(Debug, Clone)]
 pub struct KittyImage {
     pub id: u32,
@@ -24,6 +35,12 @@ pub struct KittyUploadState {
     pub pending_height: u32,
     pub pending_compression: Option<u8>,
     pub more_chunks: bool,
+    pub pending_action: u8,
+    pub pending_cols: u32,
+    pub pending_rows: u32,
+    pub pending_quiet: u8,
+    /// Discard continuations after exceeding the upload limit until m=0.
+    pub discarding: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -49,6 +66,7 @@ pub struct KittyGraphicsCommand {
 pub enum KittyImageDecodeError {
     InvalidBase64,
     InvalidDimensions,
+    ResourceLimit,
     UnexpectedPayloadLength { expected: usize, actual: usize },
     UnsupportedFormat(u32),
     UnsupportedCompression(u8),
@@ -62,6 +80,7 @@ impl std::fmt::Display for KittyImageDecodeError {
         match self {
             Self::InvalidBase64 => f.write_str("invalid kitty image base64 payload"),
             Self::InvalidDimensions => f.write_str("kitty image dimensions must be non-zero"),
+            Self::ResourceLimit => f.write_str("kitty image resource limit exceeded"),
             Self::UnexpectedPayloadLength { expected, actual } => write!(
                 f,
                 "kitty image payload length mismatch: expected {expected} bytes, got {actual}"
@@ -88,6 +107,16 @@ pub fn decode_kitty_image_payload(
     width: u32,
     height: u32,
 ) -> Result<(u32, u32, Vec<u8>), KittyImageDecodeError> {
+    if payload.len() > MAX_KITTY_PAYLOAD_BYTES {
+        return Err(KittyImageDecodeError::ResourceLimit);
+    }
+    match format {
+        24 | 32 => {
+            checked_rgba_size(width, height)?;
+        }
+        100 => {}
+        _ => return Err(KittyImageDecodeError::UnsupportedFormat(format)),
+    }
     let decoded = base64_decode_kitty(payload)?;
     let decoded = decompress_kitty_payload(decoded, compression)?;
     match format {
@@ -123,11 +152,25 @@ pub fn decode_kitty_image_payload(
                     actual: decoded.len(),
                 });
             }
-            Ok((width, height, decoded))
+            // Padding/newlines and zlib growth can leave a tiny image backed
+            // by a much larger allocation. Do not retain that spare capacity
+            // in the image store, whose quota counts normalized pixel bytes.
+            Ok((width, height, decoded.into_boxed_slice().into_vec()))
         }
         100 => decode_png_kitty(&decoded),
         _ => Err(KittyImageDecodeError::UnsupportedFormat(format)),
     }
+}
+
+fn checked_rgba_size(width: u32, height: u32) -> Result<usize, KittyImageDecodeError> {
+    if width == 0 || height == 0 {
+        return Err(KittyImageDecodeError::InvalidDimensions);
+    }
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .filter(|&bytes| bytes <= MAX_KITTY_IMAGE_BYTES)
+        .ok_or(KittyImageDecodeError::ResourceLimit)
 }
 
 fn base64_decode_kitty(input: &[u8]) -> Result<Vec<u8>, KittyImageDecodeError> {
@@ -172,10 +215,20 @@ fn base64_decode_kitty(input: &[u8]) -> Result<Vec<u8>, KittyImageDecodeError> {
 
 fn decode_png_kitty(encoded_png: &[u8]) -> Result<(u32, u32, Vec<u8>), KittyImageDecodeError> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(encoded_png));
+    decoder.set_limits(png::Limits {
+        bytes: MAX_KITTY_DECOMPRESSED_BYTES,
+    });
+    // Metadata is not rendered and can itself contain compressed payloads.
+    decoder.set_ignore_text_chunk(true);
+    decoder.set_ignore_iccp_chunk(true);
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder
         .read_info()
         .map_err(|_| KittyImageDecodeError::InvalidPng)?;
+    checked_rgba_size(reader.info().width, reader.info().height)?;
+    if reader.output_buffer_size() > MAX_KITTY_IMAGE_BYTES {
+        return Err(KittyImageDecodeError::ResourceLimit);
+    }
     let mut buf = vec![0u8; reader.output_buffer_size()];
     let info = reader
         .next_frame(&mut buf)
@@ -218,10 +271,15 @@ fn decompress_kitty_payload(
     match compression {
         None => Ok(decoded),
         Some(b'z') => {
-            let mut decoder = flate2::read::ZlibDecoder::new(decoded.as_slice());
+            use std::io::Read;
+            let mut decoder = flate2::read::ZlibDecoder::new(decoded.as_slice())
+                .take(MAX_KITTY_DECOMPRESSED_BYTES as u64 + 1);
             let mut out = Vec::new();
             std::io::Read::read_to_end(&mut decoder, &mut out)
                 .map_err(|_| KittyImageDecodeError::DecompressionFailed)?;
+            if out.len() > MAX_KITTY_DECOMPRESSED_BYTES {
+                return Err(KittyImageDecodeError::ResourceLimit);
+            }
             Ok(out)
         }
         Some(compression) => Err(KittyImageDecodeError::UnsupportedCompression(compression)),
@@ -279,6 +337,65 @@ mod tests {
                 .expect("png data should write");
         }
         out
+    }
+
+    #[test]
+    fn rgba_images_do_not_retain_padding_capacity() {
+        let mut payload = vec![b'='; 1024 * 1024];
+        payload.extend_from_slice(b"/wAA/w==");
+        let (_, _, rgba) = decode_kitty_image_payload(32, None, &payload, 1, 1).unwrap();
+        assert_eq!(rgba, [255, 0, 0, 255]);
+        assert_eq!(rgba.capacity(), rgba.len());
+    }
+
+    #[test]
+    fn rejects_oversized_base64_before_decoding() {
+        let payload = vec![b'A'; MAX_KITTY_PAYLOAD_BYTES + 1];
+        assert_eq!(
+            decode_kitty_image_payload(32, None, &payload, 1, 1),
+            Err(KittyImageDecodeError::ResourceLimit)
+        );
+    }
+
+    #[test]
+    fn normalized_rgba_size_is_checked_even_for_rgb_and_grayscale() {
+        assert_eq!(checked_rgba_size(2048, 2048), Ok(MAX_KITTY_IMAGE_BYTES));
+        assert_eq!(
+            checked_rgba_size(2048, 2049),
+            Err(KittyImageDecodeError::ResourceLimit)
+        );
+        assert_eq!(
+            decode_kitty_image_payload(24, None, b"", 2048, 2049),
+            Err(KittyImageDecodeError::ResourceLimit)
+        );
+        // A tiny container advertises a huge grayscale frame. Reject before
+        // allocating either its frame buffer or its four-times-larger RGBA copy.
+        let mut png_bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png_bytes, 8192, 8192);
+            encoder.set_color(png::ColorType::Grayscale);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_chunk(png::chunk::IDAT, &[]).unwrap();
+        }
+        assert_eq!(
+            decode_kitty_image_payload(100, None, &base64_encode(&png_bytes), 0, 0),
+            Err(KittyImageDecodeError::ResourceLimit)
+        );
+    }
+
+    #[test]
+    fn zlib_bomb_is_bounded_including_compressed_png_containers() {
+        let compressed = zlib_compress(&vec![0; MAX_KITTY_DECOMPRESSED_BYTES + 1]);
+        let payload = base64_encode(&compressed);
+        assert!(payload.len() < 128 * 1024);
+        assert_eq!(
+            decode_kitty_image_payload(100, Some(b'z'), &payload, 0, 0),
+            Err(KittyImageDecodeError::ResourceLimit)
+        );
+        assert_eq!(
+            decode_kitty_image_payload(32, Some(b'z'), &payload, 1, 1),
+            Err(KittyImageDecodeError::ResourceLimit)
+        );
     }
 
     #[test]
@@ -455,17 +572,11 @@ mod tests {
         let payload = base64_encode(&[1, 2, 3]);
         assert_eq!(
             decode_kitty_image_payload(24, None, &payload, u32::MAX, u32::MAX),
-            Err(KittyImageDecodeError::UnexpectedPayloadLength {
-                expected: usize::MAX,
-                actual: 3,
-            })
+            Err(KittyImageDecodeError::ResourceLimit)
         );
         assert_eq!(
             decode_kitty_image_payload(32, None, &payload, u32::MAX, u32::MAX),
-            Err(KittyImageDecodeError::UnexpectedPayloadLength {
-                expected: usize::MAX,
-                actual: 3,
-            })
+            Err(KittyImageDecodeError::ResourceLimit)
         );
     }
 

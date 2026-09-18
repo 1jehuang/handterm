@@ -1,8 +1,11 @@
+pub mod color;
 pub mod control_strings;
 pub mod graphics;
 pub mod grid;
+pub mod input;
 pub mod latex;
 pub mod parser;
 pub mod protocol;
 pub mod server_sync;
 pub mod terminal;
+pub mod visual;

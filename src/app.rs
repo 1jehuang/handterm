@@ -112,6 +112,7 @@ struct HostWindowState {
     recent_text_key_event: Option<RecentTextKeyEvent>,
     mouse_col: usize,
     mouse_row: usize,
+    pinch_remainder: f64,
     selecting: bool,
     cursor_blink: CursorBlinkState,
     last_visual_state: Option<VisualState>,
@@ -462,6 +463,7 @@ impl HandtermApp {
                 recent_text_key_event: None,
                 mouse_col: 0,
                 mouse_row: 0,
+                pinch_remainder: 0.0,
                 selecting: false,
                 cursor_blink: CursorBlinkState::new(Instant::now(), true),
                 last_visual_state: None,
@@ -1148,6 +1150,20 @@ impl ApplicationHandler<AppEvent> for HandtermApp {
                                     state.terminal.grid.scroll_offset.saturating_sub(delta);
                             }
                             state.scheduler.mark_redraw_needed();
+                        }
+                    }
+                    WindowEvent::PinchGesture { delta, .. } => {
+                        // Reported as Ctrl+wheel so TUIs can treat a trackpad
+                        // pinch as zoom. Only macOS emits this in winit 0.30.
+                        let bytes = crate::frontend::pinch_to_mouse_reports(
+                            &state.terminal,
+                            &mut state.pinch_remainder,
+                            delta,
+                            state.mouse_col,
+                            state.mouse_row,
+                        );
+                        if !bytes.is_empty() {
+                            let _ = state.pty.write_all(&bytes);
                         }
                     }
                     WindowEvent::Focused(focused) => {

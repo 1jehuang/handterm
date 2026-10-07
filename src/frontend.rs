@@ -1052,6 +1052,38 @@ pub fn scrollback_wheel_delta(lines: usize) -> usize {
     lines.saturating_mul(SCROLLBACK_WHEEL_STEP_MULTIPLIER)
 }
 
+/// Pinch scale change that produces one Ctrl+wheel notch.
+const PINCH_STEP: f64 = 0.1;
+
+/// Terminal protocols have no pinch event, so a trackpad pinch is reported to
+/// mouse-reporting apps as Ctrl+wheel, the de facto zoom gesture TUIs handle.
+/// `remainder` carries sub-notch scale between events. Returns the encoded
+/// reports, or nothing when the app has not enabled mouse reporting.
+pub fn pinch_to_mouse_reports(
+    terminal: &crate::terminal::Terminal,
+    remainder: &mut f64,
+    scale_delta: f64,
+    col: usize,
+    row: usize,
+) -> Vec<u8> {
+    if terminal.mouse_mode == crate::terminal::MouseMode::Off || !scale_delta.is_finite() {
+        *remainder = 0.0;
+        return Vec::new();
+    }
+    *remainder += scale_delta / PINCH_STEP;
+    let notches = remainder.trunc() as i32;
+    *remainder -= f64::from(notches);
+    let mut bytes = Vec::new();
+    for _ in 0..notches.unsigned_abs().min(20) {
+        // Wheel up (64) zooms in, wheel down (65) zooms out. 16 is Ctrl.
+        let button = if notches > 0 { 64 } else { 65 } | 16;
+        if let Some(report) = terminal.encode_mouse(button, col, row, true) {
+            bytes.extend_from_slice(&report);
+        }
+    }
+    bytes
+}
+
 pub fn normalize_ime_dedupe_text(text: &str) -> Option<String> {
     if text.is_empty() {
         return None;
@@ -1228,6 +1260,27 @@ mod tests {
     use super::*;
     use crate::terminal::Terminal;
 
+    #[test]
+    fn pinch_reports_ctrl_wheel_notches_with_carried_remainder() {
+        let mut terminal = Terminal::new(20, 5);
+        let mut remainder = 0.0;
+        assert!(pinch_to_mouse_reports(&terminal, &mut remainder, 0.5, 2, 1).is_empty());
+        terminal.process(b"\x1b[?1000h\x1b[?1006h");
+        assert_eq!(
+            pinch_to_mouse_reports(&terminal, &mut remainder, 0.25, 2, 1),
+            b"\x1b[<80;3;2M\x1b[<80;3;2M"
+        );
+        assert_eq!(
+            pinch_to_mouse_reports(&terminal, &mut remainder, 0.05, 2, 1),
+            b"\x1b[<80;3;2M"
+        );
+        assert_eq!(
+            pinch_to_mouse_reports(&terminal, &mut remainder, -0.1, 2, 1),
+            b"\x1b[<81;3;2M"
+        );
+        assert!(pinch_to_mouse_reports(&terminal, &mut remainder, f64::NAN, 2, 1).is_empty());
+        assert_eq!(remainder, 0.0);
+    }
     #[test]
     fn visual_damage_marks_previous_and_current_cursor_cells() {
         let mut terminal = Terminal::new(4, 2);

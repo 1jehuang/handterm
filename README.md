@@ -329,8 +329,21 @@ input is shown as its original source instead of disappearing.
 
 Requires Wayland, FreeType, and Fontconfig.
 
+### With Nix (flakes)
+
 ```bash
-# From source
+nix run github:levonk/handterm
+```
+
+Or install permanently:
+
+```bash
+nix profile install github:levonk/handterm
+```
+
+### From source
+
+```bash
 cargo install --path .
 
 # Or build directly
